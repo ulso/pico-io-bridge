@@ -544,11 +544,13 @@ fn write_can_frame_json(out: &mut String<256>, ty: &str, ok: bool, tx: CanTx) {
         tx.dlc
     );
 
-    for i in 0..tx.dlc as usize {
-        if i > 0 {
-            let _ = core::write!(out, ",");
+    if !tx.rtr {
+        for i in 0..tx.dlc as usize {
+            if i > 0 {
+                let _ = core::write!(out, ",");
+            }
+            let _ = core::write!(out, "{}", tx.data[i]);
         }
-        let _ = core::write!(out, "{}", tx.data[i]);
     }
 
     let _ = core::write!(out, "]}}");
