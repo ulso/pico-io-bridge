@@ -1,1 +1,26 @@
-/target
+# Rust build output
+/target/
+
+# Embedded/generated firmware artifacts
+*.bin
+*.elf
+*.hex
+*.map
+*.uf2
+
+# Debug/probe tools
+*.probe-rs
+*.rtt
+
+# Python local files
+__pycache__/
+*.py[cod]
+.python-version
+.venv/
+venv/
+
+# Editor and OS noise
+.DS_Store
+*.swp
+*.swo
+*~
