@@ -39,12 +39,9 @@ use static_cell::StaticCell;
 use {defmt_rtt as _, panic_probe as _};
 
 #[cfg(feature = "mdns")]
-use core::{
-    convert::Infallible,
-    net::{Ipv4Addr, Ipv6Addr},
-};
+use core::{convert::Infallible, net::Ipv4Addr};
 #[cfg(feature = "mdns")]
-use embassy_net::{IpAddress, Ipv6Address};
+use embassy_net::IpAddress;
 #[cfg(feature = "mdns")]
 use embassy_net::udp::{PacketMetadata, UdpSocket};
 #[cfg(feature = "mdns")]
@@ -206,30 +203,6 @@ fn link_local_from_seed(seed: &[u8]) -> [u8; 4] {
     let host = (hash % (254 * 256)) as u16;
 
     [169, 254, 1 + (host / 256) as u8, (host & 0xff) as u8]
-}
-
-#[cfg(feature = "mdns")]
-fn ipv6_link_local_from_mac(mac: [u8; 6]) -> Ipv6Addr {
-    let mut eui = [0u8; 8];
-    eui[0] = mac[0] ^ 0x02;
-    eui[1] = mac[1];
-    eui[2] = mac[2];
-    eui[3] = 0xff;
-    eui[4] = 0xfe;
-    eui[5] = mac[3];
-    eui[6] = mac[4];
-    eui[7] = mac[5];
-
-    Ipv6Addr::new(
-        0xfe80,
-        0,
-        0,
-        0,
-        u16::from_be_bytes([eui[0], eui[1]]),
-        u16::from_be_bytes([eui[2], eui[3]]),
-        u16::from_be_bytes([eui[4], eui[5]]),
-        u16::from_be_bytes([eui[6], eui[7]]),
-    )
 }
 
 fn sha1(data: &[u8]) -> [u8; 20] {
@@ -1010,11 +983,6 @@ async fn mdns_task(stack: Stack<'static>, state: &'static MdnsState<MdnsRng>) {
     stack
         .join_multicast_group(IpAddress::v4(224, 0, 0, 251))
         .unwrap();
-    stack
-        .join_multicast_group(IpAddress::Ipv6(Ipv6Address::new(
-            0xff02, 0, 0, 0, 0, 0, 0, 0x00fb,
-        )))
-        .unwrap();
 
     let mut socket = UdpSocket::new(stack, rx_meta, rx_buf, tx_meta, tx_buf);
     socket.bind(5353).unwrap();
@@ -1177,7 +1145,6 @@ async fn main(spawner: Spawner) {
                 device_ipv4_octets[2],
                 device_ipv4_octets[3],
             ));
-            records.add_aaaa(ipv6_link_local_from_mac(DEVICE_MAC));
 
             match mdns.register_service(ServiceSpec::new(records)) {
                 Ok(_) => {
