@@ -789,6 +789,22 @@ async fn write_all(
     Ok(())
 }
 
+async fn write_http_response(
+    socket: &mut TcpSocket<'_>,
+    content_type: &str,
+    body: &[u8],
+) -> Result<(), embassy_net::tcp::Error> {
+    let mut header = String::<128>::new();
+    let _ = core::write!(
+        header,
+        "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nConnection: close\r\nContent-Length: {}\r\n\r\n",
+        content_type,
+        body.len()
+    );
+    write_all(socket, header.as_bytes()).await?;
+    write_all(socket, body).await
+}
+
 async fn serve_http_connection(
     socket: &mut TcpSocket<'_>,
     rx_buf: &mut [u8],
@@ -824,6 +840,7 @@ async fn serve_http_connection(
             write_all(socket, b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ").await?;
             write_all(socket, &accept).await?;
             write_all(socket, b"\r\n\r\n").await?;
+            socket.set_timeout(None);
             websocket_loop(socket, rx_buf).await?;
         } else {
             write_all(
@@ -835,12 +852,54 @@ async fn serve_http_connection(
     } else if request.starts_with("GET /api/status ") {
         const BODY: &[u8] =
             br#"{"device":"pico-can-bridge-rs","network":"cdc-ncm","websocket":"/can"}"#;
-        write_all(socket, b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: 70\r\n\r\n").await?;
-        write_all(socket, BODY).await?;
+        write_http_response(socket, "application/json", BODY).await?;
     } else {
-        const BODY: &[u8] = b"pico-can-bridge-rs\n\n/api/status\n/can\n/ws\n";
-        write_all(socket, b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nConnection: close\r\nContent-Length: 41\r\n\r\n").await?;
-        write_all(socket, BODY).await?;
+        const BODY: &[u8] = br#"<!doctype html>
+<html>
+<head>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Pico CAN Bridge</title>
+<style>
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;margin:24px;line-height:1.4;background:#f7f7f8;color:#1f2328}
+h1{font-size:24px;margin:0 0 16px}
+button{font:inherit;margin:0 8px 8px 0;padding:10px 14px;border:1px solid #b7bcc4;border-radius:6px;background:#fff}
+button:active{background:#e8eef8}
+#state{margin:12px 0;font-weight:600}
+pre{white-space:pre-wrap;background:#111827;color:#d1fae5;padding:12px;border-radius:6px;min-height:160px}
+</style>
+</head>
+<body>
+<h1>Pico CAN Bridge</h1>
+<div>
+<button onclick="sendStatus()">Status</button>
+<button onclick="led(1)">LED on</button>
+<button onclick="led(0)">LED off</button>
+<button onclick="rtr()">RTR poll</button>
+</div>
+<div id="state">Connecting...</div>
+<pre id="log"></pre>
+<script>
+let ws;
+const logEl=document.getElementById("log");
+const stateEl=document.getElementById("state");
+function log(s){logEl.textContent+=s+"\n";logEl.scrollTop=logEl.scrollHeight}
+function connect(){
+  ws=new WebSocket("ws://"+location.host+"/can");
+  ws.onopen=()=>{stateEl.textContent="Connected";sendStatus()};
+  ws.onclose=()=>{stateEl.textContent="Disconnected";setTimeout(connect,1000)};
+  ws.onerror=()=>{stateEl.textContent="WebSocket error"};
+  ws.onmessage=e=>log(e.data);
+}
+function send(o){if(ws&&ws.readyState===1)ws.send(JSON.stringify(o))}
+function sendStatus(){send({type:"can.status"})}
+function led(v){send({type:"can.tx",bus:0,id:291,ext:false,rtr:false,dlc:1,data:[v]})}
+function rtr(){send({type:"can.tx",bus:0,id:291,ext:false,rtr:true,dlc:1,data:[]})}
+connect();
+</script>
+</body>
+</html>
+"#;
+        write_http_response(socket, "text/html", BODY).await?;
     }
 
     Ok(())
