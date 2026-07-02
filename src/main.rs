@@ -4,10 +4,12 @@
 #![no_main]
 
 use core::fmt::Write;
+use core::task::Context;
 use defmt::*;
 use embassy_executor::Spawner;
 use embassy_futures::select::{Either, select};
 use embassy_net::tcp::TcpSocket;
+use embassy_net::driver::{Capabilities, Driver as NetDriver, HardwareAddress, LinkState};
 use embassy_net::{
     Config as NetConfig, ConfigV6, Ipv4Address, Ipv4Cidr, Ipv6Address, Ipv6Cidr, Stack,
     StackResources, StaticConfigV4, StaticConfigV6,
@@ -37,6 +39,7 @@ use mcp25xx::bitrates::clock_16mhz::{
 use mcp25xx::embedded_can::{ExtendedId, Frame, Id, StandardId};
 use mcp25xx::registers::{OperationMode, RXB0CTRL, RXB1CTRL, RXM};
 use mcp25xx::{CanFrame, Config as McpConfig, MCP25xx};
+use portable_atomic::{AtomicU32, Ordering};
 use static_cell::StaticCell;
 use {defmt_rtt as _, panic_probe as _};
 
@@ -49,7 +52,9 @@ use embassy_net::udp::{PacketMetadata, UdpSocket};
 #[cfg(feature = "mdns")]
 use hick_embassy::MdnsState;
 #[cfg(feature = "mdns")]
-use mdns_proto::{EndpointConfig, Name, ServiceRecords, ServiceSpec};
+use mdns_proto::{
+    EndpointConfig, Name, ServiceHandle, ServiceRecords, ServiceSpec, ServiceUpdate,
+};
 #[cfg(feature = "mdns")]
 use rand_core::TryRng;
 
@@ -61,7 +66,83 @@ const HTTP_SOCKETS: usize = 3;
 const WS_TIMEOUT: Duration = Duration::from_secs(20);
 const WS_KEEPALIVE: Duration = Duration::from_secs(5);
 const CDC_NCM_LINK_UP_TIMEOUT: Duration = Duration::from_secs(6);
+#[cfg(feature = "mdns")]
+const MDNS_HOST_SETTLE_DELAY: Duration = Duration::from_secs(3);
+// The responder re-broadcasts unsolicited announcements at 80% of the record
+// TTL. Announcements sent while the host is still configuring the fresh
+// interface are lost, so keep the TTL short enough that the next broadcast
+// arrives within seconds, not minutes.
+#[cfg(feature = "mdns")]
+const MDNS_TTL_SECS: u32 = 25;
 const CDC_NCM_LINK_UP_RESET_MISSES: u8 = 2;
+// A healthy host floods a fresh interface with NDP/mDNS within a second or
+// two of link-up. Total silence means its NCM driver missed the one-shot
+// NetworkConnection notification and considers the link down; only a USB
+// re-enumeration makes embassy-usb send that notification again.
+const HOST_SILENCE_TIMEOUT: Duration = Duration::from_secs(8);
+const HOST_SILENCE_RESET_MAGIC: u32 = 0xCAFE_0000;
+const HOST_SILENCE_RESET_LIMIT: u32 = 3;
+
+static NET_RX_PACKETS: AtomicU32 = AtomicU32::new(0);
+
+/// embassy-net device wrapper that counts received frames, so the main loop
+/// can tell a live host from one that missed the NCM link-up notification.
+struct CountingDevice<D> {
+    inner: D,
+}
+
+impl<D: NetDriver> NetDriver for CountingDevice<D> {
+    type RxToken<'a>
+        = D::RxToken<'a>
+    where
+        Self: 'a;
+    type TxToken<'a>
+        = D::TxToken<'a>
+    where
+        Self: 'a;
+
+    fn receive(&mut self, cx: &mut Context) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
+        let tokens = self.inner.receive(cx);
+        if tokens.is_some() {
+            NET_RX_PACKETS.fetch_add(1, Ordering::Relaxed);
+        }
+        tokens
+    }
+
+    fn transmit(&mut self, cx: &mut Context) -> Option<Self::TxToken<'_>> {
+        self.inner.transmit(cx)
+    }
+
+    fn link_state(&mut self, cx: &mut Context) -> LinkState {
+        self.inner.link_state(cx)
+    }
+
+    fn capabilities(&self) -> Capabilities {
+        self.inner.capabilities()
+    }
+
+    fn hardware_address(&self) -> HardwareAddress {
+        self.inner.hardware_address()
+    }
+}
+
+/// Reset counter kept in a watchdog scratch register (survives sys_reset,
+/// cleared on power-on), capping host-silence re-enumeration attempts so a
+/// genuinely silent host cannot cause an endless reset loop.
+fn host_silence_reset_count() -> u32 {
+    let value = embassy_rp::pac::WATCHDOG.scratch0().read();
+    if value & 0xFFFF_0000 == HOST_SILENCE_RESET_MAGIC {
+        value & 0xFFFF
+    } else {
+        0
+    }
+}
+
+fn set_host_silence_reset_count(count: u32) {
+    embassy_rp::pac::WATCHDOG
+        .scratch0()
+        .write_value(HOST_SILENCE_RESET_MAGIC | (count & 0xFFFF));
+}
 #[cfg(feature = "mdns")]
 const HEAP_SIZE: usize = 32768;
 
@@ -366,6 +447,20 @@ fn websocket_accept_key(key: &str, out: &mut [u8; 28]) {
     base64_20(&digest, out);
 }
 
+#[cfg(feature = "mdns")]
+fn build_mdns_records(ipv4: [u8; 4], ipv6: Ipv6Address) -> ServiceRecords {
+    let mut records = ServiceRecords::new(
+        Name::try_from_str("_http._tcp.local.").unwrap(),
+        Name::try_from_str("Pico CAN Bridge._http._tcp.local.").unwrap(),
+        Name::try_from_str("pico-can-bridge.local.").unwrap(),
+        HTTP_PORT,
+        MDNS_TTL_SECS,
+    );
+    records.add_a(Ipv4Addr::new(ipv4[0], ipv4[1], ipv4[2], ipv4[3]));
+    records.add_aaaa(ipv6);
+    records
+}
+
 fn can_mode_name(mode: CanMode) -> &'static str {
     match mode {
         CanMode::Normal => "normal",
@@ -662,7 +757,9 @@ async fn ncm_task(runner: cdc_ncm::embassy_net::Runner<'static, Driver<'static, 
 }
 
 #[embassy_executor::task]
-async fn net_task(mut runner: embassy_net::Runner<'static, NcmDevice<'static, MTU>>) {
+async fn net_task(
+    mut runner: embassy_net::Runner<'static, CountingDevice<NcmDevice<'static, MTU>>>,
+) {
     runner.run().await;
 }
 
@@ -1190,7 +1287,7 @@ async fn main(spawner: Spawner) {
 
     static NET_RESOURCES: StaticCell<StackResources<8>> = StaticCell::new();
     let (stack, net_runner) = embassy_net::new(
-        ncm_device,
+        CountingDevice { inner: ncm_device },
         net_config,
         NET_RESOURCES.init(StackResources::new()),
         0x1234_5678,
@@ -1216,7 +1313,9 @@ async fn main(spawner: Spawner) {
         .unwrap();
 
     #[cfg(feature = "mdns")]
-    let mut mdns_started = false;
+    let mut mdns_state: Option<&'static MdnsState<MdnsRng>> = None;
+    #[cfg(feature = "mdns")]
+    let mut mdns_service: Option<ServiceHandle> = None;
     let mut link_ever_up = false;
     let mut link_watchdog_misses = 0;
 
@@ -1253,37 +1352,78 @@ async fn main(spawner: Spawner) {
         );
         uart.blocking_write(b"CDC-NCM link up\r\n").unwrap();
 
+        // Wait for proof the host can hear us; a deaf host needs a fresh USB
+        // enumeration to see the NCM connection notification again.
+        let rx_before = NET_RX_PACKETS.load(Ordering::Relaxed);
+        let mut host_alive = false;
+        let mut waited = Duration::from_millis(0);
+        while stack.is_link_up() && waited < HOST_SILENCE_TIMEOUT {
+            if NET_RX_PACKETS.load(Ordering::Relaxed) != rx_before {
+                host_alive = true;
+                break;
+            }
+            Timer::after(Duration::from_millis(250)).await;
+            waited += Duration::from_millis(250);
+        }
+
+        if host_alive {
+            set_host_silence_reset_count(0);
+            uart.blocking_write(b"host traffic seen\r\n").unwrap();
+        } else if stack.is_link_up() {
+            let resets = host_silence_reset_count();
+            if resets < HOST_SILENCE_RESET_LIMIT {
+                set_host_silence_reset_count(resets + 1);
+                warn!("host silent after link-up, forcing USB re-enumeration");
+                uart.blocking_write(b"host silent, re-enumerating (reset)\r\n")
+                    .unwrap();
+                uart.blocking_flush().unwrap();
+                cortex_m::peripheral::SCB::sys_reset();
+            } else {
+                warn!("host still silent, reset limit reached, staying up");
+                uart.blocking_write(b"host silent, reset limit reached\r\n")
+                    .unwrap();
+            }
+        } else {
+            // Link dropped while we were probing for host traffic.
+            continue;
+        }
+
         #[cfg(feature = "mdns")]
-        if !mdns_started {
-            uart.blocking_write(b"mDNS starting\r\n").unwrap();
+        {
+            let mdns = match mdns_state {
+                Some(mdns) => mdns,
+                None => {
+                    uart.blocking_write(b"mDNS starting\r\n").unwrap();
 
-            static MDNS_STATE: StaticCell<MdnsState<MdnsRng>> = StaticCell::new();
+                    static MDNS_STATE: StaticCell<MdnsState<MdnsRng>> = StaticCell::new();
 
-            let mdns = MDNS_STATE.init(MdnsState::new(
-                EndpointConfig::new(),
-                MdnsRng::new(0x7069_636f_6361_6e01),
-            ));
-
-            let mut records = ServiceRecords::new(
-                Name::try_from_str("_http._tcp.local.").unwrap(),
-                Name::try_from_str("Pico CAN Bridge._http._tcp.local.").unwrap(),
-                Name::try_from_str("pico-can-bridge.local.").unwrap(),
-                HTTP_PORT,
-                120,
-            );
-            records.add_a(Ipv4Addr::new(
-                device_ipv4_octets[0],
-                device_ipv4_octets[1],
-                device_ipv4_octets[2],
-                device_ipv4_octets[3],
-            ));
-            records.add_aaaa(device_ipv6);
-
-            match mdns.register_service(ServiceSpec::new(records)) {
-                Ok(_) => {
+                    let mdns: &'static MdnsState<MdnsRng> = MDNS_STATE.init(MdnsState::new(
+                        EndpointConfig::new(),
+                        MdnsRng::new(0x7069_636f_6361_6e01),
+                    ));
                     spawner.spawn(mdns_task(stack, mdns).unwrap());
-                    mdns_started = true;
-                    uart.blocking_write(b"mDNS ready, host pico-can-bridge.local\r\n")
+                    mdns_state = Some(mdns);
+                    mdns
+                }
+            };
+
+            // The host is still configuring a fresh interface at link-up (IPv6
+            // DAD, IPv4 link-local ARP claim) and misses announcements sent
+            // before it is listening. Wait for it to settle, then (re)register
+            // so a full probe + announce cycle goes out on every link-up, as
+            // RFC 6762 §8.3 expects.
+            Timer::after(MDNS_HOST_SETTLE_DELAY).await;
+
+            if let Some(handle) = mdns_service.take() {
+                mdns.unregister_service(handle);
+            }
+            match mdns.register_service(ServiceSpec::new(build_mdns_records(
+                device_ipv4_octets,
+                device_ipv6,
+            ))) {
+                Ok(handle) => {
+                    mdns_service = Some(handle);
+                    uart.blocking_write(b"mDNS announced pico-can-bridge.local\r\n")
                         .unwrap();
                 }
                 Err(_) => {
@@ -1294,7 +1434,41 @@ async fn main(spawner: Spawner) {
             }
         }
 
+        // While the link is up, surface mDNS lifecycle events on the UART.
+        // Probe conflicts rename or kill the registration silently otherwise,
+        // which is indistinguishable from success in the log.
+        #[cfg(feature = "mdns")]
+        {
+            let monitor = async {
+                loop {
+                    if let (Some(mdns), Some(handle)) = (mdns_state, mdns_service) {
+                        while let Some(update) = mdns.poll_service_update(handle) {
+                            let line: &[u8] = match update {
+                                ServiceUpdate::Established => {
+                                    b"mDNS service established\r\n"
+                                }
+                                ServiceUpdate::Renamed(_) => {
+                                    b"mDNS CONFLICT: service renamed\r\n"
+                                }
+                                ServiceUpdate::Conflict => {
+                                    b"mDNS CONFLICT: unresolved, service dead\r\n"
+                                }
+                                ServiceUpdate::HostConflict => {
+                                    b"mDNS CONFLICT: host name claimed by peer\r\n"
+                                }
+                                _ => b"mDNS service update (unknown)\r\n",
+                            };
+                            uart.blocking_write(line).unwrap();
+                        }
+                    }
+                    Timer::after(Duration::from_millis(500)).await;
+                }
+            };
+            select(stack.wait_link_down(), monitor).await;
+        }
+        #[cfg(not(feature = "mdns"))]
         stack.wait_link_down().await;
+
         info!("CDC-NCM link down");
         uart.blocking_write(b"CDC-NCM link down\r\n").unwrap();
         Timer::after(Duration::from_millis(100)).await;
