@@ -9,7 +9,8 @@ use embassy_executor::Spawner;
 use embassy_futures::select::{Either, select};
 use embassy_net::tcp::TcpSocket;
 use embassy_net::{
-    Config as NetConfig, Ipv4Address, Ipv4Cidr, Stack, StackResources, StaticConfigV4,
+    Config as NetConfig, ConfigV6, Ipv4Address, Ipv4Cidr, Ipv6Address, Ipv6Cidr, Stack,
+    StackResources, StaticConfigV4, StaticConfigV6,
 };
 use embassy_rp::bind_interrupts;
 use embassy_rp::flash::Flash;
@@ -21,6 +22,7 @@ use embassy_rp::usb::{Driver, InterruptHandler};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
 use embassy_sync::mutex::Mutex;
+use embassy_sync::pubsub::PubSubChannel;
 use embassy_time::{Duration, Timer};
 use embassy_usb::class::cdc_ncm;
 use embassy_usb::class::cdc_ncm::embassy_net::{Device as NcmDevice, State as NcmNetState};
@@ -55,6 +57,9 @@ const MTU: usize = 1514;
 const USB_MAX_PACKET_SIZE: u16 = 64;
 const FLASH_SIZE: usize = 2 * 1024 * 1024;
 const HTTP_PORT: u16 = 80;
+const HTTP_SOCKETS: usize = 3;
+const WS_TIMEOUT: Duration = Duration::from_secs(20);
+const WS_KEEPALIVE: Duration = Duration::from_secs(5);
 const CDC_NCM_LINK_UP_TIMEOUT: Duration = Duration::from_secs(6);
 const CDC_NCM_LINK_UP_RESET_MISSES: u8 = 2;
 #[cfg(feature = "mdns")]
@@ -73,7 +78,12 @@ const CAN_SPI_FREQUENCY: u32 = 1_000_000;
 static CAN_STATE: Mutex<CriticalSectionRawMutex, CanState> = Mutex::new(CanState::stopped());
 static CAN_COMMANDS: Channel<CriticalSectionRawMutex, CanCommand, 8> = Channel::new();
 static CAN_REPLIES: Channel<CriticalSectionRawMutex, CanReply, 8> = Channel::new();
-static CAN_EVENTS: Channel<CriticalSectionRawMutex, CanEvent, 16> = Channel::new();
+// Serializes command/reply exchanges so concurrent WebSocket clients cannot
+// interleave commands and pick up each other's replies.
+static CAN_CMD_LOCK: Mutex<CriticalSectionRawMutex, ()> = Mutex::new(());
+// Broadcast: every connected WebSocket client gets every received CAN frame.
+static CAN_EVENTS: PubSubChannel<CriticalSectionRawMutex, CanEvent, 16, HTTP_SOCKETS, 1> =
+    PubSubChannel::new();
 
 #[derive(Clone, Copy)]
 struct CanState {
@@ -203,6 +213,24 @@ fn link_local_from_seed(seed: &[u8]) -> [u8; 4] {
     let host = (hash % (254 * 256)) as u16;
 
     [169, 254, 1 + (host / 256) as u8, (host & 0xff) as u8]
+}
+
+/// EUI-64 derived IPv6 link-local address (fe80::/64) for a MAC address.
+///
+/// macOS resolves these with an interface scope, so connections to the AAAA
+/// record always leave through the right interface — unlike IPv4 link-local,
+/// where 169.254/16 routes are ambiguous across interfaces.
+fn ipv6_link_local_from_mac(mac: &[u8; 6]) -> Ipv6Address {
+    Ipv6Address::new(
+        0xfe80,
+        0,
+        0,
+        0,
+        u16::from_be_bytes([mac[0] ^ 0x02, mac[1]]),
+        u16::from_be_bytes([mac[2], 0xff]),
+        u16::from_be_bytes([0xfe, mac[3]]),
+        u16::from_be_bytes([mac[4], mac[5]]),
+    )
 }
 
 fn sha1(data: &[u8]) -> [u8; 20] {
@@ -557,6 +585,12 @@ fn write_can_frame_json(out: &mut String<256>, ty: &str, ok: bool, tx: CanTx) {
 }
 
 async fn send_can_command(command: CanCommand) -> CanReply {
+    let _lock = CAN_CMD_LOCK.lock().await;
+
+    // A previous exchange may have timed out and abandoned its reply; drop any
+    // stale replies so this command gets its own answer, not an old one.
+    while CAN_REPLIES.try_receive().is_ok() {}
+
     CAN_COMMANDS.send(command).await;
 
     match select(CAN_REPLIES.receive(), Timer::after(Duration::from_secs(2))).await {
@@ -648,6 +682,7 @@ async fn can_task(
     let spi_device = ExclusiveDevice::new_no_delay(spi, cs).unwrap();
     let mut mcp = MCP25xx { spi: spi_device };
     let mut status = CanState::stopped();
+    let can_events = CAN_EVENTS.publisher().unwrap();
 
     match apply_can_config(&mut mcp, CAN_DEFAULT_BITRATE, CanMode::Normal) {
         Ok(()) => {
@@ -676,7 +711,7 @@ async fn can_task(
                 Ok(frame) => {
                     status.rx_count = status.rx_count.wrapping_add(1);
                     *CAN_STATE.lock().await = status;
-                    let _ = CAN_EVENTS.try_send(CanEvent::Rx(frame_to_can_tx(&frame)));
+                    can_events.publish_immediate(CanEvent::Rx(frame_to_can_tx(&frame)));
                 }
                 Err(nb::Error::WouldBlock) => {}
                 Err(_) => {
@@ -840,7 +875,11 @@ async fn serve_http_connection(
             write_all(socket, b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ").await?;
             write_all(socket, &accept).await?;
             write_all(socket, b"\r\n\r\n").await?;
-            socket.set_timeout(None);
+            // TCP keepalive probes an idle-but-live peer; the timeout then only
+            // fires for peers that are actually gone (unplug, sleep), instead of
+            // a dead peer holding the socket forever.
+            socket.set_timeout(Some(WS_TIMEOUT));
+            socket.set_keep_alive(Some(WS_KEEPALIVE));
             websocket_loop(socket, rx_buf).await?;
         } else {
             write_all(
@@ -911,11 +950,16 @@ async fn websocket_loop(
 ) -> Result<(), embassy_net::tcp::Error> {
     const READY: &[u8] = b"{\"type\":\"hello\",\"ok\":true,\"endpoint\":\"/can\"}";
     let mut response = String::<256>::new();
+    // Capacity is one subscriber per HTTP socket, and each socket serves at
+    // most one WebSocket at a time, so this cannot fail.
+    let Ok(mut can_events) = CAN_EVENTS.subscriber() else {
+        return Ok(());
+    };
 
     websocket_send_text(socket, READY).await?;
 
     loop {
-        let n = match select(socket.read(buf), CAN_EVENTS.receive()).await {
+        let n = match select(socket.read(buf), can_events.next_message_pure()).await {
             Either::First(result) => result?,
             Either::Second(CanEvent::Rx(frame)) => {
                 response.clear();
@@ -988,24 +1032,21 @@ async fn websocket_send_text(
     write_all(socket, payload).await
 }
 
-#[embassy_executor::task]
+#[embassy_executor::task(pool_size = HTTP_SOCKETS)]
 async fn http_task(stack: Stack<'static>) {
-    static RX_BUF: StaticCell<[u8; 2048]> = StaticCell::new();
-    static TX_BUF: StaticCell<[u8; 2048]> = StaticCell::new();
-    static REQUEST_BUF: StaticCell<[u8; 1024]> = StaticCell::new();
-
-    let rx_buf = RX_BUF.init([0; 2048]);
-    let tx_buf = TX_BUF.init([0; 2048]);
-    let request_buf = REQUEST_BUF.init([0; 1024]);
-    let mut socket = TcpSocket::new(stack, rx_buf, tx_buf);
+    let mut rx_buf = [0; 2048];
+    let mut tx_buf = [0; 2048];
+    let mut request_buf = [0; 1024];
+    let mut socket = TcpSocket::new(stack, &mut rx_buf, &mut tx_buf);
 
     loop {
         socket.set_timeout(Some(Duration::from_secs(10)));
+        socket.set_keep_alive(None);
         socket.set_nagle_enabled(false);
 
         if socket.accept(HTTP_PORT).await.is_ok() {
             info!("HTTP client connected");
-            match serve_http_connection(&mut socket, request_buf).await {
+            match serve_http_connection(&mut socket, &mut request_buf).await {
                 Ok(()) => {
                     socket.close();
                     let _ = socket.flush().await;
@@ -1031,23 +1072,38 @@ async fn mdns_task(stack: Stack<'static>, state: &'static MdnsState<MdnsRng>) {
     static RX_BUF: StaticCell<[u8; 2048]> = StaticCell::new();
     static TX_META: StaticCell<[PacketMetadata; 4]> = StaticCell::new();
     static TX_BUF: StaticCell<[u8; 2048]> = StaticCell::new();
+    static RX_META_V6: StaticCell<[PacketMetadata; 4]> = StaticCell::new();
+    static RX_BUF_V6: StaticCell<[u8; 2048]> = StaticCell::new();
+    static TX_META_V6: StaticCell<[PacketMetadata; 4]> = StaticCell::new();
+    static TX_BUF_V6: StaticCell<[u8; 2048]> = StaticCell::new();
     static SCRATCH: StaticCell<[u8; 2048]> = StaticCell::new();
 
     let rx_meta = RX_META.init([PacketMetadata::EMPTY; 4]);
     let rx_buf = RX_BUF.init([0; 2048]);
     let tx_meta = TX_META.init([PacketMetadata::EMPTY; 4]);
     let tx_buf = TX_BUF.init([0; 2048]);
+    let rx_meta_v6 = RX_META_V6.init([PacketMetadata::EMPTY; 4]);
+    let rx_buf_v6 = RX_BUF_V6.init([0; 2048]);
+    let tx_meta_v6 = TX_META_V6.init([PacketMetadata::EMPTY; 4]);
+    let tx_buf_v6 = TX_BUF_V6.init([0; 2048]);
     let scratch = SCRATCH.init([0; 2048]);
 
     stack
         .join_multicast_group(IpAddress::v4(224, 0, 0, 251))
         .unwrap();
+    stack
+        .join_multicast_group(IpAddress::v6(0xff02, 0, 0, 0, 0, 0, 0, 0x00fb))
+        .unwrap();
 
-    let mut socket = UdpSocket::new(stack, rx_meta, rx_buf, tx_meta, tx_buf);
-    socket.bind(5353).unwrap();
+    let mut socket_v4 = UdpSocket::new(stack, rx_meta, rx_buf, tx_meta, tx_buf);
+    socket_v4.bind(5353).unwrap();
+    let mut socket_v6 = UdpSocket::new(stack, rx_meta_v6, rx_buf_v6, tx_meta_v6, tx_buf_v6);
+    socket_v6.bind(5353).unwrap();
 
     info!("mDNS responder ready: pico-can-bridge.local");
-    state.run(Some(&mut socket), None, scratch).await;
+    state
+        .run(Some(&mut socket_v4), Some(&mut socket_v6), scratch)
+        .await;
 }
 
 #[embassy_executor::main]
@@ -1120,13 +1176,19 @@ async fn main(spawner: Spawner) {
     let (ncm_runner, ncm_device) =
         ncm.into_embassy_net_device(NCM_NET_STATE.init(NcmNetState::new()), DEVICE_MAC);
 
-    let net_config = NetConfig::ipv4_static(StaticConfigV4 {
+    let device_ipv6 = ipv6_link_local_from_mac(&DEVICE_MAC);
+    let mut net_config = NetConfig::ipv4_static(StaticConfigV4 {
         address: Ipv4Cidr::new(device_ipv4, DEVICE_IPV4_PREFIX_LEN),
         gateway: None,
         dns_servers: Default::default(),
     });
+    net_config.ipv6 = ConfigV6::Static(StaticConfigV6 {
+        address: Ipv6Cidr::new(device_ipv6, 64),
+        gateway: None,
+        dns_servers: Default::default(),
+    });
 
-    static NET_RESOURCES: StaticCell<StackResources<4>> = StaticCell::new();
+    static NET_RESOURCES: StaticCell<StackResources<8>> = StaticCell::new();
     let (stack, net_runner) = embassy_net::new(
         ncm_device,
         net_config,
@@ -1139,7 +1201,9 @@ async fn main(spawner: Spawner) {
     spawner.spawn(usb_task(usb).unwrap());
     spawner.spawn(ncm_task(ncm_runner).unwrap());
     spawner.spawn(net_task(net_runner).unwrap());
-    spawner.spawn(http_task(stack).unwrap());
+    for _ in 0..HTTP_SOCKETS {
+        spawner.spawn(http_task(stack).unwrap());
+    }
     spawner.spawn(can_task(p.SPI1, p.PIN_14, p.PIN_15, p.PIN_8, p.PIN_19).unwrap());
 
     info!(
@@ -1153,26 +1217,35 @@ async fn main(spawner: Spawner) {
 
     #[cfg(feature = "mdns")]
     let mut mdns_started = false;
+    let mut link_ever_up = false;
     let mut link_watchdog_misses = 0;
 
     loop {
-        match select(stack.wait_link_up(), Timer::after(CDC_NCM_LINK_UP_TIMEOUT)).await {
-            Either::First(()) => {
-                link_watchdog_misses = 0;
-            }
-            Either::Second(()) => {
-                link_watchdog_misses += 1;
-                warn!("CDC-NCM did not reach link-up before watchdog timeout");
-                uart.blocking_write(b"CDC-NCM link watchdog timeout\r\n")
-                    .unwrap();
-                if link_watchdog_misses >= CDC_NCM_LINK_UP_RESET_MISSES {
-                    warn!("CDC-NCM watchdog requesting system reset");
-                    uart.blocking_write(b"CDC-NCM watchdog reset\r\n").unwrap();
-                    cortex_m::peripheral::SCB::sys_reset();
+        if link_ever_up {
+            // The link has worked before: a down period is host-driven (sleep,
+            // interface reconfigure) and a reset would only re-enumerate USB and
+            // make the host start over. Wait without a watchdog.
+            stack.wait_link_up().await;
+        } else {
+            match select(stack.wait_link_up(), Timer::after(CDC_NCM_LINK_UP_TIMEOUT)).await {
+                Either::First(()) => {
+                    link_watchdog_misses = 0;
                 }
-                continue;
+                Either::Second(()) => {
+                    link_watchdog_misses += 1;
+                    warn!("CDC-NCM did not reach link-up before watchdog timeout");
+                    uart.blocking_write(b"CDC-NCM link watchdog timeout\r\n")
+                        .unwrap();
+                    if link_watchdog_misses >= CDC_NCM_LINK_UP_RESET_MISSES {
+                        warn!("CDC-NCM watchdog requesting system reset");
+                        uart.blocking_write(b"CDC-NCM watchdog reset\r\n").unwrap();
+                        cortex_m::peripheral::SCB::sys_reset();
+                    }
+                    continue;
+                }
             }
         }
+        link_ever_up = true;
 
         info!(
             "CDC-NCM link up, IPv4 address 169.254.{}.{}/16",
@@ -1204,6 +1277,7 @@ async fn main(spawner: Spawner) {
                 device_ipv4_octets[2],
                 device_ipv4_octets[3],
             ));
+            records.add_aaaa(device_ipv6);
 
             match mdns.register_service(ServiceSpec::new(records)) {
                 Ok(_) => {

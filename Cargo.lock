@@ -1024,9 +1024,9 @@ dependencies = [
 
 [[package]]
 name = "hick-embassy"
-version = "0.1.1"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0cc7135d84b243056dd45e5220f86a8960dbfb4b709970c4d37580c277f3e5f1"
+checksum = "387adaf4a68e709e7785415fd16440e14fb730dec6556fd987bf5731e657916d"
 dependencies = [
  "embassy-futures",
  "embassy-net",
@@ -1040,9 +1040,9 @@ dependencies = [
 
 [[package]]
 name = "hick-smoltcp"
-version = "0.1.1"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b88c8f7939cfbf32b7797e8923e9903647a24ea3626d9ee1a80654d31b751a76"
+checksum = "96aeee3da30dd9832f70f421792440c8c870936add0c384c01e62d635eb2cf5c"
 dependencies = [
  "hick-trace",
  "mdns-proto",
@@ -1203,9 +1203,9 @@ dependencies = [
 
 [[package]]
 name = "mdns-proto"
-version = "0.2.1"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d55f85c03e0d22ded4001af13a7e64f8c069c57e1afed9c2a615f24439064b9b"
+checksum = "5f4ed1f6ab416a98205b9b04a78695fd55765a461dd3173e5cea4c14e5088a71"
 dependencies = [
  "derive_more",
  "hick-trace",

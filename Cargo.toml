@@ -47,8 +47,8 @@ pio-proc = "0.3.0"
 pio = "0.3.0"
 rand = { version = "0.10.1", default-features = false }
 rand_core = { version = "0.10.1", default-features = false }
-hick-embassy = { version = "0.1.1", default-features = false, optional = true }
-mdns-proto = { version = "0.2.1", default-features = false, optional = true }
+hick-embassy = { version = "0.2", default-features = false, optional = true }
+mdns-proto = { version = "0.3", default-features = false, optional = true }
 mcp25xx = "0.4.0"
 nb = "1.1.0"
 
