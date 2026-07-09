@@ -3,68 +3,41 @@
 #![no_std]
 #![no_main]
 
-use core::fmt::Write;
-use core::task::Context;
+mod can;
+mod http;
+#[cfg(feature = "mdns")]
+mod mdns;
+mod network;
+
 use defmt::*;
 use embassy_executor::Spawner;
 use embassy_futures::select::{Either, select};
-use embassy_net::tcp::TcpSocket;
-use embassy_net::driver::{Capabilities, Driver as NetDriver, HardwareAddress, LinkState};
 use embassy_net::{
-    Config as NetConfig, ConfigV6, Ipv4Address, Ipv4Cidr, Ipv6Address, Ipv6Cidr, Stack,
-    StackResources, StaticConfigV4, StaticConfigV6,
+    Config as NetConfig, ConfigV6, Ipv4Address, Ipv4Cidr, Ipv6Cidr, StackResources, StaticConfigV4,
+    StaticConfigV6,
 };
 use embassy_rp::bind_interrupts;
 use embassy_rp::flash::Flash;
-use embassy_rp::gpio::{Level, Output};
-use embassy_rp::peripherals::{PIN_8, PIN_14, PIN_15, PIN_19, SPI1, USB};
-use embassy_rp::spi::{Config as SpiConfig, Spi};
+use embassy_rp::peripherals::USB;
 use embassy_rp::uart::{Config as UartConfig, UartTx};
 use embassy_rp::usb::{Driver, InterruptHandler};
-use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-use embassy_sync::channel::Channel;
-use embassy_sync::mutex::Mutex;
-use embassy_sync::pubsub::PubSubChannel;
 use embassy_time::{Duration, Timer};
 use embassy_usb::class::cdc_ncm;
-use embassy_usb::class::cdc_ncm::embassy_net::{Device as NcmDevice, State as NcmNetState};
-use embassy_usb::{Builder, Config as UsbConfig, UsbDevice};
+use embassy_usb::class::cdc_ncm::embassy_net::State as NcmNetState;
+use embassy_usb::{Builder, Config as UsbConfig};
 #[cfg(feature = "mdns")]
 use embedded_alloc::LlffHeap as Heap;
-use embedded_hal_bus::spi::ExclusiveDevice;
-use heapless::String;
-use mcp25xx::bitrates::clock_16mhz::{
-    CNF_100K_BPS, CNF_125K_BPS, CNF_200K_BPS, CNF_250K_BPS, CNF_500K_BPS, CNF_1000K_BPS,
-};
-use mcp25xx::embedded_can::{ExtendedId, Frame, Id, StandardId};
-use mcp25xx::registers::{OperationMode, RXB0CTRL, RXB1CTRL, RXM};
-use mcp25xx::{CanFrame, Config as McpConfig, MCP25xx};
-use portable_atomic::{AtomicU32, Ordering};
+use portable_atomic::Ordering;
 use static_cell::StaticCell;
 use {defmt_rtt as _, panic_probe as _};
 
-#[cfg(feature = "mdns")]
-use core::{convert::Infallible, net::Ipv4Addr};
-#[cfg(feature = "mdns")]
-use embassy_net::IpAddress;
-#[cfg(feature = "mdns")]
-use embassy_net::udp::{PacketMetadata, UdpSocket};
-#[cfg(feature = "mdns")]
-use hick_embassy::MdnsState;
-#[cfg(feature = "mdns")]
-use mdns_proto::{
-    EndpointConfig, Name, ServiceHandle, ServiceRecords, ServiceSpec, ServiceUpdate,
-};
-#[cfg(feature = "mdns")]
-use rand_core::TryRng;
-
-const MTU: usize = 1514;
+pub(crate) const MTU: usize = 1514;
 const USB_MAX_PACKET_SIZE: u16 = 64;
 const FLASH_SIZE: usize = 2 * 1024 * 1024;
-const HTTP_PORT: u16 = 80;
-const HTTP_SOCKETS: usize = 3;
-const WS_TIMEOUT: Duration = Duration::from_secs(20);
-const WS_KEEPALIVE: Duration = Duration::from_secs(5);
+pub(crate) const HTTP_PORT: u16 = 80;
+pub(crate) const HTTP_SOCKETS: usize = 3;
+pub(crate) const WS_TIMEOUT: Duration = Duration::from_secs(20);
+pub(crate) const WS_KEEPALIVE: Duration = Duration::from_secs(5);
 const CDC_NCM_LINK_UP_TIMEOUT: Duration = Duration::from_secs(6);
 #[cfg(feature = "mdns")]
 const MDNS_HOST_SETTLE_DELAY: Duration = Duration::from_secs(3);
@@ -73,76 +46,15 @@ const MDNS_HOST_SETTLE_DELAY: Duration = Duration::from_secs(3);
 // interface are lost, so keep the TTL short enough that the next broadcast
 // arrives within seconds, not minutes.
 #[cfg(feature = "mdns")]
-const MDNS_TTL_SECS: u32 = 25;
+pub(crate) const MDNS_TTL_SECS: u32 = 25;
 const CDC_NCM_LINK_UP_RESET_MISSES: u8 = 2;
 // A healthy host floods a fresh interface with NDP/mDNS within a second or
 // two of link-up. Total silence means its NCM driver missed the one-shot
 // NetworkConnection notification and considers the link down; only a USB
 // re-enumeration makes embassy-usb send that notification again.
 const HOST_SILENCE_TIMEOUT: Duration = Duration::from_secs(8);
-const HOST_SILENCE_RESET_MAGIC: u32 = 0xCAFE_0000;
+pub(crate) const HOST_SILENCE_RESET_MAGIC: u32 = 0xCAFE_0000;
 const HOST_SILENCE_RESET_LIMIT: u32 = 3;
-
-static NET_RX_PACKETS: AtomicU32 = AtomicU32::new(0);
-
-/// embassy-net device wrapper that counts received frames, so the main loop
-/// can tell a live host from one that missed the NCM link-up notification.
-struct CountingDevice<D> {
-    inner: D,
-}
-
-impl<D: NetDriver> NetDriver for CountingDevice<D> {
-    type RxToken<'a>
-        = D::RxToken<'a>
-    where
-        Self: 'a;
-    type TxToken<'a>
-        = D::TxToken<'a>
-    where
-        Self: 'a;
-
-    fn receive(&mut self, cx: &mut Context) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
-        let tokens = self.inner.receive(cx);
-        if tokens.is_some() {
-            NET_RX_PACKETS.fetch_add(1, Ordering::Relaxed);
-        }
-        tokens
-    }
-
-    fn transmit(&mut self, cx: &mut Context) -> Option<Self::TxToken<'_>> {
-        self.inner.transmit(cx)
-    }
-
-    fn link_state(&mut self, cx: &mut Context) -> LinkState {
-        self.inner.link_state(cx)
-    }
-
-    fn capabilities(&self) -> Capabilities {
-        self.inner.capabilities()
-    }
-
-    fn hardware_address(&self) -> HardwareAddress {
-        self.inner.hardware_address()
-    }
-}
-
-/// Reset counter kept in a watchdog scratch register (survives sys_reset,
-/// cleared on power-on), capping host-silence re-enumeration attempts so a
-/// genuinely silent host cannot cause an endless reset loop.
-fn host_silence_reset_count() -> u32 {
-    let value = embassy_rp::pac::WATCHDOG.scratch0().read();
-    if value & 0xFFFF_0000 == HOST_SILENCE_RESET_MAGIC {
-        value & 0xFFFF
-    } else {
-        0
-    }
-}
-
-fn set_host_silence_reset_count(count: u32) {
-    embassy_rp::pac::WATCHDOG
-        .scratch0()
-        .write_value(HOST_SILENCE_RESET_MAGIC | (count & 0xFFFF));
-}
 #[cfg(feature = "mdns")]
 const HEAP_SIZE: usize = 32768;
 
@@ -151,1057 +63,13 @@ const HEAP_SIZE: usize = 32768;
 static HEAP: Heap = Heap::empty();
 
 const DEVICE_IPV4_PREFIX_LEN: u8 = 16;
-const DEVICE_MAC: [u8; 6] = [0x02, 0x00, 0x00, 0x00, 0x00, 0x01];
-const HOST_MAC: [u8; 6] = [0x02, 0x00, 0x00, 0x00, 0x00, 0x02];
-const CAN_DEFAULT_BITRATE: u32 = 500_000;
-const CAN_SPI_FREQUENCY: u32 = 1_000_000;
-
-static CAN_STATE: Mutex<CriticalSectionRawMutex, CanState> = Mutex::new(CanState::stopped());
-static CAN_COMMANDS: Channel<CriticalSectionRawMutex, CanCommand, 8> = Channel::new();
-static CAN_REPLIES: Channel<CriticalSectionRawMutex, CanReply, 8> = Channel::new();
-// Serializes command/reply exchanges so concurrent WebSocket clients cannot
-// interleave commands and pick up each other's replies.
-static CAN_CMD_LOCK: Mutex<CriticalSectionRawMutex, ()> = Mutex::new(());
-// Broadcast: every connected WebSocket client gets every received CAN frame.
-static CAN_EVENTS: PubSubChannel<CriticalSectionRawMutex, CanEvent, 16, HTTP_SOCKETS, 1> =
-    PubSubChannel::new();
-
-#[derive(Clone, Copy)]
-struct CanState {
-    ready: bool,
-    state: CanBusState,
-    bitrate: u32,
-    mode: CanMode,
-    tx_err: u8,
-    rx_err: u8,
-    tx_count: u32,
-    rx_count: u32,
-}
-
-impl CanState {
-    const fn stopped() -> Self {
-        Self {
-            ready: false,
-            state: CanBusState::Stopped,
-            bitrate: CAN_DEFAULT_BITRATE,
-            mode: CanMode::Normal,
-            tx_err: 0,
-            rx_err: 0,
-            tx_count: 0,
-            rx_count: 0,
-        }
-    }
-}
-
-#[derive(Clone, Copy)]
-enum CanBusState {
-    Stopped,
-    Error,
-    Active,
-}
-
-#[derive(Clone, Copy)]
-enum CanMode {
-    Normal,
-    ListenOnly,
-    Loopback,
-}
-
-#[derive(Clone, Copy)]
-struct CanTx {
-    id: u32,
-    ext: bool,
-    rtr: bool,
-    dlc: u8,
-    data: [u8; 8],
-}
-
-#[derive(Clone, Copy)]
-enum CanCommand {
-    Status,
-    ConfigGet,
-    ConfigSet { bitrate: u32, mode: CanMode },
-    Tx(CanTx),
-}
-
-#[derive(Clone, Copy)]
-enum CanReply {
-    Status(CanState),
-    TxOk(CanTx),
-    Error {
-        code: &'static str,
-        message: &'static str,
-    },
-}
-
-#[derive(Clone, Copy)]
-enum CanEvent {
-    Rx(CanTx),
-}
-
-#[cfg(feature = "mdns")]
-struct MdnsRng(u64);
-
-#[cfg(feature = "mdns")]
-impl MdnsRng {
-    const fn new(seed: u64) -> Self {
-        Self(seed)
-    }
-
-    fn next(&mut self) -> u64 {
-        self.0 ^= self.0 << 13;
-        self.0 ^= self.0 >> 7;
-        self.0 ^= self.0 << 17;
-        self.0
-    }
-}
-
-#[cfg(feature = "mdns")]
-impl TryRng for MdnsRng {
-    type Error = Infallible;
-
-    fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
-        Ok(self.next() as u32)
-    }
-
-    fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
-        Ok(self.next())
-    }
-
-    fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), Self::Error> {
-        for chunk in dst.chunks_mut(8) {
-            let bytes = self.next().to_le_bytes();
-            chunk.copy_from_slice(&bytes[..chunk.len()]);
-        }
-
-        Ok(())
-    }
-}
-
-fn fnv1a64(bytes: &[u8]) -> u64 {
-    let mut hash = 0xcbf2_9ce4_8422_2325;
-
-    for byte in bytes {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-
-    hash
-}
-
-fn link_local_from_seed(seed: &[u8]) -> [u8; 4] {
-    let hash = fnv1a64(seed);
-    let host = (hash % (254 * 256)) as u16;
-
-    [169, 254, 1 + (host / 256) as u8, (host & 0xff) as u8]
-}
-
-/// EUI-64 derived IPv6 link-local address (fe80::/64) for a MAC address.
-///
-/// macOS resolves these with an interface scope, so connections to the AAAA
-/// record always leave through the right interface — unlike IPv4 link-local,
-/// where 169.254/16 routes are ambiguous across interfaces.
-fn ipv6_link_local_from_mac(mac: &[u8; 6]) -> Ipv6Address {
-    Ipv6Address::new(
-        0xfe80,
-        0,
-        0,
-        0,
-        u16::from_be_bytes([mac[0] ^ 0x02, mac[1]]),
-        u16::from_be_bytes([mac[2], 0xff]),
-        u16::from_be_bytes([0xfe, mac[3]]),
-        u16::from_be_bytes([mac[4], mac[5]]),
-    )
-}
-
-fn sha1(data: &[u8]) -> [u8; 20] {
-    let mut h0 = 0x6745_2301u32;
-    let mut h1 = 0xefcd_ab89u32;
-    let mut h2 = 0x98ba_dcfeu32;
-    let mut h3 = 0x1032_5476u32;
-    let mut h4 = 0xc3d2_e1f0u32;
-    let bit_len = (data.len() as u64) * 8;
-    let mut offset = 0;
-
-    while offset + 64 <= data.len() {
-        sha1_block(
-            &data[offset..offset + 64],
-            &mut h0,
-            &mut h1,
-            &mut h2,
-            &mut h3,
-            &mut h4,
-        );
-        offset += 64;
-    }
-
-    let mut block = [0u8; 128];
-    let rem = &data[offset..];
-    block[..rem.len()].copy_from_slice(rem);
-    block[rem.len()] = 0x80;
-    let total = if rem.len() + 1 + 8 <= 64 { 64 } else { 128 };
-    block[total - 8..total].copy_from_slice(&bit_len.to_be_bytes());
-
-    sha1_block(&block[..64], &mut h0, &mut h1, &mut h2, &mut h3, &mut h4);
-    if total == 128 {
-        sha1_block(&block[64..128], &mut h0, &mut h1, &mut h2, &mut h3, &mut h4);
-    }
-
-    let mut out = [0u8; 20];
-    out[0..4].copy_from_slice(&h0.to_be_bytes());
-    out[4..8].copy_from_slice(&h1.to_be_bytes());
-    out[8..12].copy_from_slice(&h2.to_be_bytes());
-    out[12..16].copy_from_slice(&h3.to_be_bytes());
-    out[16..20].copy_from_slice(&h4.to_be_bytes());
-    out
-}
-
-fn sha1_block(block: &[u8], h0: &mut u32, h1: &mut u32, h2: &mut u32, h3: &mut u32, h4: &mut u32) {
-    let mut w = [0u32; 80];
-
-    for i in 0..16 {
-        let j = i * 4;
-        w[i] = u32::from_be_bytes([block[j], block[j + 1], block[j + 2], block[j + 3]]);
-    }
-    for i in 16..80 {
-        w[i] = (w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16]).rotate_left(1);
-    }
-
-    let mut a = *h0;
-    let mut b = *h1;
-    let mut c = *h2;
-    let mut d = *h3;
-    let mut e = *h4;
-
-    for (i, word) in w.iter().enumerate() {
-        let (f, k) = match i {
-            0..=19 => ((b & c) | ((!b) & d), 0x5a82_7999),
-            20..=39 => (b ^ c ^ d, 0x6ed9_eba1),
-            40..=59 => ((b & c) | (b & d) | (c & d), 0x8f1b_bcdc),
-            _ => (b ^ c ^ d, 0xca62_c1d6),
-        };
-        let temp = a
-            .rotate_left(5)
-            .wrapping_add(f)
-            .wrapping_add(e)
-            .wrapping_add(k)
-            .wrapping_add(*word);
-        e = d;
-        d = c;
-        c = b.rotate_left(30);
-        b = a;
-        a = temp;
-    }
-
-    *h0 = h0.wrapping_add(a);
-    *h1 = h1.wrapping_add(b);
-    *h2 = h2.wrapping_add(c);
-    *h3 = h3.wrapping_add(d);
-    *h4 = h4.wrapping_add(e);
-}
-
-fn base64_20(input: &[u8; 20], out: &mut [u8; 28]) {
-    const B64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut i = 0;
-    let mut j = 0;
-
-    while i + 3 <= input.len() {
-        let n = ((input[i] as u32) << 16) | ((input[i + 1] as u32) << 8) | input[i + 2] as u32;
-        out[j] = B64[((n >> 18) & 0x3f) as usize];
-        out[j + 1] = B64[((n >> 12) & 0x3f) as usize];
-        out[j + 2] = B64[((n >> 6) & 0x3f) as usize];
-        out[j + 3] = B64[(n & 0x3f) as usize];
-        i += 3;
-        j += 4;
-    }
-
-    let n = ((input[i] as u32) << 16) | ((input[i + 1] as u32) << 8);
-    out[j] = B64[((n >> 18) & 0x3f) as usize];
-    out[j + 1] = B64[((n >> 12) & 0x3f) as usize];
-    out[j + 2] = B64[((n >> 6) & 0x3f) as usize];
-    out[j + 3] = b'=';
-}
-
-fn header_value<'a>(request: &'a str, name: &str) -> Option<&'a str> {
-    for line in request.lines() {
-        if let Some((key, value)) = line.split_once(':') {
-            if key.eq_ignore_ascii_case(name) {
-                return Some(value.trim());
-            }
-        }
-    }
-
-    None
-}
-
-fn websocket_accept_key(key: &str, out: &mut [u8; 28]) {
-    const GUID: &[u8] = b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
-    let mut input = [0u8; 96];
-    let key_bytes = key.as_bytes();
-    let key_len = key_bytes.len().min(input.len() - GUID.len());
-
-    input[..key_len].copy_from_slice(&key_bytes[..key_len]);
-    input[key_len..key_len + GUID.len()].copy_from_slice(GUID);
-
-    let digest = sha1(&input[..key_len + GUID.len()]);
-    base64_20(&digest, out);
-}
-
-#[cfg(feature = "mdns")]
-fn build_mdns_records(ipv4: [u8; 4], ipv6: Ipv6Address) -> ServiceRecords {
-    let mut records = ServiceRecords::new(
-        Name::try_from_str("_http._tcp.local.").unwrap(),
-        Name::try_from_str("Pico CAN Bridge._http._tcp.local.").unwrap(),
-        Name::try_from_str("pico-can-bridge.local.").unwrap(),
-        HTTP_PORT,
-        MDNS_TTL_SECS,
-    );
-    records.add_a(Ipv4Addr::new(ipv4[0], ipv4[1], ipv4[2], ipv4[3]));
-    records.add_aaaa(ipv6);
-    records
-}
-
-fn can_mode_name(mode: CanMode) -> &'static str {
-    match mode {
-        CanMode::Normal => "normal",
-        CanMode::ListenOnly => "listen-only",
-        CanMode::Loopback => "loopback",
-    }
-}
-
-fn can_state_name(state: CanBusState) -> &'static str {
-    match state {
-        CanBusState::Stopped => "stopped",
-        CanBusState::Error => "error",
-        CanBusState::Active => "active",
-    }
-}
-
-fn can_operation_mode(mode: CanMode) -> OperationMode {
-    match mode {
-        CanMode::Normal => OperationMode::NormalOperation,
-        CanMode::ListenOnly => OperationMode::ListenOnly,
-        CanMode::Loopback => OperationMode::Loopback,
-    }
-}
-
-fn can_cnf_for_bitrate(bitrate: u32) -> Option<mcp25xx::registers::CNF> {
-    match bitrate {
-        1_000_000 => Some(CNF_1000K_BPS),
-        500_000 => Some(CNF_500K_BPS),
-        250_000 => Some(CNF_250K_BPS),
-        200_000 => Some(CNF_200K_BPS),
-        125_000 => Some(CNF_125K_BPS),
-        100_000 => Some(CNF_100K_BPS),
-        _ => None,
-    }
-}
-
-fn parse_bool_field(text: &str, key: &str) -> Option<bool> {
-    let idx = text.find(key)?;
-    let rest = &text[idx + key.len()..];
-    let colon = rest.find(':')?;
-    let value = rest[colon + 1..].trim_start();
-
-    if value.starts_with("true") {
-        Some(true)
-    } else if value.starts_with("false") {
-        Some(false)
-    } else {
-        None
-    }
-}
-
-fn parse_u32_field(text: &str, key: &str) -> Option<u32> {
-    let idx = text.find(key)?;
-    let rest = &text[idx + key.len()..];
-    let colon = rest.find(':')?;
-    let value = rest[colon + 1..].trim_start();
-    let mut end = 0;
-
-    for byte in value.as_bytes() {
-        if byte.is_ascii_digit() {
-            end += 1;
-        } else {
-            break;
-        }
-    }
-
-    if end == 0 {
-        None
-    } else {
-        value[..end].parse().ok()
-    }
-}
-
-fn parse_str_field<'a>(text: &'a str, key: &str) -> Option<&'a str> {
-    let idx = text.find(key)?;
-    let rest = &text[idx + key.len()..];
-    let colon = rest.find(':')?;
-    let value = rest[colon + 1..].trim_start();
-    let value = value.strip_prefix('"')?;
-    let end = value.find('"')?;
-    Some(&value[..end])
-}
-
-fn parse_data_field(text: &str, out: &mut [u8; 8]) -> Option<u8> {
-    let idx = text.find("\"data\"")?;
-    let rest = &text[idx..];
-    let start = rest.find('[')?;
-    let end = rest[start + 1..].find(']')? + start + 1;
-    let mut count = 0;
-
-    for part in rest[start + 1..end].split(',') {
-        let value = part.trim();
-        if value.is_empty() {
-            continue;
-        }
-        if count == out.len() {
-            return None;
-        }
-        let parsed = value.parse::<u8>().ok()?;
-        out[count] = parsed;
-        count += 1;
-    }
-
-    Some(count as u8)
-}
-
-fn parse_can_mode(text: &str) -> Option<CanMode> {
-    match parse_str_field(text, "\"mode\"")? {
-        "normal" => Some(CanMode::Normal),
-        "listen-only" | "listen_only" => Some(CanMode::ListenOnly),
-        "loopback" => Some(CanMode::Loopback),
-        _ => None,
-    }
-}
-
-fn parse_can_tx(text: &str) -> Option<CanTx> {
-    let id = parse_u32_field(text, "\"id\"")?;
-    let ext = parse_bool_field(text, "\"ext\"").unwrap_or(id > 0x7ff);
-    let rtr = parse_bool_field(text, "\"rtr\"").unwrap_or(false);
-    let mut data = [0; 8];
-    let data_len = parse_data_field(text, &mut data).unwrap_or(0);
-    let dlc = parse_u32_field(text, "\"dlc\"")
-        .map(|v| v as u8)
-        .unwrap_or(data_len);
-
-    if dlc > 8 || (!rtr && data_len != dlc) {
-        return None;
-    }
-
-    Some(CanTx {
-        id,
-        ext,
-        rtr,
-        dlc,
-        data,
-    })
-}
-
-fn can_tx_to_frame(tx: CanTx) -> Option<CanFrame> {
-    let id = if tx.ext {
-        Id::Extended(ExtendedId::new(tx.id)?)
-    } else {
-        Id::Standard(StandardId::new(tx.id as u16)?)
-    };
-
-    if tx.rtr {
-        CanFrame::new_remote(id, tx.dlc as usize)
-    } else {
-        CanFrame::new(id, &tx.data[..tx.dlc as usize])
-    }
-}
-
-fn frame_to_can_tx(frame: &CanFrame) -> CanTx {
-    let (id, ext) = match frame.id() {
-        Id::Standard(id) => (id.as_raw() as u32, false),
-        Id::Extended(id) => (id.as_raw(), true),
-    };
-    let mut data = [0; 8];
-    let frame_data = frame.data();
-    data[..frame_data.len()].copy_from_slice(frame_data);
-
-    CanTx {
-        id,
-        ext,
-        rtr: frame.is_remote_frame(),
-        dlc: frame.dlc() as u8,
-        data,
-    }
-}
-
-fn write_can_status_json(out: &mut String<256>, status: CanState) {
-    let _ = core::write!(
-        out,
-        "{{\"type\":\"can.status\",\"ok\":true,\"bus\":0,\"ready\":{},\"state\":\"{}\",\"bitrate\":{},\"mode\":\"{}\",\"txErr\":{},\"rxErr\":{},\"txCount\":{},\"rxCount\":{},\"txQueueUsed\":0,\"txQueueFree\":8,\"rxQueueUsed\":0,\"rxQueueFree\":16}}",
-        if status.ready { "true" } else { "false" },
-        can_state_name(status.state),
-        status.bitrate,
-        can_mode_name(status.mode),
-        status.tx_err,
-        status.rx_err,
-        status.tx_count,
-        status.rx_count
-    );
-}
-
-fn write_can_error_json(out: &mut String<256>, code: &str, message: &str) {
-    let _ = core::write!(
-        out,
-        "{{\"type\":\"error\",\"ok\":false,\"code\":\"{}\",\"message\":\"{}\"}}",
-        code,
-        message
-    );
-}
-
-fn write_can_frame_json(out: &mut String<256>, ty: &str, ok: bool, tx: CanTx) {
-    let _ = core::write!(
-        out,
-        "{{\"type\":\"{}\",\"ok\":{},\"bus\":0,\"id\":{},\"ext\":{},\"rtr\":{},\"dlc\":{},\"data\":[",
-        ty,
-        if ok { "true" } else { "false" },
-        tx.id,
-        if tx.ext { "true" } else { "false" },
-        if tx.rtr { "true" } else { "false" },
-        tx.dlc
-    );
-
-    if !tx.rtr {
-        for i in 0..tx.dlc as usize {
-            if i > 0 {
-                let _ = core::write!(out, ",");
-            }
-            let _ = core::write!(out, "{}", tx.data[i]);
-        }
-    }
-
-    let _ = core::write!(out, "]}}");
-}
-
-async fn send_can_command(command: CanCommand) -> CanReply {
-    let _lock = CAN_CMD_LOCK.lock().await;
-
-    // A previous exchange may have timed out and abandoned its reply; drop any
-    // stale replies so this command gets its own answer, not an old one.
-    while CAN_REPLIES.try_receive().is_ok() {}
-
-    CAN_COMMANDS.send(command).await;
-
-    match select(CAN_REPLIES.receive(), Timer::after(Duration::from_secs(2))).await {
-        Either::First(reply) => reply,
-        Either::Second(()) => CanReply::Error {
-            code: "can_timeout",
-            message: "CAN controller did not answer",
-        },
-    }
-}
-
-async fn handle_can_ws_text(payload: &[u8], out: &mut String<256>) {
-    let Ok(text) = core::str::from_utf8(payload) else {
-        write_can_error_json(out, "invalid_json", "WebSocket payload must be UTF-8 JSON");
-        return;
-    };
-
-    let command = if text.contains("can.status") {
-        Some(CanCommand::Status)
-    } else if text.contains("can.config.get") {
-        Some(CanCommand::ConfigGet)
-    } else if text.contains("can.config.set") {
-        let bitrate = parse_u32_field(text, "\"bitrate\"").unwrap_or(CAN_DEFAULT_BITRATE);
-        let Some(mode) = parse_can_mode(text).or(Some(CanMode::Normal)) else {
-            write_can_error_json(out, "invalid_config", "Invalid CAN mode");
-            return;
-        };
-        Some(CanCommand::ConfigSet { bitrate, mode })
-    } else if text.contains("can.tx") || (text.contains("\"id\"") && text.contains("\"dlc\"")) {
-        match parse_can_tx(text) {
-            Some(tx) => Some(CanCommand::Tx(tx)),
-            None => {
-                write_can_error_json(out, "invalid_frame", "Invalid CAN frame");
-                return;
-            }
-        }
-    } else {
-        None
-    };
-
-    let Some(command) = command else {
-        write_can_error_json(
-            out,
-            "unsupported_type",
-            "Supported messages: can.status, can.config.get, can.config.set, can.tx",
-        );
-        return;
-    };
-
-    match send_can_command(command).await {
-        CanReply::Status(status) => write_can_status_json(out, status),
-        CanReply::TxOk(tx) => write_can_frame_json(out, "can.tx", true, tx),
-        CanReply::Error { code, message } => write_can_error_json(out, code, message),
-    }
-}
+const DEVICE_IPV4_ROLE: u8 = 3;
+const DEVICE_MAC_ROLE: u8 = 1;
+const HOST_MAC_ROLE: u8 = 2;
 
 bind_interrupts!(struct Irqs {
     USBCTRL_IRQ => InterruptHandler<USB>;
 });
-
-#[embassy_executor::task]
-async fn usb_task(mut usb: UsbDevice<'static, Driver<'static, USB>>) {
-    usb.run().await;
-}
-
-#[embassy_executor::task]
-async fn ncm_task(runner: cdc_ncm::embassy_net::Runner<'static, Driver<'static, USB>, MTU>) {
-    runner.run().await;
-}
-
-#[embassy_executor::task]
-async fn net_task(
-    mut runner: embassy_net::Runner<'static, CountingDevice<NcmDevice<'static, MTU>>>,
-) {
-    runner.run().await;
-}
-
-#[embassy_executor::task]
-async fn can_task(
-    spi_peri: embassy_rp::Peri<'static, SPI1>,
-    sck: embassy_rp::Peri<'static, PIN_14>,
-    mosi: embassy_rp::Peri<'static, PIN_15>,
-    miso: embassy_rp::Peri<'static, PIN_8>,
-    cs_pin: embassy_rp::Peri<'static, PIN_19>,
-) {
-    let mut spi_config = SpiConfig::default();
-    spi_config.frequency = CAN_SPI_FREQUENCY;
-
-    let spi = Spi::new_blocking(spi_peri, sck, mosi, miso, spi_config);
-    let cs = Output::new(cs_pin, Level::High);
-    let spi_device = ExclusiveDevice::new_no_delay(spi, cs).unwrap();
-    let mut mcp = MCP25xx { spi: spi_device };
-    let mut status = CanState::stopped();
-    let can_events = CAN_EVENTS.publisher().unwrap();
-
-    match apply_can_config(&mut mcp, CAN_DEFAULT_BITRATE, CanMode::Normal) {
-        Ok(()) => {
-            status.ready = true;
-            status.state = CanBusState::Active;
-            info!("MCP25xx CAN ready: 500 kbit/s, normal mode");
-        }
-        Err(()) => {
-            status.ready = false;
-            status.state = CanBusState::Error;
-            warn!("MCP25xx CAN init failed");
-        }
-    }
-
-    *CAN_STATE.lock().await = status;
-
-    loop {
-        while let Ok(command) = CAN_COMMANDS.try_receive() {
-            let reply = handle_can_command(&mut mcp, &mut status, command);
-            *CAN_STATE.lock().await = status;
-            CAN_REPLIES.send(reply).await;
-        }
-
-        if status.ready {
-            match mcp25xx::embedded_can::nb::Can::receive(&mut mcp) {
-                Ok(frame) => {
-                    status.rx_count = status.rx_count.wrapping_add(1);
-                    *CAN_STATE.lock().await = status;
-                    can_events.publish_immediate(CanEvent::Rx(frame_to_can_tx(&frame)));
-                }
-                Err(nb::Error::WouldBlock) => {}
-                Err(_) => {
-                    status.ready = false;
-                    status.state = CanBusState::Error;
-                    *CAN_STATE.lock().await = status;
-                    warn!("MCP25xx CAN receive failed");
-                }
-            }
-        }
-
-        Timer::after(Duration::from_millis(2)).await;
-    }
-}
-
-fn apply_can_config<SPI: embedded_hal_1::spi::SpiDevice>(
-    mcp: &mut MCP25xx<SPI>,
-    bitrate: u32,
-    mode: CanMode,
-) -> Result<(), ()> {
-    let cnf = can_cnf_for_bitrate(bitrate).ok_or(())?;
-    let config = McpConfig::default()
-        .mode(can_operation_mode(mode))
-        .bitrate(cnf)
-        .receive_buffer_0(RXB0CTRL::default().with_rxm(RXM::ReceiveAny))
-        .receive_buffer_1(RXB1CTRL::default().with_rxm(RXM::ReceiveAny));
-
-    mcp.apply_config(&config).map_err(|_| ())
-}
-
-fn handle_can_command<SPI: embedded_hal_1::spi::SpiDevice>(
-    mcp: &mut MCP25xx<SPI>,
-    status: &mut CanState,
-    command: CanCommand,
-) -> CanReply {
-    match command {
-        CanCommand::Status | CanCommand::ConfigGet => CanReply::Status(*status),
-        CanCommand::ConfigSet { bitrate, mode } => {
-            if can_cnf_for_bitrate(bitrate).is_none() {
-                return CanReply::Error {
-                    code: "unsupported_bitrate",
-                    message: "Supported bitrates: 100000, 125000, 200000, 250000, 500000, 1000000",
-                };
-            }
-
-            match apply_can_config(mcp, bitrate, mode) {
-                Ok(()) => {
-                    status.ready = true;
-                    status.state = CanBusState::Active;
-                    status.bitrate = bitrate;
-                    status.mode = mode;
-                    CanReply::Status(*status)
-                }
-                Err(()) => {
-                    status.ready = false;
-                    status.state = CanBusState::Error;
-                    CanReply::Error {
-                        code: "can_config_failed",
-                        message: "Failed to configure MCP25xx",
-                    }
-                }
-            }
-        }
-        CanCommand::Tx(tx) => {
-            if !status.ready {
-                return CanReply::Error {
-                    code: "can_not_ready",
-                    message: "CAN controller is not ready",
-                };
-            }
-
-            let Some(frame) = can_tx_to_frame(tx) else {
-                return CanReply::Error {
-                    code: "invalid_frame",
-                    message: "Invalid CAN frame",
-                };
-            };
-
-            match mcp25xx::embedded_can::nb::Can::transmit(mcp, &frame) {
-                Ok(None) => {
-                    status.tx_count = status.tx_count.wrapping_add(1);
-                    CanReply::TxOk(tx)
-                }
-                Ok(Some(_)) | Err(nb::Error::WouldBlock) => CanReply::Error {
-                    code: "tx_busy",
-                    message: "No MCP25xx TX buffer is available",
-                },
-                Err(_) => {
-                    status.ready = false;
-                    status.state = CanBusState::Error;
-                    CanReply::Error {
-                        code: "can_tx_failed",
-                        message: "Failed to transmit CAN frame",
-                    }
-                }
-            }
-        }
-    }
-}
-
-async fn write_all(
-    socket: &mut TcpSocket<'_>,
-    mut data: &[u8],
-) -> Result<(), embassy_net::tcp::Error> {
-    while !data.is_empty() {
-        let written = socket.write(data).await?;
-        data = &data[written..];
-    }
-
-    Ok(())
-}
-
-async fn write_http_response(
-    socket: &mut TcpSocket<'_>,
-    content_type: &str,
-    body: &[u8],
-) -> Result<(), embassy_net::tcp::Error> {
-    let mut header = String::<128>::new();
-    let _ = core::write!(
-        header,
-        "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nConnection: close\r\nContent-Length: {}\r\n\r\n",
-        content_type,
-        body.len()
-    );
-    write_all(socket, header.as_bytes()).await?;
-    write_all(socket, body).await
-}
-
-async fn serve_http_connection(
-    socket: &mut TcpSocket<'_>,
-    rx_buf: &mut [u8],
-) -> Result<(), embassy_net::tcp::Error> {
-    let mut len = 0;
-
-    loop {
-        let n = socket.read(&mut rx_buf[len..]).await?;
-        if n == 0 {
-            return Ok(());
-        }
-        len += n;
-
-        if rx_buf[..len].windows(4).any(|w| w == b"\r\n\r\n") || len == rx_buf.len() {
-            break;
-        }
-    }
-
-    let Ok(request) = core::str::from_utf8(&rx_buf[..len]) else {
-        write_all(
-            socket,
-            b"HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
-        )
-        .await?;
-        return Ok(());
-    };
-
-    if request.starts_with("GET /can ") || request.starts_with("GET /ws ") {
-        if let Some(key) = header_value(request, "Sec-WebSocket-Key") {
-            let mut accept = [0u8; 28];
-            websocket_accept_key(key, &mut accept);
-
-            write_all(socket, b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ").await?;
-            write_all(socket, &accept).await?;
-            write_all(socket, b"\r\n\r\n").await?;
-            // TCP keepalive probes an idle-but-live peer; the timeout then only
-            // fires for peers that are actually gone (unplug, sleep), instead of
-            // a dead peer holding the socket forever.
-            socket.set_timeout(Some(WS_TIMEOUT));
-            socket.set_keep_alive(Some(WS_KEEPALIVE));
-            websocket_loop(socket, rx_buf).await?;
-        } else {
-            write_all(
-                socket,
-                b"HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
-            )
-            .await?;
-        }
-    } else if request.starts_with("GET /api/status ") {
-        const BODY: &[u8] =
-            br#"{"device":"pico-can-bridge-rs","network":"cdc-ncm","websocket":"/can"}"#;
-        write_http_response(socket, "application/json", BODY).await?;
-    } else {
-        const BODY: &[u8] = br#"<!doctype html>
-<html>
-<head>
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Pico CAN Bridge</title>
-<style>
-body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;margin:24px;line-height:1.4;background:#f7f7f8;color:#1f2328}
-h1{font-size:24px;margin:0 0 16px}
-button{font:inherit;margin:0 8px 8px 0;padding:10px 14px;border:1px solid #b7bcc4;border-radius:6px;background:#fff}
-button:active{background:#e8eef8}
-#state{margin:12px 0;font-weight:600}
-pre{white-space:pre-wrap;background:#111827;color:#d1fae5;padding:12px;border-radius:6px;min-height:160px}
-</style>
-</head>
-<body>
-<h1>Pico CAN Bridge</h1>
-<div>
-<button onclick="sendStatus()">Status</button>
-<button onclick="led(1)">LED on</button>
-<button onclick="led(0)">LED off</button>
-<button onclick="rtr()">RTR poll</button>
-</div>
-<div id="state">Connecting...</div>
-<pre id="log"></pre>
-<script>
-let ws;
-const logEl=document.getElementById("log");
-const stateEl=document.getElementById("state");
-function log(s){logEl.textContent+=s+"\n";logEl.scrollTop=logEl.scrollHeight}
-function connect(){
-  ws=new WebSocket("ws://"+location.host+"/can");
-  ws.onopen=()=>{stateEl.textContent="Connected";sendStatus()};
-  ws.onclose=()=>{stateEl.textContent="Disconnected";setTimeout(connect,1000)};
-  ws.onerror=()=>{stateEl.textContent="WebSocket error"};
-  ws.onmessage=e=>log(e.data);
-}
-function send(o){if(ws&&ws.readyState===1)ws.send(JSON.stringify(o))}
-function sendStatus(){send({type:"can.status"})}
-function led(v){send({type:"can.tx",bus:0,id:291,ext:false,rtr:false,dlc:1,data:[v]})}
-function rtr(){send({type:"can.tx",bus:0,id:291,ext:false,rtr:true,dlc:1,data:[]})}
-connect();
-</script>
-</body>
-</html>
-"#;
-        write_http_response(socket, "text/html", BODY).await?;
-    }
-
-    Ok(())
-}
-
-async fn websocket_loop(
-    socket: &mut TcpSocket<'_>,
-    buf: &mut [u8],
-) -> Result<(), embassy_net::tcp::Error> {
-    const READY: &[u8] = b"{\"type\":\"hello\",\"ok\":true,\"endpoint\":\"/can\"}";
-    let mut response = String::<256>::new();
-    // Capacity is one subscriber per HTTP socket, and each socket serves at
-    // most one WebSocket at a time, so this cannot fail.
-    let Ok(mut can_events) = CAN_EVENTS.subscriber() else {
-        return Ok(());
-    };
-
-    websocket_send_text(socket, READY).await?;
-
-    loop {
-        let n = match select(socket.read(buf), can_events.next_message_pure()).await {
-            Either::First(result) => result?,
-            Either::Second(CanEvent::Rx(frame)) => {
-                response.clear();
-                write_can_frame_json(&mut response, "can.rx", true, frame);
-                websocket_send_text(socket, response.as_bytes()).await?;
-                continue;
-            }
-        };
-
-        if n < 2 {
-            return Ok(());
-        }
-
-        let opcode = buf[0] & 0x0f;
-        let masked = (buf[1] & 0x80) != 0;
-        let payload_len = (buf[1] & 0x7f) as usize;
-        if payload_len > 125 || n < 2 + if masked { 4 } else { 0 } + payload_len {
-            return Ok(());
-        }
-
-        let payload_start = 2 + if masked { 4 } else { 0 };
-        let payload_end = payload_start + payload_len;
-
-        if masked {
-            let mask = [buf[2], buf[3], buf[4], buf[5]];
-            for i in 0..payload_len {
-                buf[payload_start + i] ^= mask[i % 4];
-            }
-        }
-
-        match opcode {
-            0x8 => {
-                socket.write(&[0x88, 0x00]).await?;
-                return Ok(());
-            }
-            0x9 => {
-                socket.write(&[0x8a, payload_len as u8]).await?;
-                if payload_len > 0 {
-                    let payload = &buf[payload_start..payload_end];
-                    write_all(socket, payload).await?;
-                }
-            }
-            0x1 => {
-                response.clear();
-                handle_can_ws_text(&buf[payload_start..payload_end], &mut response).await;
-                websocket_send_text(socket, response.as_bytes()).await?;
-            }
-            0x2 => {
-                const RESPONSE: &[u8] = b"{\"type\":\"error\",\"ok\":false,\"code\":\"unsupported_type\",\"message\":\"binary CAN messages are not supported yet\"}";
-                websocket_send_text(socket, RESPONSE).await?;
-            }
-            _ => {}
-        }
-    }
-}
-
-async fn websocket_send_text(
-    socket: &mut TcpSocket<'_>,
-    payload: &[u8],
-) -> Result<(), embassy_net::tcp::Error> {
-    if payload.len() < 126 {
-        socket.write(&[0x81, payload.len() as u8]).await?;
-    } else {
-        let len = payload.len() as u16;
-        socket
-            .write(&[0x81, 126, (len >> 8) as u8, len as u8])
-            .await?;
-    }
-
-    write_all(socket, payload).await
-}
-
-#[embassy_executor::task(pool_size = HTTP_SOCKETS)]
-async fn http_task(stack: Stack<'static>) {
-    let mut rx_buf = [0; 2048];
-    let mut tx_buf = [0; 2048];
-    let mut request_buf = [0; 1024];
-    let mut socket = TcpSocket::new(stack, &mut rx_buf, &mut tx_buf);
-
-    loop {
-        socket.set_timeout(Some(Duration::from_secs(10)));
-        socket.set_keep_alive(None);
-        socket.set_nagle_enabled(false);
-
-        if socket.accept(HTTP_PORT).await.is_ok() {
-            info!("HTTP client connected");
-            match serve_http_connection(&mut socket, &mut request_buf).await {
-                Ok(()) => {
-                    socket.close();
-                    let _ = socket.flush().await;
-                }
-                Err(_) => {
-                    socket.abort();
-                    let _ = socket.flush().await;
-                }
-            }
-        } else {
-            socket.abort();
-            let _ = socket.flush().await;
-        }
-
-        Timer::after(Duration::from_millis(50)).await;
-    }
-}
-
-#[cfg(feature = "mdns")]
-#[embassy_executor::task]
-async fn mdns_task(stack: Stack<'static>, state: &'static MdnsState<MdnsRng>) {
-    static RX_META: StaticCell<[PacketMetadata; 4]> = StaticCell::new();
-    static RX_BUF: StaticCell<[u8; 2048]> = StaticCell::new();
-    static TX_META: StaticCell<[PacketMetadata; 4]> = StaticCell::new();
-    static TX_BUF: StaticCell<[u8; 2048]> = StaticCell::new();
-    static RX_META_V6: StaticCell<[PacketMetadata; 4]> = StaticCell::new();
-    static RX_BUF_V6: StaticCell<[u8; 2048]> = StaticCell::new();
-    static TX_META_V6: StaticCell<[PacketMetadata; 4]> = StaticCell::new();
-    static TX_BUF_V6: StaticCell<[u8; 2048]> = StaticCell::new();
-    static SCRATCH: StaticCell<[u8; 2048]> = StaticCell::new();
-
-    let rx_meta = RX_META.init([PacketMetadata::EMPTY; 4]);
-    let rx_buf = RX_BUF.init([0; 2048]);
-    let tx_meta = TX_META.init([PacketMetadata::EMPTY; 4]);
-    let tx_buf = TX_BUF.init([0; 2048]);
-    let rx_meta_v6 = RX_META_V6.init([PacketMetadata::EMPTY; 4]);
-    let rx_buf_v6 = RX_BUF_V6.init([0; 2048]);
-    let tx_meta_v6 = TX_META_V6.init([PacketMetadata::EMPTY; 4]);
-    let tx_buf_v6 = TX_BUF_V6.init([0; 2048]);
-    let scratch = SCRATCH.init([0; 2048]);
-
-    stack
-        .join_multicast_group(IpAddress::v4(224, 0, 0, 251))
-        .unwrap();
-    stack
-        .join_multicast_group(IpAddress::v6(0xff02, 0, 0, 0, 0, 0, 0, 0x00fb))
-        .unwrap();
-
-    let mut socket_v4 = UdpSocket::new(stack, rx_meta, rx_buf, tx_meta, tx_buf);
-    socket_v4.bind(5353).unwrap();
-    let mut socket_v6 = UdpSocket::new(stack, rx_meta_v6, rx_buf_v6, tx_meta_v6, tx_buf_v6);
-    socket_v6.bind(5353).unwrap();
-
-    info!("mDNS responder ready: pico-can-bridge.local");
-    state
-        .run(Some(&mut socket_v4), Some(&mut socket_v6), scratch)
-        .await;
-}
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
@@ -1229,15 +97,18 @@ async fn main(spawner: Spawner) {
         warn!("flash unique ID read failed, using fallback link-local seed");
     }
 
-    let device_ipv4_octets = link_local_from_seed(&flash_uid);
+    let device_ipv4_octets = network::link_local_from_seed(&flash_uid, DEVICE_IPV4_ROLE);
+    let device_mac = network::mac_from_seed(&flash_uid, DEVICE_MAC_ROLE);
+    let host_mac = network::mac_from_seed(&flash_uid, HOST_MAC_ROLE);
     let device_ipv4 = Ipv4Address::new(
         device_ipv4_octets[0],
         device_ipv4_octets[1],
         device_ipv4_octets[2],
         device_ipv4_octets[3],
     );
-    let usb_driver = Driver::new(p.USB, Irqs);
+    let device_ipv6 = network::ipv6_link_local_from_mac(&device_mac);
 
+    let usb_driver = Driver::new(p.USB, Irqs);
     let mut usb_config = UsbConfig::new(0xc0de, 0xcafe);
     usb_config.manufacturer = Some("pico-can-bridge-rs");
     usb_config.product = Some("Pico CAN Bridge CDC-NCM");
@@ -1265,15 +136,14 @@ async fn main(spawner: Spawner) {
     let ncm = cdc_ncm::CdcNcmClass::new(
         &mut builder,
         NCM_STATE.init(cdc_ncm::State::new()),
-        HOST_MAC,
+        host_mac,
         USB_MAX_PACKET_SIZE,
     );
 
     static NCM_NET_STATE: StaticCell<NcmNetState<MTU, 4, 4>> = StaticCell::new();
     let (ncm_runner, ncm_device) =
-        ncm.into_embassy_net_device(NCM_NET_STATE.init(NcmNetState::new()), DEVICE_MAC);
+        ncm.into_embassy_net_device(NCM_NET_STATE.init(NcmNetState::new()), device_mac);
 
-    let device_ipv6 = ipv6_link_local_from_mac(&DEVICE_MAC);
     let mut net_config = NetConfig::ipv4_static(StaticConfigV4 {
         address: Ipv4Cidr::new(device_ipv4, DEVICE_IPV4_PREFIX_LEN),
         gateway: None,
@@ -1287,7 +157,7 @@ async fn main(spawner: Spawner) {
 
     static NET_RESOURCES: StaticCell<StackResources<8>> = StaticCell::new();
     let (stack, net_runner) = embassy_net::new(
-        CountingDevice { inner: ncm_device },
+        network::CountingDevice { inner: ncm_device },
         net_config,
         NET_RESOURCES.init(StackResources::new()),
         0x1234_5678,
@@ -1295,17 +165,17 @@ async fn main(spawner: Spawner) {
 
     let usb = builder.build();
 
-    spawner.spawn(usb_task(usb).unwrap());
-    spawner.spawn(ncm_task(ncm_runner).unwrap());
-    spawner.spawn(net_task(net_runner).unwrap());
+    spawner.spawn(network::usb_task(usb).unwrap());
+    spawner.spawn(network::ncm_task(ncm_runner).unwrap());
+    spawner.spawn(network::net_task(net_runner).unwrap());
     for _ in 0..HTTP_SOCKETS {
-        spawner.spawn(http_task(stack).unwrap());
+        spawner.spawn(http::http_task(stack).unwrap());
     }
-    spawner.spawn(can_task(p.SPI1, p.PIN_14, p.PIN_15, p.PIN_8, p.PIN_19).unwrap());
+    spawner.spawn(can::can_task(p.SPI1, p.PIN_14, p.PIN_15, p.PIN_8, p.PIN_19).unwrap());
 
     info!(
-        "USB CDC-NCM ready, IPv4 169.254.{}.{}/16, device MAC={=[u8]:02x}, host hint MAC={=[u8]:02x}",
-        device_ipv4_octets[2], device_ipv4_octets[3], DEVICE_MAC, HOST_MAC
+        "USB CDC-NCM ready, IPv4 169.254.{}.{}/16, device MAC={=[u8]:02x}, host MAC={=[u8]:02x}",
+        device_ipv4_octets[2], device_ipv4_octets[3], device_mac, host_mac
     );
     uart.blocking_write(b"USB CDC-NCM ready, IPv4 link-local from flash UID\r\n")
         .unwrap();
@@ -1313,9 +183,9 @@ async fn main(spawner: Spawner) {
         .unwrap();
 
     #[cfg(feature = "mdns")]
-    let mut mdns_state: Option<&'static MdnsState<MdnsRng>> = None;
+    let mut mdns_state: Option<&'static mdns::MdnsState<mdns::MdnsRng>> = None;
     #[cfg(feature = "mdns")]
-    let mut mdns_service: Option<ServiceHandle> = None;
+    let mut mdns_service: Option<mdns::ServiceHandle> = None;
     let mut link_ever_up = false;
     let mut link_watchdog_misses = 0;
 
@@ -1354,11 +224,11 @@ async fn main(spawner: Spawner) {
 
         // Wait for proof the host can hear us; a deaf host needs a fresh USB
         // enumeration to see the NCM connection notification again.
-        let rx_before = NET_RX_PACKETS.load(Ordering::Relaxed);
+        let rx_before = network::NET_RX_PACKETS.load(Ordering::Relaxed);
         let mut host_alive = false;
         let mut waited = Duration::from_millis(0);
         while stack.is_link_up() && waited < HOST_SILENCE_TIMEOUT {
-            if NET_RX_PACKETS.load(Ordering::Relaxed) != rx_before {
+            if network::NET_RX_PACKETS.load(Ordering::Relaxed) != rx_before {
                 host_alive = true;
                 break;
             }
@@ -1367,12 +237,12 @@ async fn main(spawner: Spawner) {
         }
 
         if host_alive {
-            set_host_silence_reset_count(0);
+            network::set_host_silence_reset_count(0);
             uart.blocking_write(b"host traffic seen\r\n").unwrap();
         } else if stack.is_link_up() {
-            let resets = host_silence_reset_count();
+            let resets = network::host_silence_reset_count();
             if resets < HOST_SILENCE_RESET_LIMIT {
-                set_host_silence_reset_count(resets + 1);
+                network::set_host_silence_reset_count(resets + 1);
                 warn!("host silent after link-up, forcing USB re-enumeration");
                 uart.blocking_write(b"host silent, re-enumerating (reset)\r\n")
                     .unwrap();
@@ -1395,13 +265,15 @@ async fn main(spawner: Spawner) {
                 None => {
                     uart.blocking_write(b"mDNS starting\r\n").unwrap();
 
-                    static MDNS_STATE: StaticCell<MdnsState<MdnsRng>> = StaticCell::new();
+                    static MDNS_STATE: StaticCell<mdns::MdnsState<mdns::MdnsRng>> =
+                        StaticCell::new();
 
-                    let mdns: &'static MdnsState<MdnsRng> = MDNS_STATE.init(MdnsState::new(
-                        EndpointConfig::new(),
-                        MdnsRng::new(0x7069_636f_6361_6e01),
-                    ));
-                    spawner.spawn(mdns_task(stack, mdns).unwrap());
+                    let mdns: &'static mdns::MdnsState<mdns::MdnsRng> =
+                        MDNS_STATE.init(mdns::MdnsState::new(
+                            mdns::EndpointConfig::new(),
+                            mdns::MdnsRng::new(0x7069_636f_6361_6e01),
+                        ));
+                    spawner.spawn(mdns::mdns_task(stack, mdns).unwrap());
                     mdns_state = Some(mdns);
                     mdns
                 }
@@ -1411,13 +283,13 @@ async fn main(spawner: Spawner) {
             // DAD, IPv4 link-local ARP claim) and misses announcements sent
             // before it is listening. Wait for it to settle, then (re)register
             // so a full probe + announce cycle goes out on every link-up, as
-            // RFC 6762 §8.3 expects.
+            // RFC 6762 section 8.3 expects.
             Timer::after(MDNS_HOST_SETTLE_DELAY).await;
 
             if let Some(handle) = mdns_service.take() {
                 mdns.unregister_service(handle);
             }
-            match mdns.register_service(ServiceSpec::new(build_mdns_records(
+            match mdns.register_service(mdns::ServiceSpec::new(mdns::build_mdns_records(
                 device_ipv4_octets,
                 device_ipv6,
             ))) {
@@ -1444,16 +316,14 @@ async fn main(spawner: Spawner) {
                     if let (Some(mdns), Some(handle)) = (mdns_state, mdns_service) {
                         while let Some(update) = mdns.poll_service_update(handle) {
                             let line: &[u8] = match update {
-                                ServiceUpdate::Established => {
-                                    b"mDNS service established\r\n"
-                                }
-                                ServiceUpdate::Renamed(_) => {
+                                mdns::ServiceUpdate::Established => b"mDNS service established\r\n",
+                                mdns::ServiceUpdate::Renamed(_) => {
                                     b"mDNS CONFLICT: service renamed\r\n"
                                 }
-                                ServiceUpdate::Conflict => {
+                                mdns::ServiceUpdate::Conflict => {
                                     b"mDNS CONFLICT: unresolved, service dead\r\n"
                                 }
-                                ServiceUpdate::HostConflict => {
+                                mdns::ServiceUpdate::HostConflict => {
                                     b"mDNS CONFLICT: host name claimed by peer\r\n"
                                 }
                                 _ => b"mDNS service update (unknown)\r\n",

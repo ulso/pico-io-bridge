@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>CAN LED Control</title>
+<style>
+:root{color-scheme:light dark;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+body{margin:0;background:#f3f5f7;color:#17202a}
+main{max-width:520px;margin:0 auto;padding:20px}
+header{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:14px}
+h1{font-size:24px;line-height:1.2;margin:0;font-weight:700}
+.status{display:inline-flex;align-items:center;gap:8px;font-size:14px;font-weight:650}
+.dot{width:10px;height:10px;border-radius:50%;background:#d64545}.ok .dot{background:#1f9d55}.wait .dot{background:#d99a22}
+.panel{border:1px solid #c7d0da;background:#fff;border-radius:8px;padding:14px;margin-top:16px}
+label{display:block;font-size:12px;font-weight:700;margin:0 0 5px;color:#303b46}
+input{box-sizing:border-box;width:100%;border:1px solid #bdc7d1;border-radius:6px;background:#fff;color:#17202a;padding:10px;font:16px ui-monospace,SFMono-Regular,Menlo,monospace}
+.toolbar{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
+button{border:1px solid #9aa7b2;background:#fff;color:#17202a;border-radius:6px;padding:10px 14px;font:inherit;font-weight:650;min-height:42px}
+button:disabled{opacity:.45}.primary{background:#17202a;color:#fff;border-color:#17202a}
+pre{box-sizing:border-box;width:100%;min-height:120px;overflow:auto;border:1px solid #c7d0da;border-radius:8px;background:#fff;color:#17202a;padding:10px;margin:16px 0 0;font:12px ui-monospace,SFMono-Regular,Menlo,monospace;white-space:pre-wrap}
+@media(prefers-color-scheme:dark){body{background:#111820;color:#edf2f7}.panel,pre,input,button{background:#17212b;color:#edf2f7;border-color:#3b4b5c}.primary{background:#edf2f7;color:#111820}label{color:#b9c3cf}}
+</style>
+</head>
+<body>
+<main>
+<header>
+<h1>CAN LED Control</h1>
+<div id="status" class="status wait"><span class="dot"></span><span id="statusText">connecting</span></div>
+</header>
+<section class="panel">
+<label for="canId">Target CAN ID</label>
+<input id="canId" value="123" inputmode="text">
+<div class="toolbar">
+<button id="on" class="primary" disabled>On</button>
+<button id="off" disabled>Off</button>
+</div>
+</section>
+<pre id="log"></pre>
+</main>
+<script>
+const statusEl=document.getElementById('status');
+const statusText=document.getElementById('statusText');
+const logEl=document.getElementById('log');
+const canIdEl=document.getElementById('canId');
+const onBtn=document.getElementById('on');
+const offBtn=document.getElementById('off');
+let ws;
+function now(){return new Date().toLocaleTimeString()}
+function log(s){logEl.textContent+=now()+'  '+s+'\n';logEl.scrollTop=logEl.scrollHeight}
+function setStatus(kind,text){statusEl.className='status '+kind;statusText.textContent=text}
+function setEnabled(on){onBtn.disabled=!on;offBtn.disabled=!on}
+function parseId(text){const s=text.trim();return Number.parseInt(s,/^0x/i.test(s)?16:10)}
+function send(value){
+  const id=parseId(canIdEl.value);
+  if(!Number.isInteger(id)||id<0){log('! invalid CAN ID');return}
+  const msg={type:'can.tx',bus:0,id,ext:false,rtr:false,dlc:1,data:[value]};
+  ws.send(JSON.stringify(msg));
+  log('> '+JSON.stringify(msg));
+}
+function connect(){
+  ws=new WebSocket('ws://pico-can-bridge.local/can');
+  ws.onopen=()=>{setStatus('ok','connected');setEnabled(true);log('connected')};
+  ws.onmessage=e=>log('< '+e.data);
+  ws.onclose=e=>{setStatus('','disconnected');setEnabled(false);log('closed '+e.code);setTimeout(connect,1500)};
+  ws.onerror=()=>{setStatus('','error');log('error')};
+}
+onBtn.onclick=()=>send(1);
+offBtn.onclick=()=>send(0);
+connect();
+</script>
+</body>
+</html>
