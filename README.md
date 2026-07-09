@@ -12,6 +12,7 @@ over SPI.
 
 - USB CDC-NCM Ethernet interface
 - IPv4 link-local address derived from the Pico flash UID
+- Optional embedded DHCP server using a UID-derived `10.x.y.0/24` subnet
 - Stable locally administered MAC addresses derived from the Pico flash UID
 - IPv6 link-local address derived from the device MAC
 - mDNS/DNS-SD advertisement for `_http._tcp`
@@ -53,6 +54,17 @@ For MCP25625 instead of MCP2515:
 cargo build --release --no-default-features --features mdns,mcp25625
 ```
 
+To try the embedded DHCP server:
+
+```sh
+cargo build --release --features dhcp-server
+```
+
+In this mode the Pico uses `10.x.y.1/24` and leases `10.x.y.2/24` to the USB
+host. The `x.y` subnet bytes are derived from the flash UID, so different boards
+should normally land on different private /24 networks. The DHCP response does
+not advertise a router or DNS server; `.local` discovery still comes from mDNS.
+
 ## Flash
 
 The cargo runner is configured for `elf2uf2-rs`:
@@ -68,6 +80,10 @@ cargo run --release
 ```
 
 ## Network Use
+
+The default build uses IPv4 link-local networking. With the optional
+`dhcp-server` feature enabled, the device instead uses its UID-derived
+`10.x.y.1/24` address and gives the host `10.x.y.2/24`.
 
 The device advertises:
 
@@ -158,6 +174,8 @@ Examples:
   link-local address, the firmware will not automatically move to a new address.
 - The IPv4 address space used here is only the normal 169.254/16 link-local
   range, so collisions are possible in principle.
+- The optional DHCP mode avoids the 169.254/16 link-local route ambiguity, but it
+  still does not probe the chosen `10.x.y.0/24` subnet before using it.
 - The WebSocket protocol is intentionally small and JSON-only at the moment.
 - There is no flash filesystem or custom page upload support in this Rust
   version yet. The root page is always the built-in CAN console.

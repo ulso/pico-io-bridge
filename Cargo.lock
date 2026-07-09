@@ -1129,6 +1129,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
 
 [[package]]
+name = "leasehund"
+version = "0.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7ab893c67141540cec10edc492b3fd2d091d2255af22e48a0a62120c437065c1"
+dependencies = [
+ "defmt 1.1.0",
+ "embassy-net",
+ "embassy-time",
+ "hash32",
+ "heapless 0.9.3",
+ "smoltcp",
+]
+
+[[package]]
 name = "libc"
 version = "0.2.186"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1401,6 +1415,7 @@ dependencies = [
  "futures",
  "heapless 0.9.3",
  "hick-embassy",
+ "leasehund",
  "log",
  "mcp25xx",
  "mdns-proto",

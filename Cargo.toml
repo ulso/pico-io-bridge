@@ -9,6 +9,7 @@ resolver = "2"
 [features]
 default = ["mdns", "mcp2515"]
 mdns = ["dep:embedded-alloc", "dep:hick-embassy", "dep:mdns-proto", "hick-embassy/no-atomic", "mdns-proto/no-atomic", "embassy-net/mdns"]
+dhcp-server = ["dep:leasehund", "leasehund/defmt", "embassy-net/dhcpv4"]
 mcp2515 = ["mcp25xx/mcp2515"]
 mcp25625 = ["mcp25xx/mcp25625"]
 
@@ -49,6 +50,7 @@ rand = { version = "0.10.1", default-features = false }
 rand_core = { version = "0.10.1", default-features = false }
 hick-embassy = { version = "0.2", default-features = false, optional = true }
 mdns-proto = { version = "0.3", default-features = false, optional = true }
+leasehund = { version = "0.5.2", default-features = false, optional = true }
 mcp25xx = "0.4.0"
 nb = "1.1.0"
 

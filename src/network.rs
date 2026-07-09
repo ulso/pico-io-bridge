@@ -87,11 +87,21 @@ fn fnv1a64_with_role(seed: &[u8], role: u8) -> u64 {
     hash.wrapping_mul(0x0000_0100_0000_01b3)
 }
 
+#[cfg(not(feature = "dhcp-server"))]
 pub(crate) fn link_local_from_seed(seed: &[u8], role: u8) -> [u8; 4] {
     let hash = fnv1a64_with_role(seed, role);
     let host = (hash % (254 * 256)) as u16;
 
     [169, 254, 1 + (host / 256) as u8, (host & 0xff) as u8]
+}
+
+#[cfg(feature = "dhcp-server")]
+pub(crate) fn private_subnet_from_seed(seed: &[u8], role: u8) -> ([u8; 4], [u8; 4]) {
+    let bytes = fnv1a64_with_role(seed, role).to_le_bytes();
+    let subnet_x = 1 + (bytes[0] % 254);
+    let subnet_y = bytes[1];
+
+    ([10, subnet_x, subnet_y, 1], [10, subnet_x, subnet_y, 2])
 }
 
 pub(crate) fn mac_from_seed(seed: &[u8], role: u8) -> [u8; 6] {

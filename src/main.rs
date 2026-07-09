@@ -4,6 +4,8 @@
 #![no_main]
 
 mod can;
+#[cfg(feature = "dhcp-server")]
+mod dhcp;
 mod http;
 #[cfg(feature = "mdns")]
 mod mdns;
@@ -62,7 +64,13 @@ const HEAP_SIZE: usize = 32768;
 #[global_allocator]
 static HEAP: Heap = Heap::empty();
 
+#[cfg(feature = "dhcp-server")]
+const DEVICE_IPV4_PREFIX_LEN: u8 = 24;
+#[cfg(not(feature = "dhcp-server"))]
 const DEVICE_IPV4_PREFIX_LEN: u8 = 16;
+#[cfg(feature = "dhcp-server")]
+const DEVICE_DHCP_ROLE: u8 = 4;
+#[cfg(not(feature = "dhcp-server"))]
 const DEVICE_IPV4_ROLE: u8 = 3;
 const DEVICE_MAC_ROLE: u8 = 1;
 const HOST_MAC_ROLE: u8 = 2;
@@ -97,6 +105,10 @@ async fn main(spawner: Spawner) {
         warn!("flash unique ID read failed, using fallback link-local seed");
     }
 
+    #[cfg(feature = "dhcp-server")]
+    let (device_ipv4_octets, host_ipv4_octets) =
+        network::private_subnet_from_seed(&flash_uid, DEVICE_DHCP_ROLE);
+    #[cfg(not(feature = "dhcp-server"))]
     let device_ipv4_octets = network::link_local_from_seed(&flash_uid, DEVICE_IPV4_ROLE);
     let device_mac = network::mac_from_seed(&flash_uid, DEVICE_MAC_ROLE);
     let host_mac = network::mac_from_seed(&flash_uid, HOST_MAC_ROLE);
@@ -168,15 +180,41 @@ async fn main(spawner: Spawner) {
     spawner.spawn(network::usb_task(usb).unwrap());
     spawner.spawn(network::ncm_task(ncm_runner).unwrap());
     spawner.spawn(network::net_task(net_runner).unwrap());
+    #[cfg(feature = "dhcp-server")]
+    spawner.spawn(dhcp::dhcp_task(stack, device_ipv4_octets, host_ipv4_octets).unwrap());
     for _ in 0..HTTP_SOCKETS {
         spawner.spawn(http::http_task(stack).unwrap());
     }
     spawner.spawn(can::can_task(p.SPI1, p.PIN_14, p.PIN_15, p.PIN_8, p.PIN_19).unwrap());
 
+    #[cfg(feature = "dhcp-server")]
     info!(
-        "USB CDC-NCM ready, IPv4 169.254.{}.{}/16, device MAC={=[u8]:02x}, host MAC={=[u8]:02x}",
-        device_ipv4_octets[2], device_ipv4_octets[3], device_mac, host_mac
+        "USB CDC-NCM ready, DHCP IPv4 {}.{}.{}.{}/24, host lease {}.{}.{}.{}/24, device MAC={=[u8]:02x}, host MAC={=[u8]:02x}",
+        device_ipv4_octets[0],
+        device_ipv4_octets[1],
+        device_ipv4_octets[2],
+        device_ipv4_octets[3],
+        host_ipv4_octets[0],
+        host_ipv4_octets[1],
+        host_ipv4_octets[2],
+        host_ipv4_octets[3],
+        device_mac,
+        host_mac
     );
+    #[cfg(not(feature = "dhcp-server"))]
+    info!(
+        "USB CDC-NCM ready, IPv4 {}.{}.{}.{}/16, device MAC={=[u8]:02x}, host MAC={=[u8]:02x}",
+        device_ipv4_octets[0],
+        device_ipv4_octets[1],
+        device_ipv4_octets[2],
+        device_ipv4_octets[3],
+        device_mac,
+        host_mac
+    );
+    #[cfg(feature = "dhcp-server")]
+    uart.blocking_write(b"USB CDC-NCM ready, DHCP IPv4 from flash UID\r\n")
+        .unwrap();
+    #[cfg(not(feature = "dhcp-server"))]
     uart.blocking_write(b"USB CDC-NCM ready, IPv4 link-local from flash UID\r\n")
         .unwrap();
     uart.blocking_write(b"CAN task starting, SPI1 SCK GP14 MOSI GP15 MISO GP8 CS GP19\r\n")
@@ -217,8 +255,12 @@ async fn main(spawner: Spawner) {
         link_ever_up = true;
 
         info!(
-            "CDC-NCM link up, IPv4 address 169.254.{}.{}/16",
-            device_ipv4_octets[2], device_ipv4_octets[3]
+            "CDC-NCM link up, IPv4 address {}.{}.{}.{}/{}",
+            device_ipv4_octets[0],
+            device_ipv4_octets[1],
+            device_ipv4_octets[2],
+            device_ipv4_octets[3],
+            DEVICE_IPV4_PREFIX_LEN
         );
         uart.blocking_write(b"CDC-NCM link up\r\n").unwrap();
 

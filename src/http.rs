@@ -159,7 +159,7 @@ async fn write_http_response(
     content_type: &str,
     body: &[u8],
 ) -> Result<(), embassy_net::tcp::Error> {
-    let mut header = String::<128>::new();
+    let mut header = String::<160>::new();
     let _ = core::write!(
         header,
         "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nConnection: close\r\nContent-Length: {}\r\n\r\n",
@@ -168,6 +168,19 @@ async fn write_http_response(
     );
     write_all(socket, header.as_bytes()).await?;
     write_all(socket, body).await
+}
+
+async fn write_empty_response(
+    socket: &mut TcpSocket<'_>,
+    status: &str,
+) -> Result<(), embassy_net::tcp::Error> {
+    let mut header = String::<128>::new();
+    let _ = core::write!(
+        header,
+        "HTTP/1.1 {}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
+        status
+    );
+    write_all(socket, header.as_bytes()).await
 }
 
 async fn serve_http_connection(
@@ -209,23 +222,26 @@ async fn serve_http_connection(
             socket.set_keep_alive(Some(crate::WS_KEEPALIVE));
             websocket_loop(socket, rx_buf).await?;
         } else {
-            write_all(
-                socket,
-                b"HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
-            )
-            .await?;
+            write_empty_response(socket, "400 Bad Request").await?;
         }
     } else if request.starts_with("GET /api/status ") {
         const BODY: &[u8] =
             br#"{"device":"pico-can-bridge-rs","network":"cdc-ncm","websocket":"/can"}"#;
         write_http_response(socket, "application/json", BODY).await?;
-    } else {
+    } else if request.starts_with("GET /favicon.ico ") {
+        write_all(
+            socket,
+            b"HTTP/1.1 204 No Content\r\nConnection: close\r\nContent-Length: 0\r\nCache-Control: max-age=86400\r\n\r\n",
+        )
+        .await?;
+    } else if request.starts_with("GET / ") || request.starts_with("GET /index.html ") {
         const BODY: &[u8] = br#"<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Pico CAN Bridge</title>
+<link rel="icon" href="data:,">
 <style>
 :root{color-scheme:light dark;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
 body{margin:0;background:#f3f5f7;color:#17202a}
@@ -362,6 +378,7 @@ const filterIdEl=document.getElementById("filterId");
 const clearFramesBtn=document.getElementById("clearFrames");
 let ws=null;
 let statusTimer=null;
+let connectWatch=null;
 let rxCount=0,txCount=0,errCount=0;
 let frames=[];
 let configDirty=false;
@@ -369,6 +386,7 @@ function now(){return new Date().toLocaleTimeString()}
 function log(line){logEl.textContent+=now()+"  "+line+"\n";logEl.scrollTop=logEl.scrollHeight}
 function setStatus(kind,text){statusEl.className="status "+kind;statusText.textContent=text}
 function setConnected(on){connectBtn.disabled=on;disconnectBtn.disabled=!on;sendBtn.disabled=!on;applyConfigBtn.disabled=!on;refreshStatusBtn.disabled=!on}
+function clearConnectWatch(){if(connectWatch){clearTimeout(connectWatch);connectWatch=null}}
 function parseId(text){const s=text.trim();return Number.parseInt(s,/^0x/i.test(s)?16:10)}
 function parseData(text){const s=text.trim();if(!s)return[];return s.split(/[ ,]+/).filter(Boolean).map(v=>Number.parseInt(v,/^0x/i.test(v)?16:16))}
 function fmtId(id,ext){return "0x"+Number(id).toString(16).toUpperCase().padStart(ext?8:3,"0")}
@@ -396,11 +414,16 @@ async function copyText(text){if(navigator.clipboard&&navigator.clipboard.writeT
 function connect(){
  if(ws&&ws.readyState<2)return;
  setStatus("wait","connecting");
- ws=new WebSocket("ws://"+location.host+"/can");
- ws.onopen=()=>{setStatus("ok","connected");setConnected(true);log("connected");requestStatus();statusTimer=setInterval(requestStatus,2000)};
- ws.onmessage=e=>{try{const msg=JSON.parse(e.data);if(msg.type!=="can.status")log("< "+e.data);if(msg.type==="can.rx"){rxCount++;addFrame("RX",msg)}else if(msg.type==="can.tx"){txCount++;addFrame("TX",msg)}else if(msg.type==="can.status"){updateStatus(msg)}else if(msg.type==="error"){errCount++;addFrame("ERR",msg)}updateCounts()}catch(_){log("< "+e.data)}};
- ws.onclose=e=>{if(statusTimer){clearInterval(statusTimer);statusTimer=null}setStatus("bad","disconnected");setConnected(false);log("closed "+e.code)};
- ws.onerror=()=>{setStatus("bad","error");errCount++;updateCounts();log("error")};
+ connectBtn.disabled=true;
+ disconnectBtn.disabled=false;
+ const sock=new WebSocket("ws://"+location.host+"/can");
+ ws=sock;
+ clearConnectWatch();
+ connectWatch=setTimeout(()=>{if(ws===sock&&sock.readyState===0){log("connect timeout");ws=null;setStatus("bad","disconnected");setConnected(false);sock.close()}},5000);
+ sock.onopen=()=>{if(ws!==sock)return;clearConnectWatch();setStatus("ok","connected");setConnected(true);log("connected");requestStatus();statusTimer=setInterval(requestStatus,2000)};
+ sock.onmessage=e=>{if(ws!==sock)return;try{const msg=JSON.parse(e.data);if(msg.type!=="can.status")log("< "+e.data);if(msg.type==="can.rx"){rxCount++;addFrame("RX",msg)}else if(msg.type==="can.tx"){txCount++;addFrame("TX",msg)}else if(msg.type==="can.status"){updateStatus(msg)}else if(msg.type==="error"){errCount++;addFrame("ERR",msg)}updateCounts()}catch(_){log("< "+e.data)}};
+ sock.onclose=e=>{if(ws===sock)ws=null;clearConnectWatch();if(statusTimer){clearInterval(statusTimer);statusTimer=null}setStatus("bad","disconnected");setConnected(false);log("closed "+e.code)};
+ sock.onerror=()=>{if(ws!==sock)return;clearConnectWatch();setStatus("bad","error");errCount++;updateCounts();log("error")};
 }
 connectBtn.onclick=connect;
 disconnectBtn.onclick=()=>{if(ws)ws.close()};
@@ -416,12 +439,20 @@ filterIdEl.oninput=renderFrames;
 clearFramesBtn.onclick=()=>{frames=[];framesEl.textContent="";lastIdEl.textContent="-"};
 clearBtn.onclick=()=>{logEl.textContent="";frames=[];framesEl.textContent="";rxCount=0;txCount=0;errCount=0;lastIdEl.textContent="-";updateCounts()};
 log("ready");
-connect();
+setTimeout(connect,100);
 </script>
 </body>
 </html>
 "#;
         write_http_response(socket, "text/html", BODY).await?;
+    } else {
+        const BODY: &[u8] = b"not found\n";
+        write_all(
+            socket,
+            b"HTTP/1.1 404 Not Found\r\nContent-Type: text/plain\r\nConnection: close\r\nContent-Length: 10\r\n\r\n",
+        )
+        .await?;
+        write_all(socket, BODY).await?;
     }
 
     Ok(())
