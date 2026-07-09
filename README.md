@@ -20,6 +20,7 @@ over SPI.
 - WebSocket CAN API at `/can`
 - MCP25xx CAN support via the `mcp25xx` crate
 - CAN TX, RX broadcast to connected WebSocket clients, status, bitrate/mode config
+- Board LED startup indicator while the USB network is not ready yet
 
 ## Hardware
 
@@ -33,6 +34,10 @@ Default CAN wiring:
 | MCP25xx CS | GP19 |
 
 The default CAN bitrate is 500 kbit/s.
+
+The firmware uses the board's red LED on GP13 as a startup indicator.
+The LED turns on after reset and turns off when the USB network has seen host
+traffic and mDNS has established the advertised service.
 
 ## Build
 

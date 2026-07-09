@@ -20,6 +20,7 @@ use embassy_net::{
 };
 use embassy_rp::bind_interrupts;
 use embassy_rp::flash::Flash;
+use embassy_rp::gpio::{Level, Output};
 use embassy_rp::peripherals::USB;
 use embassy_rp::uart::{Config as UartConfig, UartTx};
 use embassy_rp::usb::{Driver, InterruptHandler};
@@ -94,6 +95,7 @@ async fn main(spawner: Spawner) {
 
     let mut uart = UartTx::new_blocking(p.UART0, p.PIN_0, UartConfig::default());
     uart.blocking_write(b"pico-can-bridge-rs boot\r\n").unwrap();
+    let mut led = Output::new(p.PIN_13, Level::High);
 
     let mut flash = Flash::<_, _, FLASH_SIZE>::new_blocking(p.FLASH);
     let mut flash_uid = [0; 16];
@@ -300,6 +302,11 @@ async fn main(spawner: Spawner) {
             continue;
         }
 
+        let rx_after_host_probe = network::NET_RX_PACKETS.load(Ordering::Relaxed);
+        let mut host_ready = host_alive;
+        #[cfg(feature = "mdns")]
+        let mut mdns_ready = false;
+
         #[cfg(feature = "mdns")]
         {
             let mdns = match mdns_state {
@@ -355,10 +362,16 @@ async fn main(spawner: Spawner) {
         {
             let monitor = async {
                 loop {
+                    host_ready |=
+                        network::NET_RX_PACKETS.load(Ordering::Relaxed) != rx_after_host_probe;
+
                     if let (Some(mdns), Some(handle)) = (mdns_state, mdns_service) {
                         while let Some(update) = mdns.poll_service_update(handle) {
                             let line: &[u8] = match update {
-                                mdns::ServiceUpdate::Established => b"mDNS service established\r\n",
+                                mdns::ServiceUpdate::Established => {
+                                    mdns_ready = true;
+                                    b"mDNS service established\r\n"
+                                }
                                 mdns::ServiceUpdate::Renamed(_) => {
                                     b"mDNS CONFLICT: service renamed\r\n"
                                 }
@@ -373,15 +386,31 @@ async fn main(spawner: Spawner) {
                             uart.blocking_write(line).unwrap();
                         }
                     }
+                    if host_ready && mdns_ready {
+                        led.set_low();
+                    }
                     Timer::after(Duration::from_millis(500)).await;
                 }
             };
             select(stack.wait_link_down(), monitor).await;
         }
         #[cfg(not(feature = "mdns"))]
-        stack.wait_link_down().await;
+        {
+            let monitor = async {
+                loop {
+                    host_ready |=
+                        network::NET_RX_PACKETS.load(Ordering::Relaxed) != rx_after_host_probe;
+                    if host_ready {
+                        led.set_low();
+                    }
+                    Timer::after(Duration::from_millis(500)).await;
+                }
+            };
+            select(stack.wait_link_down(), monitor).await;
+        }
 
         info!("CDC-NCM link down");
+        led.set_high();
         uart.blocking_write(b"CDC-NCM link down\r\n").unwrap();
         Timer::after(Duration::from_millis(100)).await;
     }
