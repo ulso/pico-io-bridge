@@ -11,8 +11,8 @@ over SPI.
 ## Current Features
 
 - USB CDC-NCM Ethernet interface
-- IPv4 link-local address derived from the Pico flash UID
-- Optional embedded DHCP server using a UID-derived `10.x.y.0/24` subnet
+- Embedded DHCP server using a UID-derived `10.x.y.0/24` subnet
+- Optional IPv4 link-local fallback derived from the Pico flash UID
 - Stable locally administered MAC addresses derived from the Pico flash UID
 - IPv6 link-local address derived from the device MAC
 - mDNS/DNS-SD advertisement for `_http._tcp`
@@ -50,25 +50,26 @@ cargo build --release
 Default features are:
 
 ```text
-mdns, mcp2515
+mdns, mcp2515, dhcp-server
 ```
+
+With the default features the Pico uses `10.x.y.1/24` and leases
+`10.x.y.2/24` to the USB host. The `x.y` subnet bytes are derived from the
+flash UID, so different boards should normally land on different private /24
+networks. The DHCP response does not advertise a router or DNS server; `.local`
+discovery still comes from mDNS.
 
 For MCP25625 instead of MCP2515:
 
 ```sh
-cargo build --release --no-default-features --features mdns,mcp25625
+cargo build --release --no-default-features --features mdns,mcp25625,dhcp-server
 ```
 
-To try the embedded DHCP server:
+To build the older IPv4 link-local mode without DHCP:
 
 ```sh
-cargo build --release --features dhcp-server
+cargo build --release --no-default-features --features mdns,mcp2515
 ```
-
-In this mode the Pico uses `10.x.y.1/24` and leases `10.x.y.2/24` to the USB
-host. The `x.y` subnet bytes are derived from the flash UID, so different boards
-should normally land on different private /24 networks. The DHCP response does
-not advertise a router or DNS server; `.local` discovery still comes from mDNS.
 
 ## Flash
 
@@ -86,9 +87,9 @@ cargo run --release
 
 ## Network Use
 
-The default build uses IPv4 link-local networking. With the optional
-`dhcp-server` feature enabled, the device instead uses its UID-derived
-`10.x.y.1/24` address and gives the host `10.x.y.2/24`.
+The default build uses the embedded DHCP server. The device uses its UID-derived
+`10.x.y.1/24` address and gives the host `10.x.y.2/24`. IPv4 link-local
+networking is still available by building without the `dhcp-server` feature.
 
 The device advertises:
 
@@ -171,7 +172,8 @@ Examples:
 
 ## Known Limitations
 
-- There is no full AutoIP/RFC 3927 implementation yet.
+- There is no full AutoIP/RFC 3927 implementation for the non-DHCP link-local
+  fallback yet.
 - IPv4 link-local address selection is deterministic, based on flash UID plus a
   role salt. It does not currently perform ARP probing before claiming the
   address.
@@ -179,7 +181,7 @@ Examples:
   link-local address, the firmware will not automatically move to a new address.
 - The IPv4 address space used here is only the normal 169.254/16 link-local
   range, so collisions are possible in principle.
-- The optional DHCP mode avoids the 169.254/16 link-local route ambiguity, but it
+- The default DHCP mode avoids the 169.254/16 link-local route ambiguity, but it
   still does not probe the chosen `10.x.y.0/24` subnet before using it.
 - The WebSocket protocol is intentionally small and JSON-only at the moment.
 - There is no flash filesystem or custom page upload support in this Rust

@@ -7,7 +7,7 @@ authors = ["Ulf Söderberg <ulso@me.com>"]
 resolver = "2"
 
 [features]
-default = ["mdns", "mcp2515"]
+default = ["mdns", "mcp2515", "dhcp-server"]
 mdns = ["dep:embedded-alloc", "dep:hick-embassy", "dep:mdns-proto", "hick-embassy/no-atomic", "mdns-proto/no-atomic", "embassy-net/mdns"]
 dhcp-server = ["dep:leasehund", "leasehund/defmt", "embassy-net/dhcpv4"]
 mcp2515 = ["mcp25xx/mcp2515"]
