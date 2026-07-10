@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Pico I2C Bridge</title>
+<link rel="icon" href="data:,">
+<style>
+:root{color-scheme:light dark;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+body{margin:0;background:#f3f5f7;color:#17202a}
+main{max-width:1040px;margin:0 auto;padding:20px}
+header{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;margin-bottom:14px}
+h1{font-size:24px;line-height:1.2;margin:0 0 12px;font-weight:700}
+h2{font-size:15px;margin:0 0 12px;font-weight:700}
+.status{display:inline-flex;align-items:center;gap:8px;font-size:14px;font-weight:650;white-space:nowrap}
+.dot{width:10px;height:10px;border-radius:50%;background:#b7c0ca}.ok .dot{background:#1f9d55}.bad .dot{background:#d64545}.wait .dot{background:#d99a22}
+.tabs{display:flex;gap:4px}.tabs a{border:1px solid #9aa7b2;background:#fff;color:#17202a;border-radius:6px;padding:7px 12px;text-decoration:none;font-weight:650}.tabs a.active{background:#17202a;color:#fff;border-color:#17202a}
+.toolbar{display:flex;flex-wrap:wrap;gap:8px;align-items:end}
+button{border:1px solid #9aa7b2;background:#fff;color:#17202a;border-radius:6px;padding:8px 12px;font:inherit;font-weight:650;min-height:38px}
+button:disabled{opacity:.45}.primary{background:#17202a;color:#fff;border-color:#17202a}
+.metrics{display:grid;grid-template-columns:repeat(4,minmax(120px,1fr));gap:8px;margin:16px 0}
+.metric{border:1px solid #d7dee6;border-radius:6px;padding:8px;background:#f9fafb}.metric span{display:block;font-size:11px;color:#5d6975}.metric strong{font-size:18px}
+.grid{display:grid;grid-template-columns:minmax(300px,380px) 1fr;gap:16px;align-items:start}
+.panel{border:1px solid #c7d0da;background:#fff;border-radius:8px;padding:14px}
+.form{display:grid;grid-template-columns:1fr 1fr;gap:10px}.wide{grid-column:1/-1}
+label{display:block;font-size:12px;font-weight:700;margin:0 0 5px;color:#303b46}
+input{box-sizing:border-box;width:100%;border:1px solid #bdc7d1;border-radius:6px;background:#fff;color:#17202a;padding:8px;font:14px ui-monospace,SFMono-Regular,Menlo,monospace}
+.tableWrap{border:1px solid #c7d0da;border-radius:8px;overflow:auto;background:#fff;min-height:250px;max-height:430px}
+table{width:100%;border-collapse:collapse;font:13px ui-monospace,SFMono-Regular,Menlo,monospace}
+th,td{padding:8px;border-bottom:1px solid #edf0f3;text-align:left;white-space:nowrap}th{position:sticky;top:0;background:#f9fafb;font:12px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;font-weight:700;color:#303b46}
+pre{box-sizing:border-box;width:100%;min-height:140px;max-height:260px;overflow:auto;border:1px solid #c7d0da;border-radius:8px;background:#fff;color:#17202a;padding:10px;margin:16px 0 0;font:12px ui-monospace,SFMono-Regular,Menlo,monospace;white-space:pre-wrap}
+@media(max-width:720px){main{padding:14px}.grid{grid-template-columns:1fr}.metrics{grid-template-columns:repeat(2,1fr)}header{flex-direction:column}.form{grid-template-columns:1fr}}
+@media(prefers-color-scheme:dark){body{background:#111820;color:#edf2f7}.panel,.tableWrap,pre,input,button,.tabs a{background:#17212b;color:#edf2f7;border-color:#3b4b5c}.metric,th{background:#1d2a36;border-color:#3b4b5c}.primary,.tabs a.active{background:#edf2f7;color:#111820}.metric span,label{color:#b9c3cf}td,th{border-bottom-color:#273544}}
+</style>
+</head>
+<body>
+<main>
+<header>
+<div>
+<h1>Pico I2C Bridge</h1>
+<nav class="tabs"><a href="/">CAN</a><a class="active" href="/i2c.html">I2C</a></nav>
+</div>
+<div id="status" class="status bad"><span class="dot"></span><span id="statusText">disconnected</span></div>
+</header>
+<div class="toolbar">
+<button id="connect">Connect</button>
+<button id="disconnect" disabled>Disconnect</button>
+<button id="scan" class="primary" disabled>Scan</button>
+<button id="refresh" disabled>Status</button>
+<button id="clear">Clear</button>
+</div>
+<section class="metrics">
+<div class="metric"><span>Frequency</span><strong id="frequency">-</strong></div>
+<div class="metric"><span>Transactions</span><strong id="transactions">0</strong></div>
+<div class="metric"><span>Errors</span><strong id="errors">0</strong></div>
+<div class="metric"><span>Devices</span><strong id="deviceCount">0</strong></div>
+</section>
+<section class="grid">
+<div class="panel">
+<h2>Transaction</h2>
+<div class="form">
+<div><label for="address">7-bit address</label><input id="address" value="0x18" inputmode="text"></div>
+<div><label for="readLength">Read length</label><input id="readLength" value="2" inputmode="numeric"></div>
+<div class="wide"><label for="writeData">Write bytes (hex)</label><input id="writeData" value="00" inputmode="text"></div>
+<div class="wide toolbar"><button id="read" disabled>Read</button><button id="write" disabled>Write</button><button id="writeRead" class="primary" disabled>Write + Read</button></div>
+</div>
+</div>
+<div>
+<div class="tableWrap">
+<table><thead><tr><th>Address</th><th>Decimal</th></tr></thead><tbody id="devices"></tbody></table>
+</div>
+</div>
+</section>
+<pre id="log"></pre>
+</main>
+<script>
+const statusEl=document.getElementById("status");
+const statusText=document.getElementById("statusText");
+const connectBtn=document.getElementById("connect");
+const disconnectBtn=document.getElementById("disconnect");
+const scanBtn=document.getElementById("scan");
+const refreshBtn=document.getElementById("refresh");
+const clearBtn=document.getElementById("clear");
+const readBtn=document.getElementById("read");
+const writeBtn=document.getElementById("write");
+const writeReadBtn=document.getElementById("writeRead");
+const addressEl=document.getElementById("address");
+const readLengthEl=document.getElementById("readLength");
+const writeDataEl=document.getElementById("writeData");
+const frequencyEl=document.getElementById("frequency");
+const transactionsEl=document.getElementById("transactions");
+const errorsEl=document.getElementById("errors");
+const deviceCountEl=document.getElementById("deviceCount");
+const devicesEl=document.getElementById("devices");
+const logEl=document.getElementById("log");
+let ws=null;
+let connectWatch=null;
+let statusTimer=null;
+function now(){return new Date().toLocaleTimeString()}
+function log(line){logEl.textContent+=now()+"  "+line+"\n";logEl.scrollTop=logEl.scrollHeight}
+function setStatus(kind,text){statusEl.className="status "+kind;statusText.textContent=text}
+function setConnected(on){connectBtn.disabled=on;disconnectBtn.disabled=!on;scanBtn.disabled=!on;refreshBtn.disabled=!on;readBtn.disabled=!on;writeBtn.disabled=!on;writeReadBtn.disabled=!on}
+function parseNumber(text){const s=text.trim();return Number.parseInt(s,/^0x/i.test(s)?16:10)}
+function parseBytes(text){const s=text.trim();if(!s)return[];return s.split(/[ ,]+/).filter(Boolean).map(value=>Number.parseInt(value,/^0x/i.test(value)?16:16))}
+function address(){const value=parseNumber(addressEl.value);if(!Number.isInteger(value)||value<0x08||value>0x77)throw new Error("Address must be 0x08..0x77");return value}
+function readLength(){const value=Number.parseInt(readLengthEl.value,10);if(!Number.isInteger(value)||value<1||value>64)throw new Error("Read length must be 1..64");return value}
+function writeData(){const data=parseBytes(writeDataEl.value);if(data.length<1||data.length>64||data.some(value=>!Number.isInteger(value)||value<0||value>255))throw new Error("Write data must contain 1..64 bytes");return data}
+function send(message){if(!ws||ws.readyState!==1)return;const text=JSON.stringify(message);ws.send(text);if(message.type!=="i2c.status")log("> "+text)}
+function requestStatus(){send({type:"i2c.status"})}
+function updateStatus(message){frequencyEl.textContent=Math.round(message.frequency/1000)+" kHz";transactionsEl.textContent=message.transactionCount||0;errorsEl.textContent=message.errorCount||0}
+function showDevices(addresses){devicesEl.textContent="";for(const value of addresses){const row=document.createElement("tr");row.innerHTML="<td>0x"+Number(value).toString(16).toUpperCase().padStart(2,"0")+"</td><td>"+value+"</td>";devicesEl.appendChild(row)}deviceCountEl.textContent=addresses.length}
+function connect(){
+ if(ws&&ws.readyState<2)return;
+ setStatus("wait","connecting");connectBtn.disabled=true;disconnectBtn.disabled=false;
+ const sock=new WebSocket("ws://"+location.host+"/i2c");ws=sock;
+ if(connectWatch)clearTimeout(connectWatch);
+ connectWatch=setTimeout(()=>{if(ws===sock&&sock.readyState===0){ws=null;setStatus("bad","disconnected");setConnected(false);sock.close();log("connect timeout")}},5000);
+ sock.onopen=()=>{if(ws!==sock)return;clearTimeout(connectWatch);connectWatch=null;setStatus("ok","connected");setConnected(true);log("connected");requestStatus();statusTimer=setInterval(requestStatus,2000)};
+ sock.onmessage=event=>{if(ws!==sock)return;try{const message=JSON.parse(event.data);if(message.type==="i2c.status")updateStatus(message);else log("< "+event.data);if(message.type==="i2c.scan")showDevices(message.addresses||[]);if(message.type==="error")errorsEl.textContent=Number(errorsEl.textContent||0)+1}catch(_){log("< "+event.data)}};
+ sock.onclose=event=>{if(ws===sock)ws=null;if(connectWatch)clearTimeout(connectWatch);connectWatch=null;if(statusTimer)clearInterval(statusTimer);statusTimer=null;setStatus("bad","disconnected");setConnected(false);log("closed "+event.code)};
+ sock.onerror=()=>{setStatus("bad","error");log("error")};
+}
+connectBtn.onclick=connect;
+disconnectBtn.onclick=()=>{if(ws)ws.close()};
+scanBtn.onclick=()=>send({type:"i2c.scan",bus:0});
+refreshBtn.onclick=requestStatus;
+readBtn.onclick=()=>{try{send({type:"i2c.read",bus:0,address:address(),length:readLength()})}catch(error){log("! "+error.message)}};
+writeBtn.onclick=()=>{try{send({type:"i2c.write",bus:0,address:address(),data:writeData()})}catch(error){log("! "+error.message)}};
+writeReadBtn.onclick=()=>{try{send({type:"i2c.write_read",bus:0,address:address(),write:writeData(),readLength:readLength()})}catch(error){log("! "+error.message)}};
+clearBtn.onclick=()=>{logEl.textContent="";devicesEl.textContent="";deviceCountEl.textContent="0"};
+log("ready");
+setTimeout(connect,100);
+</script>
+</body>
+</html>

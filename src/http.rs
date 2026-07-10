@@ -6,9 +6,16 @@ use embassy_time::{Duration, Timer};
 use heapless::String;
 
 use crate::can::{CAN_EVENTS, CanEvent, handle_can_ws_text, write_can_frame_json};
+use crate::i2c::handle_i2c_ws_text;
+use crate::websocket::{self, Frame};
 
 const HTTP_SOCKETS: usize = crate::HTTP_SOCKETS;
 const HTTP_PEER_CLOSE_TIMEOUT: Duration = Duration::from_secs(2);
+
+enum WebSocketEndpoint {
+    Can,
+    I2c,
+}
 
 fn sha1(data: &[u8]) -> [u8; 20] {
     let mut h0 = 0x6745_2301u32;
@@ -55,9 +62,9 @@ fn sha1(data: &[u8]) -> [u8; 20] {
 fn sha1_block(block: &[u8], h0: &mut u32, h1: &mut u32, h2: &mut u32, h3: &mut u32, h4: &mut u32) {
     let mut w = [0u32; 80];
 
-    for i in 0..16 {
+    for (i, word) in w.iter_mut().take(16).enumerate() {
         let j = i * 4;
-        w[i] = u32::from_be_bytes([block[j], block[j + 1], block[j + 2], block[j + 3]]);
+        *word = u32::from_be_bytes([block[j], block[j + 1], block[j + 2], block[j + 3]]);
     }
     for i in 16..80 {
         w[i] = (w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16]).rotate_left(1);
@@ -120,10 +127,10 @@ fn base64_20(input: &[u8; 20], out: &mut [u8; 28]) {
 
 fn header_value<'a>(request: &'a str, name: &str) -> Option<&'a str> {
     for line in request.lines() {
-        if let Some((key, value)) = line.split_once(':') {
-            if key.eq_ignore_ascii_case(name) {
-                return Some(value.trim());
-            }
+        if let Some((key, value)) = line.split_once(':')
+            && key.eq_ignore_ascii_case(name)
+        {
+            return Some(value.trim());
         }
     }
 
@@ -240,7 +247,16 @@ async fn serve_http_connection(
         return Ok(());
     };
 
-    if request.starts_with("GET /can ") || request.starts_with("GET /ws ") {
+    let websocket_endpoint = if request.starts_with("GET /can ") || request.starts_with("GET /ws ")
+    {
+        Some(WebSocketEndpoint::Can)
+    } else if request.starts_with("GET /i2c ") {
+        Some(WebSocketEndpoint::I2c)
+    } else {
+        None
+    };
+
+    if let Some(endpoint) = websocket_endpoint {
         if let Some(key) = header_value(request, "Sec-WebSocket-Key") {
             let mut accept = [0u8; 28];
             websocket_accept_key(key, &mut accept);
@@ -250,13 +266,16 @@ async fn serve_http_connection(
             write_all(socket, b"\r\n\r\n").await?;
             socket.set_timeout(Some(crate::WS_TIMEOUT));
             socket.set_keep_alive(Some(crate::WS_KEEPALIVE));
-            websocket_loop(socket, rx_buf).await?;
+            match endpoint {
+                WebSocketEndpoint::Can => can_websocket_loop(socket, rx_buf).await?,
+                WebSocketEndpoint::I2c => i2c_websocket_loop(socket, rx_buf).await?,
+            }
         } else {
             write_empty_response(socket, "400 Bad Request").await?;
         }
     } else if request.starts_with("GET /api/status ") {
         const BODY: &[u8] =
-            br#"{"device":"pico-can-bridge-rs","network":"cdc-ncm","websocket":"/can"}"#;
+            br#"{"device":"pico-can-bridge-rs","network":"cdc-ncm","websocket":"/can","websockets":["/can","/i2c"]}"#;
         write_http_response(socket, "application/json", BODY).await?;
     } else if request.starts_with("GET /favicon.ico ") {
         write_all(
@@ -264,6 +283,9 @@ async fn serve_http_connection(
             b"HTTP/1.1 204 No Content\r\nConnection: close\r\nContent-Length: 0\r\nCache-Control: max-age=86400\r\n\r\n",
         )
         .await?;
+    } else if request.starts_with("GET /i2c.html ") {
+        const BODY: &[u8] = include_bytes!("i2c.html");
+        write_http_response(socket, "text/html", BODY).await?;
     } else if request.starts_with("GET / ") || request.starts_with("GET /index.html ") {
         const BODY: &[u8] = br#"<!doctype html>
 <html lang="en">
@@ -285,6 +307,7 @@ h1{font-size:24px;line-height:1.2;margin:0;font-weight:700}
 .toolbar{display:flex;flex-wrap:wrap;gap:8px}
 button{border:1px solid #9aa7b2;background:#fff;color:#17202a;border-radius:6px;padding:8px 12px;font:inherit;font-weight:650;min-height:38px}
 button:disabled{opacity:.45}.primary{background:#17202a;color:#fff;border-color:#17202a}
+.navlink{display:inline-flex;align-items:center;border:1px solid #9aa7b2;background:#fff;color:#17202a;border-radius:6px;padding:7px 12px;text-decoration:none;font-weight:650}
 .grid{display:grid;grid-template-columns:minmax(300px,360px) 1fr;gap:16px;align-items:start}
 .stack{display:grid;gap:16px}
 section{margin-top:16px}.panel{border:1px solid #c7d0da;background:#fff;border-radius:8px;padding:14px}
@@ -307,7 +330,7 @@ th{position:sticky;top:0;background:#f9fafb;font:12px -apple-system,BlinkMacSyst
 .dirRx{color:#1f7a4d;font-weight:700}.dirTx{color:#285ea8;font-weight:700}.dirErr{color:#b42318;font-weight:700}
 pre{box-sizing:border-box;width:100%;min-height:120px;max-height:220px;overflow:auto;border:1px solid #c7d0da;border-radius:8px;background:#fff;color:#17202a;padding:10px;margin:0;font:12px ui-monospace,SFMono-Regular,Menlo,monospace;white-space:pre-wrap}
 @media(max-width:760px){main{padding:14px}.grid{grid-template-columns:1fr}.metrics{grid-template-columns:repeat(2,1fr)}header,.topbar{align-items:flex-start;flex-direction:column}.form{grid-template-columns:1fr}}
-@media(prefers-color-scheme:dark){body{background:#111820;color:#edf2f7}.panel,.tableWrap,pre,input,select,button{background:#17212b;color:#edf2f7;border-color:#3b4b5c}.metric,th{background:#1d2a36;border-color:#3b4b5c}.primary{background:#edf2f7;color:#111820}.hint,.metric span,label{color:#b9c3cf}td,th{border-bottom-color:#273544}}
+@media(prefers-color-scheme:dark){body{background:#111820;color:#edf2f7}.panel,.tableWrap,pre,input,select,button,.navlink{background:#17212b;color:#edf2f7;border-color:#3b4b5c}.metric,th{background:#1d2a36;border-color:#3b4b5c}.primary{background:#edf2f7;color:#111820}.hint,.metric span,label{color:#b9c3cf}td,th{border-bottom-color:#273544}}
 </style>
 </head>
 <body>
@@ -321,6 +344,7 @@ pre{box-sizing:border-box;width:100%;min-height:120px;max-height:220px;overflow:
 <button id="connect">Connect</button>
 <button id="disconnect" disabled>Disconnect</button>
 <button id="clear">Clear</button>
+<a class="navlink" href="/i2c.html">I2C</a>
 </div>
 <div class="status"><span id="bitrateLabel">CAN -</span><span id="modeLabel">mode -</span></div>
 </div>
@@ -488,7 +512,7 @@ setTimeout(connect,100);
     Ok(())
 }
 
-async fn websocket_loop(
+async fn can_websocket_loop(
     socket: &mut TcpSocket<'_>,
     buf: &mut [u8],
 ) -> Result<(), embassy_net::tcp::Error> {
@@ -498,80 +522,82 @@ async fn websocket_loop(
         return Ok(());
     };
 
-    websocket_send_text(socket, READY).await?;
+    websocket::send_text(socket, READY).await?;
 
     loop {
-        let n = match select(socket.read(buf), can_events.next_message_pure()).await {
-            Either::First(result) => result?,
-            Either::Second(CanEvent::Rx(frame)) => {
+        if !socket.may_recv() {
+            return Ok(());
+        }
+
+        let ready_or_event = select(socket.wait_read_ready(), can_events.next_message_pure());
+        let incoming = match select(ready_or_event, Timer::after(Duration::from_millis(100))).await
+        {
+            Either::First(Either::First(())) => websocket::read_frame(socket, buf).await?,
+            Either::First(Either::Second(CanEvent::Rx(frame))) => {
                 response.clear();
                 write_can_frame_json(&mut response, "can.rx", true, frame);
-                websocket_send_text(socket, response.as_bytes()).await?;
+                websocket::send_text(socket, response.as_bytes()).await?;
                 continue;
             }
+            Either::Second(()) => continue,
         };
 
-        if n < 2 {
+        let Some(frame) = incoming else {
             return Ok(());
-        }
+        };
 
-        let opcode = buf[0] & 0x0f;
-        let masked = (buf[1] & 0x80) != 0;
-        let payload_len = (buf[1] & 0x7f) as usize;
-        if payload_len > 125 || n < 2 + if masked { 4 } else { 0 } + payload_len {
-            return Ok(());
-        }
-
-        let payload_start = 2 + if masked { 4 } else { 0 };
-        let payload_end = payload_start + payload_len;
-
-        if masked {
-            let mask = [buf[2], buf[3], buf[4], buf[5]];
-            for i in 0..payload_len {
-                buf[payload_start + i] ^= mask[i % 4];
-            }
-        }
-
-        match opcode {
-            0x8 => {
-                socket.write(&[0x88, 0x00]).await?;
+        match frame {
+            Frame::Close => {
+                websocket::send_close(socket).await?;
                 return Ok(());
             }
-            0x9 => {
-                socket.write(&[0x8a, payload_len as u8]).await?;
-                if payload_len > 0 {
-                    let payload = &buf[payload_start..payload_end];
-                    write_all(socket, payload).await?;
-                }
-            }
-            0x1 => {
+            Frame::Ping(payload) => websocket::send_pong(socket, payload).await?,
+            Frame::Pong => {}
+            Frame::Text(payload) => {
                 response.clear();
-                handle_can_ws_text(&buf[payload_start..payload_end], &mut response).await;
-                websocket_send_text(socket, response.as_bytes()).await?;
+                handle_can_ws_text(payload, &mut response).await;
+                websocket::send_text(socket, response.as_bytes()).await?;
             }
-            0x2 => {
+            Frame::Binary => {
                 const RESPONSE: &[u8] = b"{\"type\":\"error\",\"ok\":false,\"code\":\"unsupported_type\",\"message\":\"binary CAN messages are not supported yet\"}";
-                websocket_send_text(socket, RESPONSE).await?;
+                websocket::send_text(socket, RESPONSE).await?;
             }
-            _ => {}
         }
     }
 }
 
-async fn websocket_send_text(
+async fn i2c_websocket_loop(
     socket: &mut TcpSocket<'_>,
-    payload: &[u8],
+    buf: &mut [u8],
 ) -> Result<(), embassy_net::tcp::Error> {
-    if payload.len() < 126 {
-        socket.write(&[0x81, payload.len() as u8]).await?;
-    } else {
-        let len = payload.len() as u16;
-        socket
-            .write(&[0x81, 126, (len >> 8) as u8, len as u8])
-            .await?;
-    }
+    const READY: &[u8] = b"{\"type\":\"hello\",\"ok\":true,\"endpoint\":\"/i2c\"}";
+    let mut response = String::<512>::new();
 
-    write_all(socket, payload).await
+    websocket::send_text(socket, READY).await?;
+
+    loop {
+        let Some(frame) = websocket::read_frame(socket, buf).await? else {
+            return Ok(());
+        };
+
+        match frame {
+            Frame::Close => {
+                websocket::send_close(socket).await?;
+                return Ok(());
+            }
+            Frame::Ping(payload) => websocket::send_pong(socket, payload).await?,
+            Frame::Pong => {}
+            Frame::Text(payload) => {
+                response.clear();
+                handle_i2c_ws_text(payload, &mut response).await;
+                websocket::send_text(socket, response.as_bytes()).await?;
+            }
+            Frame::Binary => {
+                const RESPONSE: &[u8] = b"{\"type\":\"error\",\"ok\":false,\"code\":\"unsupported_type\",\"message\":\"binary I2C messages are not supported yet\"}";
+                websocket::send_text(socket, RESPONSE).await?;
+            }
+        }
+    }
 }
 
 #[embassy_executor::task(pool_size = HTTP_SOCKETS)]

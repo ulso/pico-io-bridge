@@ -19,6 +19,8 @@ use mcp25xx::embedded_can::{ExtendedId, Frame, Id, StandardId};
 use mcp25xx::registers::{OperationMode, RXB0CTRL, RXB1CTRL, RXM};
 use mcp25xx::{CanFrame, Config as McpConfig, MCP25xx};
 
+use crate::json;
+
 const CAN_DEFAULT_BITRATE: u32 = 500_000;
 const CAN_SPI_FREQUENCY: u32 = 1_000_000;
 const CAN_EVENT_SUBSCRIBERS: usize = crate::HTTP_SOCKETS;
@@ -144,78 +146,8 @@ fn can_cnf_for_bitrate(bitrate: u32) -> Option<mcp25xx::registers::CNF> {
     }
 }
 
-fn parse_bool_field(text: &str, key: &str) -> Option<bool> {
-    let idx = text.find(key)?;
-    let rest = &text[idx + key.len()..];
-    let colon = rest.find(':')?;
-    let value = rest[colon + 1..].trim_start();
-
-    if value.starts_with("true") {
-        Some(true)
-    } else if value.starts_with("false") {
-        Some(false)
-    } else {
-        None
-    }
-}
-
-fn parse_u32_field(text: &str, key: &str) -> Option<u32> {
-    let idx = text.find(key)?;
-    let rest = &text[idx + key.len()..];
-    let colon = rest.find(':')?;
-    let value = rest[colon + 1..].trim_start();
-    let mut end = 0;
-
-    for byte in value.as_bytes() {
-        if byte.is_ascii_digit() {
-            end += 1;
-        } else {
-            break;
-        }
-    }
-
-    if end == 0 {
-        None
-    } else {
-        value[..end].parse().ok()
-    }
-}
-
-fn parse_str_field<'a>(text: &'a str, key: &str) -> Option<&'a str> {
-    let idx = text.find(key)?;
-    let rest = &text[idx + key.len()..];
-    let colon = rest.find(':')?;
-    let value = rest[colon + 1..].trim_start();
-    let value = value.strip_prefix('"')?;
-    let end = value.find('"')?;
-    Some(&value[..end])
-}
-
-fn parse_data_field(text: &str, out: &mut [u8; 8]) -> Option<u8> {
-    let idx = text.find("\"data\"")?;
-    let rest = &text[idx..];
-    let start = rest.find('[')?;
-    let end = rest[start + 1..].find(']')? + start + 1;
-    let mut count = 0;
-
-    for part in rest[start + 1..end].split(',') {
-        let value = part.trim();
-        if value.is_empty() {
-            continue;
-        }
-        if count == out.len() {
-            return None;
-        }
-        let parsed = value.parse::<u8>().ok()?;
-        out[count] = parsed;
-        count += 1;
-    }
-
-    Some(count as u8)
-}
-
 fn parse_can_mode(text: &str) -> Option<CanMode> {
-    match parse_str_field(text, "\"mode\"")? {
+    match json::parse_str_field(text, "\"mode\"")? {
         "normal" => Some(CanMode::Normal),
         "listen-only" | "listen_only" => Some(CanMode::ListenOnly),
         "loopback" => Some(CanMode::Loopback),
@@ -224,12 +156,12 @@ fn parse_can_mode(text: &str) -> Option<CanMode> {
 }
 
 fn parse_can_tx(text: &str) -> Option<CanTx> {
-    let id = parse_u32_field(text, "\"id\"")?;
-    let ext = parse_bool_field(text, "\"ext\"").unwrap_or(id > 0x7ff);
-    let rtr = parse_bool_field(text, "\"rtr\"").unwrap_or(false);
+    let id = json::parse_u32_field(text, "\"id\"")?;
+    let ext = json::parse_bool_field(text, "\"ext\"").unwrap_or(id > 0x7ff);
+    let rtr = json::parse_bool_field(text, "\"rtr\"").unwrap_or(false);
     let mut data = [0; 8];
-    let data_len = parse_data_field(text, &mut data).unwrap_or(0);
-    let dlc = parse_u32_field(text, "\"dlc\"")
+    let data_len = json::parse_u8_array(text, "\"data\"", &mut data).unwrap_or(0) as u8;
+    let dlc = json::parse_u32_field(text, "\"dlc\"")
         .map(|v| v as u8)
         .unwrap_or(data_len);
 
@@ -293,15 +225,6 @@ fn write_can_status_json(out: &mut String<256>, status: CanState) {
     );
 }
 
-fn write_can_error_json(out: &mut String<256>, code: &str, message: &str) {
-    let _ = core::write!(
-        out,
-        "{{\"type\":\"error\",\"ok\":false,\"code\":\"{}\",\"message\":\"{}\"}}",
-        code,
-        message
-    );
-}
-
 pub(crate) fn write_can_frame_json(out: &mut String<256>, ty: &str, ok: bool, tx: CanTx) {
     let _ = core::write!(
         out,
@@ -344,7 +267,7 @@ async fn send_can_command(command: CanCommand) -> CanReply {
 
 pub(crate) async fn handle_can_ws_text(payload: &[u8], out: &mut String<256>) {
     let Ok(text) = core::str::from_utf8(payload) else {
-        write_can_error_json(out, "invalid_json", "WebSocket payload must be UTF-8 JSON");
+        json::write_error(out, "invalid_json", "WebSocket payload must be UTF-8 JSON");
         return;
     };
 
@@ -353,9 +276,9 @@ pub(crate) async fn handle_can_ws_text(payload: &[u8], out: &mut String<256>) {
     } else if text.contains("can.config.get") {
         Some(CanCommand::ConfigGet)
     } else if text.contains("can.config.set") {
-        let bitrate = parse_u32_field(text, "\"bitrate\"").unwrap_or(CAN_DEFAULT_BITRATE);
+        let bitrate = json::parse_u32_field(text, "\"bitrate\"").unwrap_or(CAN_DEFAULT_BITRATE);
         let Some(mode) = parse_can_mode(text).or(Some(CanMode::Normal)) else {
-            write_can_error_json(out, "invalid_config", "Invalid CAN mode");
+            json::write_error(out, "invalid_config", "Invalid CAN mode");
             return;
         };
         Some(CanCommand::ConfigSet { bitrate, mode })
@@ -363,7 +286,7 @@ pub(crate) async fn handle_can_ws_text(payload: &[u8], out: &mut String<256>) {
         match parse_can_tx(text) {
             Some(tx) => Some(CanCommand::Tx(tx)),
             None => {
-                write_can_error_json(out, "invalid_frame", "Invalid CAN frame");
+                json::write_error(out, "invalid_frame", "Invalid CAN frame");
                 return;
             }
         }
@@ -372,7 +295,7 @@ pub(crate) async fn handle_can_ws_text(payload: &[u8], out: &mut String<256>) {
     };
 
     let Some(command) = command else {
-        write_can_error_json(
+        json::write_error(
             out,
             "unsupported_type",
             "Supported messages: can.status, can.config.get, can.config.set, can.tx",
@@ -383,7 +306,7 @@ pub(crate) async fn handle_can_ws_text(payload: &[u8], out: &mut String<256>) {
     match send_can_command(command).await {
         CanReply::Status(status) => write_can_status_json(out, status),
         CanReply::TxOk(tx) => write_can_frame_json(out, "can.tx", true, tx),
-        CanReply::Error { code, message } => write_can_error_json(out, code, message),
+        CanReply::Error { code, message } => json::write_error(out, code, message),
     }
 }
 

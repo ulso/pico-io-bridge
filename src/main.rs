@@ -7,9 +7,12 @@ mod can;
 #[cfg(feature = "dhcp-server")]
 mod dhcp;
 mod http;
+mod i2c;
+mod json;
 #[cfg(feature = "mdns")]
 mod mdns;
 mod network;
+mod websocket;
 
 use defmt::*;
 use embassy_executor::Spawner;
@@ -21,7 +24,8 @@ use embassy_net::{
 use embassy_rp::bind_interrupts;
 use embassy_rp::flash::Flash;
 use embassy_rp::gpio::{Level, Output};
-use embassy_rp::peripherals::USB;
+use embassy_rp::i2c::{Config as I2cConfig, I2c as RpI2c, InterruptHandler as I2cInterruptHandler};
+use embassy_rp::peripherals::{I2C1, USB};
 use embassy_rp::uart::{Config as UartConfig, UartTx};
 use embassy_rp::usb::{Driver, InterruptHandler};
 use embassy_time::{Duration, Timer};
@@ -38,7 +42,7 @@ pub(crate) const MTU: usize = 1514;
 const USB_MAX_PACKET_SIZE: u16 = 64;
 const FLASH_SIZE: usize = 2 * 1024 * 1024;
 pub(crate) const HTTP_PORT: u16 = 80;
-pub(crate) const HTTP_SOCKETS: usize = 3;
+pub(crate) const HTTP_SOCKETS: usize = 4;
 pub(crate) const WS_TIMEOUT: Duration = Duration::from_secs(20);
 pub(crate) const WS_KEEPALIVE: Duration = Duration::from_secs(5);
 const CDC_NCM_LINK_UP_TIMEOUT: Duration = Duration::from_secs(6);
@@ -78,6 +82,7 @@ const HOST_MAC_ROLE: u8 = 2;
 
 bind_interrupts!(struct Irqs {
     USBCTRL_IRQ => InterruptHandler<USB>;
+    I2C1_IRQ => I2cInterruptHandler<I2C1>;
 });
 
 #[embassy_executor::main]
@@ -169,7 +174,7 @@ async fn main(spawner: Spawner) {
         dns_servers: Default::default(),
     });
 
-    static NET_RESOURCES: StaticCell<StackResources<8>> = StaticCell::new();
+    static NET_RESOURCES: StaticCell<StackResources<10>> = StaticCell::new();
     let (stack, net_runner) = embassy_net::new(
         network::CountingDevice { inner: ncm_device },
         net_config,
@@ -178,6 +183,9 @@ async fn main(spawner: Spawner) {
     );
 
     let usb = builder.build();
+    let mut i2c_config = I2cConfig::default();
+    i2c_config.frequency = i2c::I2C_FREQUENCY;
+    let i2c_bus = RpI2c::new_async(p.I2C1, p.PIN_3, p.PIN_2, Irqs, i2c_config);
 
     spawner.spawn(network::usb_task(usb).unwrap());
     spawner.spawn(network::ncm_task(ncm_runner).unwrap());
@@ -188,6 +196,7 @@ async fn main(spawner: Spawner) {
         spawner.spawn(http::http_task(stack).unwrap());
     }
     spawner.spawn(can::can_task(p.SPI1, p.PIN_14, p.PIN_15, p.PIN_8, p.PIN_19).unwrap());
+    spawner.spawn(i2c::i2c_task(i2c_bus).unwrap());
 
     #[cfg(feature = "dhcp-server")]
     info!(
@@ -220,6 +229,8 @@ async fn main(spawner: Spawner) {
     uart.blocking_write(b"USB CDC-NCM ready, IPv4 link-local from flash UID\r\n")
         .unwrap();
     uart.blocking_write(b"CAN task starting, SPI1 SCK GP14 MOSI GP15 MISO GP8 CS GP19\r\n")
+        .unwrap();
+    uart.blocking_write(b"I2C task starting, I2C1 SCL GP3 SDA GP2 at 400 kHz\r\n")
         .unwrap();
 
     #[cfg(feature = "mdns")]

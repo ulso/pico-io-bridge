@@ -1,9 +1,9 @@
-# Pico CAN Bridge RS
+# Pico CAN and I2C Bridge RS
 
-Rust firmware for a Raspberry Pi Pico / RP2040 that exposes a CAN bus over USB
-CDC-NCM. The board appears as a small USB Ethernet device, advertises itself as
-`pico-can-bridge.local`, serves a minimal browser UI, and accepts CAN commands
-over WebSocket.
+Rust firmware for an Adafruit RP2040 CAN Bus Feather that exposes its CAN bus
+and STEMMA QT I2C bus over USB CDC-NCM. The board appears as a small USB
+Ethernet device, advertises itself as `pico-can-bridge.local`, serves browser
+consoles, and accepts bus commands over WebSocket.
 
 The current default build is intended for an MCP25xx CAN controller connected
 over SPI.
@@ -16,10 +16,12 @@ over SPI.
 - Stable locally administered MAC addresses derived from the Pico flash UID
 - IPv6 link-local address derived from the device MAC
 - mDNS/DNS-SD advertisement for `_http._tcp`
-- Built-in browser CAN console
+- Built-in browser CAN and I2C consoles
 - WebSocket CAN API at `/can`
+- WebSocket I2C API at `/i2c`
 - MCP25xx CAN support via the `mcp25xx` crate
 - CAN TX, RX broadcast to connected WebSocket clients, status, bitrate/mode config
+- Concurrent I2C status, scan, read, write, and write-read transactions
 - Board LED startup indicator while the USB network is not ready yet
 
 ## Hardware
@@ -34,6 +36,16 @@ Default CAN wiring:
 | MCP25xx CS | GP19 |
 
 The default CAN bitrate is 500 kbit/s.
+
+STEMMA QT wiring is fixed by the board:
+
+| Signal | RP2040 pin |
+| --- | --- |
+| I2C1 SDA | GP2 |
+| I2C1 SCL | GP3 |
+
+The I2C bus runs at 400 kHz. CAN uses SPI1 and STEMMA QT uses I2C1, so both
+hardware blocks run concurrently without a pin conflict.
 
 The firmware uses the board's red LED on GP13 as a startup indicator.
 The LED turns on after reset and turns off when the USB network has seen host
@@ -111,7 +123,8 @@ curl http://pico-can-bridge.local/api/status
 The built-in web UI is available at:
 
 ```text
-http://pico-can-bridge.local/
+http://pico-can-bridge.local/          CAN console
+http://pico-can-bridge.local/i2c.html I2C console
 ```
 
 ## Local HTML Apps
@@ -121,13 +134,14 @@ file on the host can connect directly to:
 
 ```text
 ws://pico-can-bridge.local/can
+ws://pico-can-bridge.local/i2c
 ```
 
 For example, `examples/led_control.html` can be opened directly in Safari and
 uses the WebSocket API to switch a CAN-connected LED node on and off. This keeps
 the firmware simple while still allowing project-specific browser tools.
 
-## WebSocket API
+## CAN WebSocket API
 
 WebSocket endpoint:
 
@@ -170,6 +184,57 @@ Examples:
 - `examples/can_ws.py`: Python WebSocket client
 - `examples/led_control.html`: standalone browser LED control page
 
+## I2C WebSocket API
+
+WebSocket endpoint:
+
+```text
+ws://pico-can-bridge.local/i2c
+```
+
+On connect, the device sends:
+
+```json
+{"type":"hello","ok":true,"endpoint":"/i2c"}
+```
+
+Request I2C status:
+
+```json
+{"type":"i2c.status"}
+```
+
+Scan the normal 7-bit address range:
+
+```json
+{"type":"i2c.scan","bus":0}
+```
+
+Read two bytes from address `0x18` (decimal 24):
+
+```json
+{"type":"i2c.read","bus":0,"address":24,"length":2}
+```
+
+Write register address `0x05` to the same device:
+
+```json
+{"type":"i2c.write","bus":0,"address":24,"data":[5]}
+```
+
+Write register address `0x05`, issue a repeated start, and read two bytes:
+
+```json
+{"type":"i2c.write_read","bus":0,"address":24,"write":[5],"readLength":2}
+```
+
+I2C addresses may also be sent as quoted hexadecimal strings such as
+`"address":"0x18"`. Read and write payloads are limited to 64 bytes.
+
+Example:
+
+- `examples/i2c_ws.py`: Python status and bus scan client
+
 ## Known Limitations
 
 - There is no full AutoIP/RFC 3927 implementation for the non-DHCP link-local
@@ -184,8 +249,12 @@ Examples:
 - The default DHCP mode avoids the 169.254/16 link-local route ambiguity, but it
   still does not probe the chosen `10.x.y.0/24` subnet before using it.
 - The WebSocket protocol is intentionally small and JSON-only at the moment.
+- The Embassy RP2040 I2C driver has no address-only probe operation. `i2c.scan`
+  therefore probes each address with a one-byte read, which may affect devices
+  whose reads have side effects.
+- I2C transactions currently have no automatic stuck-bus recovery.
 - There is no flash filesystem or custom page upload support in this Rust
-  version yet. The root page is always the built-in CAN console.
+  version yet. The firmware always serves its built-in CAN and I2C consoles.
 
 ## Notes
 
