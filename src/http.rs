@@ -8,6 +8,7 @@ use heapless::String;
 use crate::can::{CAN_EVENTS, CanEvent, handle_can_ws_text, write_can_frame_json};
 
 const HTTP_SOCKETS: usize = crate::HTTP_SOCKETS;
+const HTTP_PEER_CLOSE_TIMEOUT: Duration = Duration::from_secs(2);
 
 fn sha1(data: &[u8]) -> [u8; 20] {
     let mut h0 = 0x6745_2301u32;
@@ -181,6 +182,35 @@ async fn write_empty_response(
         status
     );
     write_all(socket, header.as_bytes()).await
+}
+
+async fn close_gracefully(socket: &mut TcpSocket<'_>) {
+    // Send and acknowledge the response body before starting the TCP close handshake.
+    if socket.flush().await.is_err() {
+        socket.abort();
+        let _ = socket.flush().await;
+        return;
+    }
+
+    socket.close();
+    if socket.flush().await.is_err() {
+        socket.abort();
+        let _ = socket.flush().await;
+        return;
+    }
+
+    // close() only closes our transmit half. Give the browser time to send its FIN so
+    // the socket reaches TIME_WAIT instead of being reset when the accept loop reuses it.
+    let mut discard = [0u8; 64];
+    let peer_close = async {
+        loop {
+            match socket.read(&mut discard).await {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {}
+            }
+        }
+    };
+    let _ = select(peer_close, Timer::after(HTTP_PEER_CLOSE_TIMEOUT)).await;
 }
 
 async fn serve_http_connection(
@@ -560,8 +590,7 @@ pub(crate) async fn http_task(stack: embassy_net::Stack<'static>) {
             defmt::info!("HTTP client connected");
             match serve_http_connection(&mut socket, &mut request_buf).await {
                 Ok(()) => {
-                    socket.close();
-                    let _ = socket.flush().await;
+                    close_gracefully(&mut socket).await;
                 }
                 Err(_) => {
                     socket.abort();
