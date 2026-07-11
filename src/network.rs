@@ -96,12 +96,12 @@ pub(crate) fn clear_host_silence_reset_count() {
 }
 
 /// Force an unmistakable USB disconnect before rebooting. A bare system reset
-/// can be too short for iOS to discard a half-configured CDC-NCM interface.
-pub(crate) async fn usb_reenumeration_reset() -> ! {
+/// can be too short for a host to discard a half-configured CDC-NCM interface.
+pub(crate) async fn usb_reenumeration_reset(disconnect_time: Duration) -> ! {
     embassy_rp::pac::USB
         .sie_ctrl()
         .modify(|w| w.set_pullup_en(false));
-    Timer::after(Duration::from_millis(350)).await;
+    Timer::after(disconnect_time).await;
     cortex_m::peripheral::SCB::sys_reset();
 }
 

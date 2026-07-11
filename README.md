@@ -52,8 +52,12 @@ The LED turns on after reset and turns off when DHCP has assigned the host an
 address and mDNS has established the advertised service. In the non-DHCP
 link-local configuration, seeing host traffic replaces the DHCP requirement.
 If the host remains silent during startup, the firmware briefly disconnects
-USB before retrying enumeration. The retry counter survives automatic recovery
-resets but a reset-button press or a real link-down starts a fresh sequence.
+USB before retrying enumeration. The disconnect grows from 350 ms to 1, 3,
+and finally 5 seconds so a host reconnecting an entire dock has time to discard
+stale CDC-NCM state. The retry counter survives automatic recovery resets but a
+reset-button press or a real link-down starts a fresh sequence. If the LED stays
+red after the retry limit, physically unplug the board's USB cable for at least
+five seconds; a bus-powered device cannot remove VBUS from its own hub port.
 
 ## Build
 

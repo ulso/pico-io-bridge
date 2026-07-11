@@ -86,6 +86,27 @@ bind_interrupts!(struct Irqs {
     I2C1_IRQ => I2cInterruptHandler<I2C1>;
 });
 
+fn host_silence_recovery(attempt: u32) -> (Duration, &'static [u8]) {
+    match attempt {
+        1 => (
+            Duration::from_millis(350),
+            b"host silent, USB detach 350 ms then reset\r\n",
+        ),
+        2 => (
+            Duration::from_secs(1),
+            b"host silent, USB detach 1 s then reset\r\n",
+        ),
+        3 => (
+            Duration::from_secs(3),
+            b"host silent, USB detach 3 s then reset\r\n",
+        ),
+        _ => (
+            Duration::from_secs(5),
+            b"host silent, USB detach 5 s then reset\r\n",
+        ),
+    }
+}
+
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
     let p = embassy_rp::init(Default::default());
@@ -262,7 +283,7 @@ async fn main(spawner: Spawner) {
                         warn!("CDC-NCM watchdog requesting system reset");
                         uart.blocking_write(b"CDC-NCM watchdog reset\r\n").unwrap();
                         uart.blocking_flush().unwrap();
-                        network::usb_reenumeration_reset().await;
+                        network::usb_reenumeration_reset(Duration::from_millis(350)).await;
                     }
                     continue;
                 }
@@ -301,11 +322,14 @@ async fn main(spawner: Spawner) {
             if host_silence_resets < HOST_SILENCE_RESET_LIMIT {
                 host_silence_resets += 1;
                 network::arm_host_silence_reset(host_silence_resets);
-                warn!("host silent after link-up, forcing USB re-enumeration");
-                uart.blocking_write(b"host silent, re-enumerating (reset)\r\n")
-                    .unwrap();
+                let (disconnect_time, message) = host_silence_recovery(host_silence_resets);
+                warn!(
+                    "host silent after link-up, USB detach {} ms before reset",
+                    disconnect_time.as_millis()
+                );
+                uart.blocking_write(message).unwrap();
                 uart.blocking_flush().unwrap();
-                network::usb_reenumeration_reset().await;
+                network::usb_reenumeration_reset(disconnect_time).await;
             } else {
                 warn!("host still silent, reset limit reached, staying up");
                 uart.blocking_write(b"host silent, reset limit reached; network not ready\r\n")
