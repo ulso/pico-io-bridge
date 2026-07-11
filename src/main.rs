@@ -61,7 +61,8 @@ const CDC_NCM_LINK_UP_RESET_MISSES: u8 = 2;
 // re-enumeration makes embassy-usb send that notification again.
 const HOST_SILENCE_TIMEOUT: Duration = Duration::from_secs(8);
 pub(crate) const HOST_SILENCE_RESET_MAGIC: u32 = 0xCAFE_0000;
-const HOST_SILENCE_RESET_LIMIT: u32 = 3;
+pub(crate) const HOST_SILENCE_RESET_MARKER: u32 = 0xC0DE_CAFE;
+const HOST_SILENCE_RESET_LIMIT: u32 = 5;
 #[cfg(feature = "mdns")]
 const HEAP_SIZE: usize = 32768;
 
@@ -88,6 +89,7 @@ bind_interrupts!(struct Irqs {
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
     let p = embassy_rp::init(Default::default());
+    let mut host_silence_resets = network::take_host_silence_reset_count();
 
     #[cfg(feature = "mdns")]
     {
@@ -259,7 +261,8 @@ async fn main(spawner: Spawner) {
                     if link_watchdog_misses >= CDC_NCM_LINK_UP_RESET_MISSES {
                         warn!("CDC-NCM watchdog requesting system reset");
                         uart.blocking_write(b"CDC-NCM watchdog reset\r\n").unwrap();
-                        cortex_m::peripheral::SCB::sys_reset();
+                        uart.blocking_flush().unwrap();
+                        network::usb_reenumeration_reset().await;
                     }
                     continue;
                 }
@@ -292,20 +295,20 @@ async fn main(spawner: Spawner) {
         }
 
         if host_alive {
-            network::set_host_silence_reset_count(0);
+            network::clear_host_silence_reset_count();
             uart.blocking_write(b"host traffic seen\r\n").unwrap();
         } else if stack.is_link_up() {
-            let resets = network::host_silence_reset_count();
-            if resets < HOST_SILENCE_RESET_LIMIT {
-                network::set_host_silence_reset_count(resets + 1);
+            if host_silence_resets < HOST_SILENCE_RESET_LIMIT {
+                host_silence_resets += 1;
+                network::arm_host_silence_reset(host_silence_resets);
                 warn!("host silent after link-up, forcing USB re-enumeration");
                 uart.blocking_write(b"host silent, re-enumerating (reset)\r\n")
                     .unwrap();
                 uart.blocking_flush().unwrap();
-                cortex_m::peripheral::SCB::sys_reset();
+                network::usb_reenumeration_reset().await;
             } else {
                 warn!("host still silent, reset limit reached, staying up");
-                uart.blocking_write(b"host silent, reset limit reached\r\n")
+                uart.blocking_write(b"host silent, reset limit reached; network not ready\r\n")
                     .unwrap();
             }
         } else {
@@ -315,6 +318,9 @@ async fn main(spawner: Spawner) {
 
         let rx_after_host_probe = network::NET_RX_PACKETS.load(Ordering::Relaxed);
         let mut host_ready = host_alive;
+        #[cfg(feature = "dhcp-server")]
+        let mut dhcp_lease_logged = false;
+        let mut network_ready_logged = false;
         #[cfg(feature = "mdns")]
         let mut mdns_ready = false;
 
@@ -373,15 +379,35 @@ async fn main(spawner: Spawner) {
         {
             let monitor = async {
                 loop {
-                    host_ready |=
+                    let packet_seen =
                         network::NET_RX_PACKETS.load(Ordering::Relaxed) != rx_after_host_probe;
+                    if packet_seen && !host_ready {
+                        host_ready = true;
+                        network::clear_host_silence_reset_count();
+                        uart.blocking_write(b"host traffic seen after startup\r\n")
+                            .unwrap();
+                    }
+
+                    #[cfg(feature = "dhcp-server")]
+                    let network_ready = {
+                        let network_ready = dhcp::lease_active();
+                        if network_ready && !dhcp_lease_logged {
+                            dhcp_lease_logged = true;
+                            uart.blocking_write(b"DHCP lease established\r\n").unwrap();
+                        } else if !network_ready {
+                            dhcp_lease_logged = false;
+                        }
+                        network_ready
+                    };
+                    #[cfg(not(feature = "dhcp-server"))]
+                    let network_ready = host_ready;
 
                     if let (Some(mdns), Some(handle)) = (mdns_state, mdns_service) {
                         while let Some(update) = mdns.poll_service_update(handle) {
                             let line: &[u8] = match update {
                                 mdns::ServiceUpdate::Established => {
                                     mdns_ready = true;
-                                    b"mDNS service established\r\n"
+                                    b"mDNS service locally established\r\n"
                                 }
                                 mdns::ServiceUpdate::Renamed(_) => {
                                     b"mDNS CONFLICT: service renamed\r\n"
@@ -397,8 +423,15 @@ async fn main(spawner: Spawner) {
                             uart.blocking_write(line).unwrap();
                         }
                     }
-                    if host_ready && mdns_ready {
+                    if network_ready && mdns_ready {
                         led.set_low();
+                        if !network_ready_logged {
+                            network_ready_logged = true;
+                            uart.blocking_write(b"network ready\r\n").unwrap();
+                        }
+                    } else {
+                        network_ready_logged = false;
+                        led.set_high();
                     }
                     Timer::after(Duration::from_millis(500)).await;
                 }
@@ -409,10 +442,38 @@ async fn main(spawner: Spawner) {
         {
             let monitor = async {
                 loop {
-                    host_ready |=
+                    let packet_seen =
                         network::NET_RX_PACKETS.load(Ordering::Relaxed) != rx_after_host_probe;
-                    if host_ready {
+                    if packet_seen && !host_ready {
+                        host_ready = true;
+                        network::clear_host_silence_reset_count();
+                        uart.blocking_write(b"host traffic seen after startup\r\n")
+                            .unwrap();
+                    }
+
+                    #[cfg(feature = "dhcp-server")]
+                    let network_ready = {
+                        let network_ready = dhcp::lease_active();
+                        if network_ready && !dhcp_lease_logged {
+                            dhcp_lease_logged = true;
+                            uart.blocking_write(b"DHCP lease established\r\n").unwrap();
+                        } else if !network_ready {
+                            dhcp_lease_logged = false;
+                        }
+                        network_ready
+                    };
+                    #[cfg(not(feature = "dhcp-server"))]
+                    let network_ready = host_ready;
+
+                    if network_ready {
                         led.set_low();
+                        if !network_ready_logged {
+                            network_ready_logged = true;
+                            uart.blocking_write(b"network ready\r\n").unwrap();
+                        }
+                    } else {
+                        network_ready_logged = false;
+                        led.set_high();
                     }
                     Timer::after(Duration::from_millis(500)).await;
                 }
@@ -422,6 +483,10 @@ async fn main(spawner: Spawner) {
 
         info!("CDC-NCM link down");
         led.set_high();
+        host_silence_resets = 0;
+        network::clear_host_silence_reset_count();
+        #[cfg(feature = "dhcp-server")]
+        dhcp::clear_lease();
         uart.blocking_write(b"CDC-NCM link down\r\n").unwrap();
         Timer::after(Duration::from_millis(100)).await;
     }

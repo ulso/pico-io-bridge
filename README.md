@@ -48,8 +48,12 @@ The I2C bus runs at 400 kHz. CAN uses SPI1 and STEMMA QT uses I2C1, so both
 hardware blocks run concurrently without a pin conflict.
 
 The firmware uses the board's red LED on GP13 as a startup indicator.
-The LED turns on after reset and turns off when the USB network has seen host
-traffic and mDNS has established the advertised service.
+The LED turns on after reset and turns off when DHCP has assigned the host an
+address and mDNS has established the advertised service. In the non-DHCP
+link-local configuration, seeing host traffic replaces the DHCP requirement.
+If the host remains silent during startup, the firmware briefly disconnects
+USB before retrying enumeration. The retry counter survives automatic recovery
+resets but a reset-button press or a real link-down starts a fresh sequence.
 
 ## Build
 

@@ -4,6 +4,7 @@ use embassy_net::Ipv6Address;
 use embassy_net::driver::{Capabilities, Driver as NetDriver, HardwareAddress, LinkState};
 use embassy_rp::peripherals::USB;
 use embassy_rp::usb::Driver;
+use embassy_time::{Duration, Timer};
 use embassy_usb::UsbDevice;
 use embassy_usb::class::cdc_ncm;
 use embassy_usb::class::cdc_ncm::embassy_net::Device as NcmDevice;
@@ -52,10 +53,7 @@ impl<D: NetDriver> NetDriver for CountingDevice<D> {
     }
 }
 
-/// Reset counter kept in a watchdog scratch register (survives sys_reset,
-/// cleared on power-on), capping host-silence re-enumeration attempts so a
-/// genuinely silent host cannot cause an endless reset loop.
-pub(crate) fn host_silence_reset_count() -> u32 {
+fn stored_host_silence_reset_count() -> u32 {
     let value = embassy_rp::pac::WATCHDOG.scratch0().read();
     if value & 0xFFFF_0000 == crate::HOST_SILENCE_RESET_MAGIC {
         value & 0xFFFF
@@ -64,10 +62,47 @@ pub(crate) fn host_silence_reset_count() -> u32 {
     }
 }
 
-pub(crate) fn set_host_silence_reset_count(count: u32) {
+fn store_host_silence_reset_count(count: u32) {
     embassy_rp::pac::WATCHDOG
         .scratch0()
         .write_value(crate::HOST_SILENCE_RESET_MAGIC | (count & 0xFFFF));
+}
+
+/// Recover the retry count only when the previous boot deliberately requested
+/// a USB recovery reset. A reset-button press therefore starts a fresh recovery
+/// sequence even though RP2040 watchdog scratch registers survive system reset.
+pub(crate) fn take_host_silence_reset_count() -> u32 {
+    let marker = embassy_rp::pac::WATCHDOG.scratch1().read();
+    embassy_rp::pac::WATCHDOG.scratch1().write_value(0);
+
+    if marker == crate::HOST_SILENCE_RESET_MARKER {
+        stored_host_silence_reset_count()
+    } else {
+        store_host_silence_reset_count(0);
+        0
+    }
+}
+
+pub(crate) fn arm_host_silence_reset(count: u32) {
+    store_host_silence_reset_count(count);
+    embassy_rp::pac::WATCHDOG
+        .scratch1()
+        .write_value(crate::HOST_SILENCE_RESET_MARKER);
+}
+
+pub(crate) fn clear_host_silence_reset_count() {
+    store_host_silence_reset_count(0);
+    embassy_rp::pac::WATCHDOG.scratch1().write_value(0);
+}
+
+/// Force an unmistakable USB disconnect before rebooting. A bare system reset
+/// can be too short for iOS to discard a half-configured CDC-NCM interface.
+pub(crate) async fn usb_reenumeration_reset() -> ! {
+    embassy_rp::pac::USB
+        .sie_ctrl()
+        .modify(|w| w.set_pullup_en(false));
+    Timer::after(Duration::from_millis(350)).await;
+    cortex_m::peripheral::SCB::sys_reset();
 }
 
 fn fnv1a64(bytes: &[u8]) -> u64 {
