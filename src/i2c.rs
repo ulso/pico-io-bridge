@@ -2,7 +2,13 @@ use core::fmt::Write;
 
 use defmt::*;
 use embassy_futures::select::{Either, select};
-use embassy_rp::i2c::{AbortReason, Async, Error as I2cError, I2c};
+use embassy_rp::i2c::{AbortReason, Async, Error as I2cError, I2c, Instance};
+#[cfg(feature = "board-adafruit-kb2040")]
+use embassy_rp::peripherals::I2C0;
+#[cfg(any(
+    feature = "board-adafruit-rp2040-can",
+    feature = "board-adafruit-feather-rp2040"
+))]
 use embassy_rp::peripherals::I2C1;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
@@ -289,8 +295,8 @@ fn operation_error(error: I2cError) -> I2cReply {
     }
 }
 
-async fn execute_command(
-    bus: &mut I2c<'static, I2C1, Async>,
+async fn execute_command<T: Instance>(
+    bus: &mut I2c<'static, T, Async>,
     state: &mut I2cState,
     command: I2cCommand,
 ) -> I2cReply {
@@ -374,14 +380,28 @@ async fn execute_command(
     }
 }
 
-#[embassy_executor::task]
-pub(crate) async fn i2c_task(mut bus: I2c<'static, I2C1, Async>) {
+async fn run_i2c<T: Instance>(mut bus: I2c<'static, T, Async>) {
     let mut state = I2cState::ready();
-    info!("STEMMA QT I2C ready: 400 kHz, SCL GP3, SDA GP2");
+    info!("STEMMA QT I2C ready: 400 kHz");
 
     loop {
         let command = I2C_COMMANDS.receive().await;
         let reply = execute_command(&mut bus, &mut state, command).await;
         I2C_REPLIES.send(reply).await;
     }
+}
+
+#[cfg(feature = "board-adafruit-kb2040")]
+#[embassy_executor::task]
+pub(crate) async fn i2c0_task(bus: I2c<'static, I2C0, Async>) {
+    run_i2c(bus).await;
+}
+
+#[cfg(any(
+    feature = "board-adafruit-rp2040-can",
+    feature = "board-adafruit-feather-rp2040"
+))]
+#[embassy_executor::task]
+pub(crate) async fn i2c1_task(bus: I2c<'static, I2C1, Async>) {
+    run_i2c(bus).await;
 }

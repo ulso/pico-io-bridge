@@ -7,11 +7,16 @@ authors = ["Ulf Söderberg <ulso@me.com>"]
 resolver = "2"
 
 [features]
-default = ["mdns", "mcp2515", "dhcp-server"]
+default = ["board-adafruit-rp2040-can"]
+board-adafruit-rp2040-can = ["mdns", "dhcp-server", "mcp25625", "i2c"]
+board-adafruit-feather-rp2040 = ["mdns", "dhcp-server", "i2c", "embassy-rp/boot2-generic-03h"]
+board-adafruit-kb2040 = ["mdns", "dhcp-server", "i2c"]
 mdns = ["dep:embedded-alloc", "dep:hick-embassy", "dep:mdns-proto", "hick-embassy/no-atomic", "mdns-proto/no-atomic", "embassy-net/mdns"]
 dhcp-server = ["dep:leasehund", "leasehund/defmt", "embassy-net/dhcpv4"]
-mcp2515 = ["mcp25xx/mcp2515"]
-mcp25625 = ["mcp25xx/mcp25625"]
+can = ["dep:embedded-hal-1", "dep:embedded-hal-bus", "dep:mcp25xx", "dep:nb"]
+i2c = []
+mcp2515 = ["can", "mcp25xx/mcp2515"]
+mcp25625 = ["can", "mcp25xx/mcp25625"]
 
 [dependencies]
 embassy-embedded-hal = { version = "0.6.0", features = ["defmt"] }
@@ -36,9 +41,9 @@ futures = { version = "0.3.31", default-features = false, features = ["async-awa
 heapless = "0.9.3"
 embedded-alloc = { version = "0.6.0", optional = true }
 
-embedded-hal-1 = { package = "embedded-hal", version = "=1.0.0" }
+embedded-hal-1 = { package = "embedded-hal", version = "=1.0.0", optional = true }
 embedded-hal-async = "1.0.0"
-embedded-hal-bus = { version = "0.3.0", features = ["async"] }
+embedded-hal-bus = { version = "0.3.0", features = ["async"], optional = true }
 embedded-io-async = { version = "0.7.0", features = ["defmt"] }
 embedded-storage = { version = "0.3.1" }
 static_cell = "2.1.1"
@@ -51,8 +56,8 @@ rand_core = { version = "0.10.1", default-features = false }
 hick-embassy = { version = "0.2", default-features = false, optional = true }
 mdns-proto = { version = "0.3", default-features = false, optional = true }
 leasehund = { version = "0.5.2", default-features = false, optional = true }
-mcp25xx = "0.4.0"
-nb = "1.1.0"
+mcp25xx = { version = "0.4.0", optional = true }
+nb = { version = "1.1.0", optional = true }
 
 [profile.release]
 debug = true

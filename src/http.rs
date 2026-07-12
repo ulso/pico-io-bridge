@@ -1,20 +1,52 @@
 use core::fmt::Write;
 
-use embassy_futures::select::{Either, select};
+#[cfg(feature = "can")]
+use embassy_futures::select::Either;
+use embassy_futures::select::select;
 use embassy_net::tcp::TcpSocket;
 use embassy_time::{Duration, Timer};
 use heapless::String;
 
+#[cfg(feature = "can")]
 use crate::can::{CAN_EVENTS, CanEvent, handle_can_ws_text, write_can_frame_json};
+#[cfg(feature = "i2c")]
 use crate::i2c::handle_i2c_ws_text;
+#[cfg(any(feature = "can", feature = "i2c"))]
 use crate::websocket::{self, Frame};
 
 const HTTP_SOCKETS: usize = crate::HTTP_SOCKETS;
 const HTTP_PEER_CLOSE_TIMEOUT: Duration = Duration::from_secs(2);
 
 enum WebSocketEndpoint {
+    #[cfg(feature = "can")]
     Can,
+    #[cfg(feature = "i2c")]
     I2c,
+}
+
+#[cfg(all(feature = "can", feature = "i2c"))]
+const API_STATUS_BODY: &[u8] = br#"{"device":"pico-can-bridge-rs","network":"cdc-ncm","interfaces":["can","i2c"],"websocket":"/can","websockets":["/can","/i2c"],"pages":{"can":"/","i2c":"/i2c.html"}}"#;
+#[cfg(all(feature = "can", not(feature = "i2c")))]
+const API_STATUS_BODY: &[u8] = br#"{"device":"pico-can-bridge-rs","network":"cdc-ncm","interfaces":["can"],"websocket":"/can","websockets":["/can"],"pages":{"can":"/"}}"#;
+#[cfg(all(not(feature = "can"), feature = "i2c"))]
+const API_STATUS_BODY: &[u8] = br#"{"device":"pico-can-bridge-rs","network":"cdc-ncm","interfaces":["i2c"],"websocket":"/i2c","websockets":["/i2c"],"pages":{"i2c":"/"}}"#;
+#[cfg(not(any(feature = "can", feature = "i2c")))]
+const API_STATUS_BODY: &[u8] =
+    br#"{"device":"pico-can-bridge-rs","network":"cdc-ncm","interfaces":[],"websockets":[]}"#;
+
+fn websocket_endpoint(request: &str) -> Option<WebSocketEndpoint> {
+    #[cfg(feature = "can")]
+    if request.starts_with("GET /can ") || request.starts_with("GET /ws ") {
+        return Some(WebSocketEndpoint::Can);
+    }
+
+    #[cfg(feature = "i2c")]
+    if request.starts_with("GET /i2c ") {
+        return Some(WebSocketEndpoint::I2c);
+    }
+
+    let _ = request;
+    None
 }
 
 fn sha1(data: &[u8]) -> [u8; 20] {
@@ -191,6 +223,16 @@ async fn write_empty_response(
     write_all(socket, header.as_bytes()).await
 }
 
+async fn write_not_found(socket: &mut TcpSocket<'_>) -> Result<(), embassy_net::tcp::Error> {
+    const BODY: &[u8] = b"not found\n";
+    write_all(
+        socket,
+        b"HTTP/1.1 404 Not Found\r\nContent-Type: text/plain\r\nConnection: close\r\nContent-Length: 10\r\n\r\n",
+    )
+    .await?;
+    write_all(socket, BODY).await
+}
+
 async fn close_gracefully(socket: &mut TcpSocket<'_>) {
     // Send and acknowledge the response body before starting the TCP close handshake.
     if socket.flush().await.is_err() {
@@ -247,14 +289,16 @@ async fn serve_http_connection(
         return Ok(());
     };
 
-    let websocket_endpoint = if request.starts_with("GET /can ") || request.starts_with("GET /ws ")
+    #[cfg(feature = "i2c")]
     {
-        Some(WebSocketEndpoint::Can)
-    } else if request.starts_with("GET /i2c ") {
-        Some(WebSocketEndpoint::I2c)
-    } else {
-        None
-    };
+        if request.starts_with("GET /i2c.html ") {
+            const BODY: &[u8] = include_bytes!("i2c.html");
+            write_http_response(socket, "text/html", BODY).await?;
+            return Ok(());
+        }
+    }
+
+    let websocket_endpoint = websocket_endpoint(request);
 
     if let Some(endpoint) = websocket_endpoint {
         if let Some(key) = header_value(request, "Sec-WebSocket-Key") {
@@ -267,27 +311,26 @@ async fn serve_http_connection(
             socket.set_timeout(Some(crate::WS_TIMEOUT));
             socket.set_keep_alive(Some(crate::WS_KEEPALIVE));
             match endpoint {
+                #[cfg(feature = "can")]
                 WebSocketEndpoint::Can => can_websocket_loop(socket, rx_buf).await?,
+                #[cfg(feature = "i2c")]
                 WebSocketEndpoint::I2c => i2c_websocket_loop(socket, rx_buf).await?,
             }
         } else {
             write_empty_response(socket, "400 Bad Request").await?;
         }
     } else if request.starts_with("GET /api/status ") {
-        const BODY: &[u8] =
-            br#"{"device":"pico-can-bridge-rs","network":"cdc-ncm","websocket":"/can","websockets":["/can","/i2c"]}"#;
-        write_http_response(socket, "application/json", BODY).await?;
+        write_http_response(socket, "application/json", API_STATUS_BODY).await?;
     } else if request.starts_with("GET /favicon.ico ") {
         write_all(
             socket,
             b"HTTP/1.1 204 No Content\r\nConnection: close\r\nContent-Length: 0\r\nCache-Control: max-age=86400\r\n\r\n",
         )
         .await?;
-    } else if request.starts_with("GET /i2c.html ") {
-        const BODY: &[u8] = include_bytes!("i2c.html");
-        write_http_response(socket, "text/html", BODY).await?;
     } else if request.starts_with("GET / ") || request.starts_with("GET /index.html ") {
-        const BODY: &[u8] = br#"<!doctype html>
+        #[cfg(feature = "can")]
+        {
+            const BODY: &[u8] = br#"<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -307,7 +350,7 @@ h1{font-size:24px;line-height:1.2;margin:0;font-weight:700}
 .toolbar{display:flex;flex-wrap:wrap;gap:8px}
 button{border:1px solid #9aa7b2;background:#fff;color:#17202a;border-radius:6px;padding:8px 12px;font:inherit;font-weight:650;min-height:38px}
 button:disabled{opacity:.45}.primary{background:#17202a;color:#fff;border-color:#17202a}
-.navlink{display:inline-flex;align-items:center;border:1px solid #9aa7b2;background:#fff;color:#17202a;border-radius:6px;padding:7px 12px;text-decoration:none;font-weight:650}
+.navlink{display:inline-flex;align-items:center;border:1px solid #9aa7b2;background:#fff;color:#17202a;border-radius:6px;padding:7px 12px;text-decoration:none;font-weight:650}.interfaceNav{display:contents}
 .grid{display:grid;grid-template-columns:minmax(300px,360px) 1fr;gap:16px;align-items:start}
 .stack{display:grid;gap:16px}
 section{margin-top:16px}.panel{border:1px solid #c7d0da;background:#fff;border-radius:8px;padding:14px}
@@ -344,7 +387,7 @@ pre{box-sizing:border-box;width:100%;min-height:120px;max-height:220px;overflow:
 <button id="connect">Connect</button>
 <button id="disconnect" disabled>Disconnect</button>
 <button id="clear">Clear</button>
-<a class="navlink" href="/i2c.html">I2C</a>
+<span id="interfaceNav" class="interfaceNav"></span>
 </div>
 <div class="status"><span id="bitrateLabel">CAN -</span><span id="modeLabel">mode -</span></div>
 </div>
@@ -430,6 +473,7 @@ const showRxEl=document.getElementById("showRx");
 const showTxEl=document.getElementById("showTx");
 const filterIdEl=document.getElementById("filterId");
 const clearFramesBtn=document.getElementById("clearFrames");
+const interfaceNav=document.getElementById("interfaceNav");
 let ws=null;
 let statusTimer=null;
 let connectWatch=null;
@@ -492,26 +536,28 @@ showTxEl.onchange=renderFrames;
 filterIdEl.oninput=renderFrames;
 clearFramesBtn.onclick=()=>{frames=[];framesEl.textContent="";lastIdEl.textContent="-"};
 clearBtn.onclick=()=>{logEl.textContent="";frames=[];framesEl.textContent="";rxCount=0;txCount=0;errCount=0;lastIdEl.textContent="-";updateCounts()};
+fetch("/api/status").then(response=>response.json()).then(status=>{for(const [name,path] of Object.entries(status.pages||{})){if(name==="can")continue;const link=document.createElement("a");link.className="navlink";link.href=path;link.textContent=name.toUpperCase();interfaceNav.appendChild(link)}}).catch(()=>{});
 log("ready");
 setTimeout(connect,100);
 </script>
 </body>
 </html>
 "#;
-        write_http_response(socket, "text/html", BODY).await?;
+            write_http_response(socket, "text/html", BODY).await?;
+        }
+        #[cfg(all(not(feature = "can"), feature = "i2c"))]
+        {
+            const BODY: &[u8] = include_bytes!("i2c.html");
+            write_http_response(socket, "text/html", BODY).await?;
+        }
     } else {
-        const BODY: &[u8] = b"not found\n";
-        write_all(
-            socket,
-            b"HTTP/1.1 404 Not Found\r\nContent-Type: text/plain\r\nConnection: close\r\nContent-Length: 10\r\n\r\n",
-        )
-        .await?;
-        write_all(socket, BODY).await?;
+        write_not_found(socket).await?;
     }
 
     Ok(())
 }
 
+#[cfg(feature = "can")]
 async fn can_websocket_loop(
     socket: &mut TcpSocket<'_>,
     buf: &mut [u8],
@@ -566,6 +612,7 @@ async fn can_websocket_loop(
     }
 }
 
+#[cfg(feature = "i2c")]
 async fn i2c_websocket_loop(
     socket: &mut TcpSocket<'_>,
     buf: &mut [u8],

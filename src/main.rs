@@ -3,15 +3,25 @@
 #![no_std]
 #![no_main]
 
+#[cfg(all(feature = "can", not(any(feature = "mcp2515", feature = "mcp25625"))))]
+compile_error!("the can feature requires one controller feature: mcp2515 or mcp25625");
+#[cfg(all(feature = "mcp2515", feature = "mcp25625"))]
+compile_error!("mcp2515 and mcp25625 are mutually exclusive");
+
+mod board;
+#[cfg(feature = "can")]
 mod can;
 #[cfg(feature = "dhcp-server")]
 mod dhcp;
 mod http;
+#[cfg(feature = "i2c")]
 mod i2c;
+#[cfg(any(feature = "can", feature = "i2c"))]
 mod json;
 #[cfg(feature = "mdns")]
 mod mdns;
 mod network;
+#[cfg(any(feature = "can", feature = "i2c"))]
 mod websocket;
 
 use defmt::*;
@@ -23,10 +33,7 @@ use embassy_net::{
 };
 use embassy_rp::bind_interrupts;
 use embassy_rp::flash::Flash;
-use embassy_rp::gpio::{Level, Output};
-use embassy_rp::i2c::{Config as I2cConfig, I2c as RpI2c, InterruptHandler as I2cInterruptHandler};
-use embassy_rp::peripherals::{I2C1, USB};
-use embassy_rp::uart::{Config as UartConfig, UartTx};
+use embassy_rp::peripherals::USB;
 use embassy_rp::usb::{Driver, InterruptHandler};
 use embassy_time::{Duration, Timer};
 use embassy_usb::class::cdc_ncm;
@@ -40,7 +47,8 @@ use {defmt_rtt as _, panic_probe as _};
 
 pub(crate) const MTU: usize = 1514;
 const USB_MAX_PACKET_SIZE: u16 = 64;
-const FLASH_SIZE: usize = 2 * 1024 * 1024;
+const FLASH_UID_BYTES: usize = 8;
+const USB_SERIAL_BYTES: usize = FLASH_UID_BYTES * 2;
 pub(crate) const HTTP_PORT: u16 = 80;
 pub(crate) const HTTP_SOCKETS: usize = 4;
 pub(crate) const WS_TIMEOUT: Duration = Duration::from_secs(20);
@@ -81,10 +89,18 @@ const DEVICE_IPV4_ROLE: u8 = 3;
 const DEVICE_MAC_ROLE: u8 = 1;
 const HOST_MAC_ROLE: u8 = 2;
 
-bind_interrupts!(struct Irqs {
+bind_interrupts!(struct UsbIrqs {
     USBCTRL_IRQ => InterruptHandler<USB>;
-    I2C1_IRQ => I2cInterruptHandler<I2C1>;
 });
+
+fn encode_usb_serial(uid: &[u8; FLASH_UID_BYTES], serial: &mut [u8; USB_SERIAL_BYTES]) {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+
+    for (index, byte) in uid.iter().copied().enumerate() {
+        serial[index * 2] = HEX[(byte >> 4) as usize];
+        serial[index * 2 + 1] = HEX[(byte & 0x0f) as usize];
+    }
+}
 
 fn host_silence_recovery(attempt: u32) -> (Duration, &'static [u8]) {
     match attempt {
@@ -110,6 +126,13 @@ fn host_silence_recovery(attempt: u32) -> (Duration, &'static [u8]) {
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
     let p = embassy_rp::init(Default::default());
+    let board::Board {
+        flash,
+        usb,
+        mut uart,
+        mut status,
+        interfaces,
+    } = board::init(p);
     let mut host_silence_resets = network::take_host_silence_reset_count();
 
     #[cfg(feature = "mdns")]
@@ -121,19 +144,22 @@ async fn main(spawner: Spawner) {
         }
     }
 
-    let mut uart = UartTx::new_blocking(p.UART0, p.PIN_0, UartConfig::default());
     uart.blocking_write(b"pico-can-bridge-rs boot\r\n").unwrap();
-    let mut led = Output::new(p.PIN_13, Level::High);
 
-    let mut flash = Flash::<_, _, FLASH_SIZE>::new_blocking(p.FLASH);
-    let mut flash_uid = [0; 16];
+    let mut flash = Flash::<_, _, { board::FLASH_SIZE }>::new_blocking(flash);
+    let mut flash_uid = [0; FLASH_UID_BYTES];
     if flash.blocking_unique_id(&mut flash_uid).is_err() {
-        flash_uid = [
-            b'p', b'i', b'c', b'o', b'-', b'c', b'a', b'n', b'-', b'b', b'r', b'i', b'd', b'g',
-            b'e', 0,
-        ];
-        warn!("flash unique ID read failed, using fallback link-local seed");
+        flash_uid = *b"pico-can";
+        warn!("flash unique ID read failed, using fallback identity seed");
     }
+
+    static USB_SERIAL: StaticCell<[u8; USB_SERIAL_BYTES]> = StaticCell::new();
+    let usb_serial_bytes = USB_SERIAL.init([0; USB_SERIAL_BYTES]);
+    encode_usb_serial(&flash_uid, usb_serial_bytes);
+    let usb_serial: &'static str = core::str::from_utf8(usb_serial_bytes).unwrap();
+    uart.blocking_write(b"USB serial ").unwrap();
+    uart.blocking_write(usb_serial.as_bytes()).unwrap();
+    uart.blocking_write(b"\r\n").unwrap();
 
     #[cfg(feature = "dhcp-server")]
     let (device_ipv4_octets, host_ipv4_octets) =
@@ -150,11 +176,11 @@ async fn main(spawner: Spawner) {
     );
     let device_ipv6 = network::ipv6_link_local_from_mac(&device_mac);
 
-    let usb_driver = Driver::new(p.USB, Irqs);
+    let usb_driver = Driver::new(usb, UsbIrqs);
     let mut usb_config = UsbConfig::new(0xc0de, 0xcafe);
     usb_config.manufacturer = Some("pico-can-bridge-rs");
-    usb_config.product = Some("Pico CAN Bridge CDC-NCM");
-    usb_config.serial_number = Some("0001");
+    usb_config.product = Some(board::USB_PRODUCT);
+    usb_config.serial_number = Some(usb_serial);
     usb_config.device_class = cdc_ncm::USB_CLASS_CDC;
     usb_config.device_sub_class = 0x00;
     usb_config.device_protocol = 0x00;
@@ -206,10 +232,6 @@ async fn main(spawner: Spawner) {
     );
 
     let usb = builder.build();
-    let mut i2c_config = I2cConfig::default();
-    i2c_config.frequency = i2c::I2C_FREQUENCY;
-    let i2c_bus = RpI2c::new_async(p.I2C1, p.PIN_3, p.PIN_2, Irqs, i2c_config);
-
     spawner.spawn(network::usb_task(usb).unwrap());
     spawner.spawn(network::ncm_task(ncm_runner).unwrap());
     spawner.spawn(network::net_task(net_runner).unwrap());
@@ -218,8 +240,7 @@ async fn main(spawner: Spawner) {
     for _ in 0..HTTP_SOCKETS {
         spawner.spawn(http::http_task(stack).unwrap());
     }
-    spawner.spawn(can::can_task(p.SPI1, p.PIN_14, p.PIN_15, p.PIN_8, p.PIN_19).unwrap());
-    spawner.spawn(i2c::i2c_task(i2c_bus).unwrap());
+    interfaces.spawn(spawner);
 
     #[cfg(feature = "dhcp-server")]
     info!(
@@ -251,10 +272,7 @@ async fn main(spawner: Spawner) {
     #[cfg(not(feature = "dhcp-server"))]
     uart.blocking_write(b"USB CDC-NCM ready, IPv4 link-local from flash UID\r\n")
         .unwrap();
-    uart.blocking_write(b"CAN task starting, SPI1 SCK GP14 MOSI GP15 MISO GP8 CS GP19\r\n")
-        .unwrap();
-    uart.blocking_write(b"I2C task starting, I2C1 SCL GP3 SDA GP2 at 400 kHz\r\n")
-        .unwrap();
+    uart.blocking_write(board::INTERFACE_STARTUP_LOG).unwrap();
 
     #[cfg(feature = "mdns")]
     let mut mdns_state: Option<&'static mdns::MdnsState<mdns::MdnsRng>> = None;
@@ -448,14 +466,14 @@ async fn main(spawner: Spawner) {
                         }
                     }
                     if network_ready && mdns_ready {
-                        led.set_low();
+                        status.set_ready();
                         if !network_ready_logged {
                             network_ready_logged = true;
                             uart.blocking_write(b"network ready\r\n").unwrap();
                         }
                     } else {
                         network_ready_logged = false;
-                        led.set_high();
+                        status.set_busy();
                     }
                     Timer::after(Duration::from_millis(500)).await;
                 }
@@ -490,14 +508,14 @@ async fn main(spawner: Spawner) {
                     let network_ready = host_ready;
 
                     if network_ready {
-                        led.set_low();
+                        status.set_ready();
                         if !network_ready_logged {
                             network_ready_logged = true;
                             uart.blocking_write(b"network ready\r\n").unwrap();
                         }
                     } else {
                         network_ready_logged = false;
-                        led.set_high();
+                        status.set_busy();
                     }
                     Timer::after(Duration::from_millis(500)).await;
                 }
@@ -506,7 +524,7 @@ async fn main(spawner: Spawner) {
         }
 
         info!("CDC-NCM link down");
-        led.set_high();
+        status.set_busy();
         host_silence_resets = 0;
         network::clear_host_silence_reset_count();
         #[cfg(feature = "dhcp-server")]

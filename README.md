@@ -1,56 +1,71 @@
 # Pico CAN and I2C Bridge RS
 
-Rust firmware for an Adafruit RP2040 CAN Bus Feather that exposes its CAN bus
-and STEMMA QT I2C bus over USB CDC-NCM. The board appears as a small USB
-Ethernet device, advertises itself as `pico-can-bridge.local`, serves browser
-consoles, and accepts bus commands over WebSocket.
+Rust firmware for supported RP2040 boards that exposes their hardware
+interfaces over USB CDC-NCM. The board appears as a small USB Ethernet device,
+advertises itself as `pico-can-bridge.local`, serves browser consoles, and
+accepts bus commands over WebSocket.
 
-The current default build is intended for an MCP25xx CAN controller connected
-over SPI.
+A compile-time board profile selects the available interfaces, peripherals,
+pins, flash size, status indicator, and USB product name. The default Adafruit
+RP2040 CAN Bus Feather profile enables both its onboard CAN controller and
+STEMMA QT I2C bus. The Adafruit Feather RP2040 and KB2040 profiles enable I2C
+without compiling CAN support or configuring CAN/SPI pins.
 
 ## Current Features
 
 - USB CDC-NCM Ethernet interface
 - Embedded DHCP server using a UID-derived `10.x.y.0/24` subnet
-- Optional IPv4 link-local fallback derived from the Pico flash UID
 - Stable locally administered MAC addresses derived from the Pico flash UID
+- Stable 16-character USB serial number derived from the full 64-bit flash UID
 - IPv6 link-local address derived from the device MAC
 - mDNS/DNS-SD advertisement for `_http._tcp`
 - Built-in browser CAN and I2C consoles
 - WebSocket CAN API at `/can`
 - WebSocket I2C API at `/i2c`
-- MCP25xx CAN support via the `mcp25xx` crate
+- MCP25625 CAN support via the `mcp25xx` crate
 - CAN TX, RX broadcast to connected WebSocket clients, status, bitrate/mode config
 - Concurrent I2C status, scan, read, write, and write-read transactions
-- Board LED startup indicator while the USB network is not ready yet
+- Compile-time profiles for three Adafruit RP2040 boards
+- Board status indication while the USB network is not ready, where available
 
 ## Hardware
 
-Default CAN wiring:
+Supported board profiles:
+
+| Cargo feature | Interfaces | STEMMA QT |
+| --- | --- | --- |
+| `board-adafruit-rp2040-can` | CAN and I2C | I2C1, SDA GP2, SCL GP3 |
+| `board-adafruit-feather-rp2040` | I2C | I2C1, SDA GP2, SCL GP3 |
+| `board-adafruit-kb2040` | I2C | I2C0, SDA GP12, SCL GP13 |
+
+The regular Feather RP2040 profile selects Embassy's generic `03h` second-stage
+flash bootloader. Adafruit boards of this model may contain either GD25Q64C or
+W25Q64JV flash, and the official Pico SDK board definition makes the same
+generic compatibility choice. The KB2040 uses the faster W25Q bootloader.
+
+The default Adafruit RP2040 CAN Bus Feather connects its onboard MCP25625 as
+follows:
 
 | Signal | Pico pin |
 | --- | --- |
 | SPI1 SCK | GP14 |
 | SPI1 MOSI | GP15 |
 | SPI1 MISO | GP8 |
-| MCP25xx CS | GP19 |
+| MCP25625 CS | GP19 |
 
 The default CAN bitrate is 500 kbit/s.
 
-STEMMA QT wiring is fixed by the board:
+The I2C bus runs at 400 kHz. On the CAN Feather, CAN uses SPI1 while STEMMA QT
+uses I2C1, so both hardware blocks run concurrently without a pin conflict.
+Pins for interfaces absent from the selected board profile are left untouched.
 
-| Signal | RP2040 pin |
-| --- | --- |
-| I2C1 SDA | GP2 |
-| I2C1 SCL | GP3 |
+The CAN Feather and regular Feather RP2040 use their red LED on GP13 as a
+startup indicator. The LED turns on after reset and turns off when DHCP has
+assigned the host an address and mDNS has established the advertised service.
+The KB2040 profile cannot use GP13 as an LED because it is the STEMMA QT clock
+pin. Its onboard NeoPixel is deliberately left untouched for now, so network
+readiness is reported through the UART log instead.
 
-The I2C bus runs at 400 kHz. CAN uses SPI1 and STEMMA QT uses I2C1, so both
-hardware blocks run concurrently without a pin conflict.
-
-The firmware uses the board's red LED on GP13 as a startup indicator.
-The LED turns on after reset and turns off when DHCP has assigned the host an
-address and mDNS has established the advertised service. In the non-DHCP
-link-local configuration, seeing host traffic replaces the DHCP requirement.
 If the host remains silent during startup, the firmware briefly disconnects
 USB before retrying enumeration. The disconnect grows from 350 ms to 1, 3,
 and finally 5 seconds so a host reconnecting an entire dock has time to discard
@@ -67,11 +82,18 @@ The project is configured for `thumbv6m-none-eabi` in `.cargo/config.toml`.
 cargo build --release
 ```
 
-Default features are:
+The default feature is:
 
 ```text
-mdns, mcp2515, dhcp-server
+board-adafruit-rp2040-can
 ```
+
+This complete board profile enables mDNS, the DHCP server, I2C, and the
+MCP25625-backed CAN interface. The lower-level `can`, `i2c`, `mcp2515`, and
+`mcp25625` features are implementation building blocks for board profiles and
+are not normally selected directly. Exactly one `board-*` feature must be
+enabled. Future profiles can add interfaces such as ADC or GPIO without
+changing the shared CDC-NCM, HTTP, or WebSocket layers.
 
 With the default features the Pico uses `10.x.y.1/24` and leases
 `10.x.y.2/24` to the USB host. The `x.y` subnet bytes are derived from the
@@ -79,17 +101,20 @@ flash UID, so different boards should normally land on different private /24
 networks. The DHCP response does not advertise a router or DNS server; `.local`
 discovery still comes from mDNS.
 
-For MCP25625 instead of MCP2515:
+For the regular Adafruit Feather RP2040:
 
 ```sh
-cargo build --release --no-default-features --features mdns,mcp25625,dhcp-server
+cargo build --release --no-default-features --features board-adafruit-feather-rp2040
 ```
 
-To build the older IPv4 link-local mode without DHCP:
+For the Adafruit KB2040:
 
 ```sh
-cargo build --release --no-default-features --features mdns,mcp2515
+cargo build --release --no-default-features --features board-adafruit-kb2040
 ```
+
+The two I2C-only profiles exclude the `mcp25xx` dependency, CAN task, CAN HTTP
+page and `/can` WebSocket endpoint from the resulting firmware.
 
 ## Flash
 
@@ -105,11 +130,23 @@ With the Pico in BOOTSEL mode, this should usually be enough:
 cargo run --release
 ```
 
+Select a different board while flashing in the same way as while building:
+
+```sh
+cargo run --release --no-default-features --features board-adafruit-kb2040
+```
+
 ## Network Use
 
-The default build uses the embedded DHCP server. The device uses its UID-derived
-`10.x.y.1/24` address and gives the host `10.x.y.2/24`. IPv4 link-local
-networking is still available by building without the `dhcp-server` feature.
+All current board profiles use the embedded DHCP server. The device uses its
+UID-derived `10.x.y.1/24` address and gives the host `10.x.y.2/24`.
+
+Each physical board reports the full eight-byte flash UID as 16 uppercase
+hexadecimal characters in the USB serial-number descriptor. The same UID seeds
+the MAC and private subnet derivation, allowing a host to distinguish multiple
+boards that run the same profile. The current development VID/PID remains
+`0xC0DE:0xCAFE` and must be replaced with an assigned identity before the
+firmware is distributed as a USB product.
 
 The device advertises:
 
@@ -135,10 +172,15 @@ http://pico-can-bridge.local/          CAN console
 http://pico-can-bridge.local/i2c.html I2C console
 ```
 
+Only pages and WebSocket endpoints for interfaces in the selected board profile
+are available. The CAN Feather uses the CAN console at `/`; the two I2C-only
+profiles serve the I2C console there. `/api/status` reports the active interface
+names and endpoint paths in its `interfaces` and `websockets` arrays.
+
 ## Local HTML Apps
 
 Custom control pages do not have to be uploaded to the Pico. A standalone HTML
-file on the host can connect directly to:
+file on the host can connect directly to any endpoint enabled in the firmware:
 
 ```text
 ws://pico-can-bridge.local/can
@@ -245,24 +287,17 @@ Example:
 
 ## Known Limitations
 
-- There is no full AutoIP/RFC 3927 implementation for the non-DHCP link-local
-  fallback yet.
-- IPv4 link-local address selection is deterministic, based on flash UID plus a
-  role salt. It does not currently perform ARP probing before claiming the
-  address.
-- ARP defense is not implemented yet. If another host uses the same IPv4
-  link-local address, the firmware will not automatically move to a new address.
-- The IPv4 address space used here is only the normal 169.254/16 link-local
-  range, so collisions are possible in principle.
-- The default DHCP mode avoids the 169.254/16 link-local route ambiguity, but it
-  still does not probe the chosen `10.x.y.0/24` subnet before using it.
+- Current board profiles use DHCP and do not expose the older IPv4 link-local
+  mode. Full AutoIP/RFC 3927 probing and ARP defense are not implemented.
+- The DHCP mode does not probe the UID-derived `10.x.y.0/24` subnet before
+  using it. A subnet collision is unlikely but possible in principle.
 - The WebSocket protocol is intentionally small and JSON-only at the moment.
 - The Embassy RP2040 I2C driver has no address-only probe operation. `i2c.scan`
   therefore probes each address with a one-byte read, which may affect devices
   whose reads have side effects.
 - I2C transactions currently have no automatic stuck-bus recovery.
 - There is no flash filesystem or custom page upload support in this Rust
-  version yet. The firmware always serves its built-in CAN and I2C consoles.
+  version yet. The firmware serves the built-in consoles selected at build time.
 
 ## Notes
 

@@ -27,6 +27,7 @@ fn parse_number(text: &str) -> Option<u32> {
     }
 }
 
+#[cfg(feature = "can")]
 pub(crate) fn parse_bool_field(text: &str, key: &str) -> Option<bool> {
     let value = field_value(text, key)?;
 
@@ -43,6 +44,7 @@ pub(crate) fn parse_u32_field(text: &str, key: &str) -> Option<u32> {
     parse_number(field_value(text, key)?)
 }
 
+#[cfg(feature = "can")]
 pub(crate) fn parse_str_field<'a>(text: &'a str, key: &str) -> Option<&'a str> {
     let value = field_value(text, key)?.strip_prefix('"')?;
     Some(&value[..value.find('"')?])

@@ -38,7 +38,7 @@ pre{box-sizing:border-box;width:100%;min-height:140px;max-height:260px;overflow:
 <header>
 <div>
 <h1>Pico I2C Bridge</h1>
-<nav class="tabs"><a href="/">CAN</a><a class="active" href="/i2c.html">I2C</a></nav>
+<nav id="interfaceNav" class="tabs"><a class="active" href="/i2c.html">I2C</a></nav>
 </div>
 <div id="status" class="status bad"><span class="dot"></span><span id="statusText">disconnected</span></div>
 </header>
@@ -93,6 +93,7 @@ const errorsEl=document.getElementById("errors");
 const deviceCountEl=document.getElementById("deviceCount");
 const devicesEl=document.getElementById("devices");
 const logEl=document.getElementById("log");
+const interfaceNav=document.getElementById("interfaceNav");
 let ws=null;
 let connectWatch=null;
 let statusTimer=null;
@@ -128,6 +129,7 @@ readBtn.onclick=()=>{try{send({type:"i2c.read",bus:0,address:address(),length:re
 writeBtn.onclick=()=>{try{send({type:"i2c.write",bus:0,address:address(),data:writeData()})}catch(error){log("! "+error.message)}};
 writeReadBtn.onclick=()=>{try{send({type:"i2c.write_read",bus:0,address:address(),write:writeData(),readLength:readLength()})}catch(error){log("! "+error.message)}};
 clearBtn.onclick=()=>{logEl.textContent="";devicesEl.textContent="";deviceCountEl.textContent="0"};
+fetch("/api/status").then(response=>response.json()).then(status=>{for(const [name,path] of Object.entries(status.pages||{})){if(name==="i2c")continue;const link=document.createElement("a");link.href=path;link.textContent=name.toUpperCase();interfaceNav.prepend(link)}}).catch(()=>{});
 log("ready");
 setTimeout(connect,100);
 </script>
