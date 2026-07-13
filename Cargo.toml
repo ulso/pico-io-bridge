@@ -1,9 +1,8 @@
 [package]
 edition = "2024"
 rust-version = "1.96.0"
-name = "pico-can-bridge-rs"
+name = "pico-io-bridge"
 version = "0.1.0"
-authors = ["Ulf Söderberg <ulso@me.com>"]
 resolver = "2"
 
 [features]
@@ -65,6 +64,6 @@ debug = true
 # Below configs are here to mute the rust-analyzer error.
 # "Can't find crate for 'test'" as this is a no_std project
 [[bin]]
-name = "pico-can-bridge-rs"
+name = "pico-io-bridge"
 test = false
 bench = false
