@@ -1,8 +1,8 @@
-# Pico CAN and I2C Bridge RS
+# Pico I/O Bridge for RP2040
 
 Rust firmware for supported RP2040 boards that exposes their hardware
 interfaces over USB CDC-NCM. The board appears as a small USB Ethernet device,
-advertises itself as `pico-can-bridge.local`, serves browser consoles, and
+advertises a board-specific `.local` hostname, serves browser consoles, and
 accepts bus commands over WebSocket.
 
 A compile-time board profile selects the available interfaces, peripherals,
@@ -19,6 +19,7 @@ without compiling CAN support or configuring CAN/SPI pins.
 - Stable 16-character USB serial number derived from the full 64-bit flash UID
 - IPv6 link-local address derived from the device MAC
 - mDNS/DNS-SD advertisement for `_http._tcp`
+- Predictable board-specific hostnames with a flash-UID fallback on conflict
 - Built-in browser CAN and I2C consoles
 - WebSocket CAN API at `/can`
 - WebSocket I2C API at `/i2c`
@@ -32,11 +33,11 @@ without compiling CAN support or configuring CAN/SPI pins.
 
 Supported board profiles:
 
-| Cargo feature | Interfaces | STEMMA QT |
-| --- | --- | --- |
-| `board-adafruit-rp2040-can` | CAN and I2C | I2C1, SDA GP2, SCL GP3 |
-| `board-adafruit-feather-rp2040` | I2C | I2C1, SDA GP2, SCL GP3 |
-| `board-adafruit-kb2040` | I2C | I2C0, SDA GP12, SCL GP13 |
+| Cargo feature | Interfaces | STEMMA QT | mDNS hostname |
+| --- | --- | --- | --- |
+| `board-adafruit-rp2040-can` | CAN and I2C | I2C1, SDA GP2, SCL GP3 | `pico-io-can-feather.local` |
+| `board-adafruit-feather-rp2040` | I2C | I2C1, SDA GP2, SCL GP3 | `pico-io-feather.local` |
+| `board-adafruit-kb2040` | I2C | I2C0, SDA GP12, SCL GP13 | `pico-io-kb2040.local` |
 
 The regular Feather RP2040 profile selects Embassy's generic `03h` second-stage
 flash bootloader. Adafruit boards of this model may contain either GD25Q64C or
@@ -148,34 +149,45 @@ boards that run the same profile. The current development VID/PID remains
 `0xC0DE:0xCAFE` and must be replaced with an assigned identity before the
 firmware is distributed as a USB product.
 
-The device advertises:
+Each profile advertises its hostname from the hardware table and a matching,
+board-specific `_http._tcp` service instance. For example, the default profile
+advertises:
 
 ```text
-pico-can-bridge.local
+pico-io-can-feather.local
 _http._tcp
 ```
 
-Useful checks on macOS:
+If another board has already claimed the same profile hostname, the conflicting
+firmware automatically registers again with the final three flash-UID bytes as
+a six-character suffix, for example `pico-io-kb2040-635b2c.local`. Its DNS-SD
+service instance receives the same suffix. Thus a single board keeps a short,
+predictable CLI name while multiple identical boards remain independently
+addressable. `dns-sd -B _http._tcp` shows the active instances and
+`dns-sd -L <instance> _http._tcp local.` resolves an instance to its hostname.
+
+Useful checks for the default profile on macOS:
 
 ```sh
 dns-sd -B _http._tcp
-dns-sd -G v4v6 pico-can-bridge.local
-ping pico-can-bridge.local
-ping6 pico-can-bridge.local
-curl http://pico-can-bridge.local/api/status
+dns-sd -G v4v6 pico-io-can-feather.local
+ping pico-io-can-feather.local
+ping6 pico-io-can-feather.local
+curl http://pico-io-can-feather.local/api/status
 ```
 
 The built-in web UI is available at:
 
 ```text
-http://pico-can-bridge.local/          CAN console
-http://pico-can-bridge.local/i2c.html I2C console
+http://pico-io-can-feather.local/          CAN console
+http://pico-io-can-feather.local/i2c.html I2C console
 ```
 
 Only pages and WebSocket endpoints for interfaces in the selected board profile
 are available. The CAN Feather uses the CAN console at `/`; the two I2C-only
 profiles serve the I2C console there. `/api/status` reports the active interface
-names and endpoint paths in its `interfaces` and `websockets` arrays.
+names and endpoint paths in its `interfaces` and `websockets` arrays, plus the
+selected profile name in `board`.
 
 ## Local HTML Apps
 
@@ -183,8 +195,8 @@ Custom control pages do not have to be uploaded to the Pico. A standalone HTML
 file on the host can connect directly to any endpoint enabled in the firmware:
 
 ```text
-ws://pico-can-bridge.local/can
-ws://pico-can-bridge.local/i2c
+ws://pico-io-can-feather.local/can
+ws://pico-io-can-feather.local/i2c
 ```
 
 For example, `examples/led_control.html` can be opened directly in Safari and
@@ -196,7 +208,7 @@ the firmware simple while still allowing project-specific browser tools.
 WebSocket endpoint:
 
 ```text
-ws://pico-can-bridge.local/can
+ws://pico-io-can-feather.local/can
 ```
 
 On connect, the device sends:
@@ -239,7 +251,7 @@ Examples:
 WebSocket endpoint:
 
 ```text
-ws://pico-can-bridge.local/i2c
+ws://pico-io-can-feather.local/i2c
 ```
 
 On connect, the device sends:

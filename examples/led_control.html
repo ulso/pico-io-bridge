@@ -59,7 +59,7 @@ function send(value){
   log('> '+JSON.stringify(msg));
 }
 function connect(){
-  ws=new WebSocket('ws://pico-can-bridge.local/can');
+  ws=new WebSocket('ws://pico-io-can-feather.local/can');
   ws.onopen=()=>{setStatus('ok','connected');setEnabled(true);log('connected')};
   ws.onmessage=e=>log('< '+e.data);
   ws.onclose=e=>{setStatus('','disconnected');setEnabled(false);log('closed '+e.code);setTimeout(connect,1500)};

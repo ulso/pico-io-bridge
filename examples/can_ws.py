@@ -3,7 +3,7 @@ import websockets
 import socket
 import json
 
-URL = "ws://pico-can-bridge.local/can"
+URL = "ws://pico-io-can-feather.local/can"
 
 
 async def connect_can(url=URL, attempts=5, delay=0.5):

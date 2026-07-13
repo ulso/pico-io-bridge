@@ -4,7 +4,7 @@ import socket
 
 import websockets
 
-URL = "ws://pico-can-bridge.local/i2c"
+URL = "ws://pico-io-can-feather.local/i2c"
 
 
 async def connect_i2c(url=URL, attempts=5, delay=0.5):

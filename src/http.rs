@@ -25,14 +25,15 @@ enum WebSocketEndpoint {
 }
 
 #[cfg(all(feature = "can", feature = "i2c"))]
-const API_STATUS_BODY: &[u8] = br#"{"device":"pico-can-bridge-rs","network":"cdc-ncm","interfaces":["can","i2c"],"websocket":"/can","websockets":["/can","/i2c"],"pages":{"can":"/","i2c":"/i2c.html"}}"#;
+const API_STATUS_CAPABILITIES: &str = r#","interfaces":["can","i2c"],"websocket":"/can","websockets":["/can","/i2c"],"pages":{"can":"/","i2c":"/i2c.html"}"#;
 #[cfg(all(feature = "can", not(feature = "i2c")))]
-const API_STATUS_BODY: &[u8] = br#"{"device":"pico-can-bridge-rs","network":"cdc-ncm","interfaces":["can"],"websocket":"/can","websockets":["/can"],"pages":{"can":"/"}}"#;
+const API_STATUS_CAPABILITIES: &str =
+    r#","interfaces":["can"],"websocket":"/can","websockets":["/can"],"pages":{"can":"/"}"#;
 #[cfg(all(not(feature = "can"), feature = "i2c"))]
-const API_STATUS_BODY: &[u8] = br#"{"device":"pico-can-bridge-rs","network":"cdc-ncm","interfaces":["i2c"],"websocket":"/i2c","websockets":["/i2c"],"pages":{"i2c":"/"}}"#;
+const API_STATUS_CAPABILITIES: &str =
+    r#","interfaces":["i2c"],"websocket":"/i2c","websockets":["/i2c"],"pages":{"i2c":"/"}"#;
 #[cfg(not(any(feature = "can", feature = "i2c")))]
-const API_STATUS_BODY: &[u8] =
-    br#"{"device":"pico-can-bridge-rs","network":"cdc-ncm","interfaces":[],"websockets":[]}"#;
+const API_STATUS_CAPABILITIES: &str = r#","interfaces":[],"websockets":[]"#;
 
 fn websocket_endpoint(request: &str) -> Option<WebSocketEndpoint> {
     #[cfg(feature = "can")]
@@ -210,6 +211,20 @@ async fn write_http_response(
     write_all(socket, body).await
 }
 
+async fn write_api_status_response(
+    socket: &mut TcpSocket<'_>,
+) -> Result<(), embassy_net::tcp::Error> {
+    let mut body = String::<384>::new();
+    write!(
+        body,
+        "{{\"device\":\"pico-io-bridge\",\"board\":\"{}\",\"network\":\"cdc-ncm\"{}}}",
+        crate::board::BOARD_NAME,
+        API_STATUS_CAPABILITIES
+    )
+    .unwrap();
+    write_http_response(socket, "application/json", body.as_bytes()).await
+}
+
 async fn write_empty_response(
     socket: &mut TcpSocket<'_>,
     status: &str,
@@ -320,7 +335,7 @@ async fn serve_http_connection(
             write_empty_response(socket, "400 Bad Request").await?;
         }
     } else if request.starts_with("GET /api/status ") {
-        write_http_response(socket, "application/json", API_STATUS_BODY).await?;
+        write_api_status_response(socket).await?;
     } else if request.starts_with("GET /favicon.ico ") {
         write_all(
             socket,
@@ -335,7 +350,7 @@ async fn serve_http_connection(
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Pico CAN Bridge</title>
+<title>Pico I/O Bridge</title>
 <link rel="icon" href="data:,">
 <style>
 :root{color-scheme:light dark;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
@@ -379,7 +394,7 @@ pre{box-sizing:border-box;width:100%;min-height:120px;max-height:220px;overflow:
 <body>
 <main>
 <header>
-<h1>Pico CAN Bridge</h1>
+<h1 id="pageTitle">Pico I/O Bridge</h1>
 <div id="status" class="status bad"><span class="dot"></span><span id="statusText">disconnected</span></div>
 </header>
 <div class="topbar">
@@ -474,6 +489,7 @@ const showTxEl=document.getElementById("showTx");
 const filterIdEl=document.getElementById("filterId");
 const clearFramesBtn=document.getElementById("clearFrames");
 const interfaceNav=document.getElementById("interfaceNav");
+const pageTitle=document.getElementById("pageTitle");
 let ws=null;
 let statusTimer=null;
 let connectWatch=null;
@@ -536,7 +552,7 @@ showTxEl.onchange=renderFrames;
 filterIdEl.oninput=renderFrames;
 clearFramesBtn.onclick=()=>{frames=[];framesEl.textContent="";lastIdEl.textContent="-"};
 clearBtn.onclick=()=>{logEl.textContent="";frames=[];framesEl.textContent="";rxCount=0;txCount=0;errCount=0;lastIdEl.textContent="-";updateCounts()};
-fetch("/api/status").then(response=>response.json()).then(status=>{for(const [name,path] of Object.entries(status.pages||{})){if(name==="can")continue;const link=document.createElement("a");link.className="navlink";link.href=path;link.textContent=name.toUpperCase();interfaceNav.appendChild(link)}}).catch(()=>{});
+fetch("/api/status").then(response=>response.json()).then(status=>{if(status.board){const title="Pico I/O Bridge - "+status.board;pageTitle.textContent=title;document.title=title}for(const [name,path] of Object.entries(status.pages||{})){if(name==="can")continue;const link=document.createElement("a");link.className="navlink";link.href=path;link.textContent=name.toUpperCase();interfaceNav.appendChild(link)}}).catch(()=>{});
 log("ready");
 setTimeout(connect,100);
 </script>

@@ -9,7 +9,10 @@ use super::StatusIndicator;
 use crate::i2c;
 
 pub(crate) const FLASH_SIZE: usize = 8 * 1024 * 1024;
-pub(crate) const USB_PRODUCT: &str = "Pico I2C Bridge Feather RP2040";
+pub(crate) const BOARD_NAME: &str = "Feather RP2040";
+pub(crate) const USB_PRODUCT: &str = "Pico I/O Bridge - Feather RP2040";
+pub(crate) const MDNS_HOST_LABEL: &str = "pico-io-feather";
+pub(crate) const MDNS_SERVICE_INSTANCE: &str = "Pico I/O Bridge - Feather RP2040";
 pub(crate) const INTERFACE_STARTUP_LOG: &[u8] =
     b"I2C task starting, I2C1 SCL GP3 SDA GP2 at 400 kHz\r\n";
 

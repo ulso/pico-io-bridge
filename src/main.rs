@@ -144,7 +144,7 @@ async fn main(spawner: Spawner) {
         }
     }
 
-    uart.blocking_write(b"pico-can-bridge-rs boot\r\n").unwrap();
+    uart.blocking_write(b"pico-io-bridge boot\r\n").unwrap();
 
     let mut flash = Flash::<_, _, { board::FLASH_SIZE }>::new_blocking(flash);
     let mut flash_uid = [0; FLASH_UID_BYTES];
@@ -160,6 +160,13 @@ async fn main(spawner: Spawner) {
     uart.blocking_write(b"USB serial ").unwrap();
     uart.blocking_write(usb_serial.as_bytes()).unwrap();
     uart.blocking_write(b"\r\n").unwrap();
+
+    #[cfg(feature = "mdns")]
+    let mut mdns_uid_suffix_bytes = [0; mdns::UID_SUFFIX_BYTES];
+    #[cfg(feature = "mdns")]
+    mdns::encode_uid_suffix(&flash_uid, &mut mdns_uid_suffix_bytes);
+    #[cfg(feature = "mdns")]
+    let mdns_uid_suffix = core::str::from_utf8(&mdns_uid_suffix_bytes).unwrap();
 
     #[cfg(feature = "dhcp-server")]
     let (device_ipv4_octets, host_ipv4_octets) =
@@ -178,7 +185,7 @@ async fn main(spawner: Spawner) {
 
     let usb_driver = Driver::new(usb, UsbIrqs);
     let mut usb_config = UsbConfig::new(0xc0de, 0xcafe);
-    usb_config.manufacturer = Some("pico-can-bridge-rs");
+    usb_config.manufacturer = Some("Pico I/O Bridge Project");
     usb_config.product = Some(board::USB_PRODUCT);
     usb_config.serial_number = Some(usb_serial);
     usb_config.device_class = cdc_ncm::USB_CLASS_CDC;
@@ -278,6 +285,8 @@ async fn main(spawner: Spawner) {
     let mut mdns_state: Option<&'static mdns::MdnsState<mdns::MdnsRng>> = None;
     #[cfg(feature = "mdns")]
     let mut mdns_service: Option<mdns::ServiceHandle> = None;
+    #[cfg(feature = "mdns")]
+    let mut mdns_uses_uid_suffix = false;
     let mut link_ever_up = false;
     let mut link_watchdog_misses = 0;
 
@@ -397,14 +406,14 @@ async fn main(spawner: Spawner) {
             if let Some(handle) = mdns_service.take() {
                 mdns.unregister_service(handle);
             }
-            match mdns.register_service(mdns::ServiceSpec::new(mdns::build_mdns_records(
-                device_ipv4_octets,
-                device_ipv6,
-            ))) {
-                Ok(handle) => {
-                    mdns_service = Some(handle);
-                    uart.blocking_write(b"mDNS announced pico-can-bridge.local\r\n")
+            let uid_suffix = mdns_uses_uid_suffix.then_some(mdns_uid_suffix);
+            match mdns::register_http_service(mdns, device_ipv4_octets, device_ipv6, uid_suffix) {
+                Ok(registration) => {
+                    uart.blocking_write(b"mDNS announced ").unwrap();
+                    uart.blocking_write(registration.hostname.as_bytes())
                         .unwrap();
+                    uart.blocking_write(b".local\r\n").unwrap();
+                    mdns_service = Some(registration.handle);
                 }
                 Err(_) => {
                     warn!("mDNS service registration failed");
@@ -445,24 +454,74 @@ async fn main(spawner: Spawner) {
                     let network_ready = host_ready;
 
                     if let (Some(mdns), Some(handle)) = (mdns_state, mdns_service) {
+                        let mut retry_with_uid_suffix = false;
                         while let Some(update) = mdns.poll_service_update(handle) {
-                            let line: &[u8] = match update {
+                            match update {
                                 mdns::ServiceUpdate::Established => {
                                     mdns_ready = true;
-                                    b"mDNS service locally established\r\n"
+                                    uart.blocking_write(b"mDNS service locally established\r\n")
+                                        .unwrap();
                                 }
-                                mdns::ServiceUpdate::Renamed(_) => {
-                                    b"mDNS CONFLICT: service renamed\r\n"
+                                mdns::ServiceUpdate::Renamed(renamed) => {
+                                    mdns_ready = false;
+                                    uart.blocking_write(b"mDNS service renamed to ").unwrap();
+                                    uart.blocking_write(renamed.new_name().as_str().as_bytes())
+                                        .unwrap();
+                                    uart.blocking_write(b"\r\n").unwrap();
                                 }
                                 mdns::ServiceUpdate::Conflict => {
-                                    b"mDNS CONFLICT: unresolved, service dead\r\n"
+                                    mdns_ready = false;
+                                    uart.blocking_write(
+                                        b"mDNS CONFLICT: unresolved, service dead\r\n",
+                                    )
+                                    .unwrap();
                                 }
                                 mdns::ServiceUpdate::HostConflict => {
-                                    b"mDNS CONFLICT: host name claimed by peer\r\n"
+                                    mdns_ready = false;
+                                    if mdns_uses_uid_suffix {
+                                        uart.blocking_write(
+                                            b"mDNS CONFLICT: UID host name claimed by peer\r\n",
+                                        )
+                                        .unwrap();
+                                    } else {
+                                        retry_with_uid_suffix = true;
+                                        uart.blocking_write(
+                                            b"mDNS host conflict; retrying with flash UID suffix\r\n",
+                                        )
+                                        .unwrap();
+                                    }
                                 }
-                                _ => b"mDNS service update (unknown)\r\n",
-                            };
-                            uart.blocking_write(line).unwrap();
+                                _ => {
+                                    uart.blocking_write(b"mDNS service update (unknown)\r\n")
+                                        .unwrap();
+                                }
+                            }
+                        }
+
+                        if retry_with_uid_suffix {
+                            mdns.unregister_service(handle);
+                            mdns_service = None;
+                            mdns_uses_uid_suffix = true;
+
+                            match mdns::register_http_service(
+                                mdns,
+                                device_ipv4_octets,
+                                device_ipv6,
+                                Some(mdns_uid_suffix),
+                            ) {
+                                Ok(registration) => {
+                                    uart.blocking_write(b"mDNS announced ").unwrap();
+                                    uart.blocking_write(registration.hostname.as_bytes())
+                                        .unwrap();
+                                    uart.blocking_write(b".local\r\n").unwrap();
+                                    mdns_service = Some(registration.handle);
+                                }
+                                Err(_) => {
+                                    warn!("mDNS UID service registration failed");
+                                    uart.blocking_write(b"mDNS UID registration failed\r\n")
+                                        .unwrap();
+                                }
+                            }
                         }
                     }
                     if network_ready && mdns_ready {
