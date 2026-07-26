@@ -219,6 +219,25 @@ print(instrument.query("MEAS:VOLT:DC? 0"))
 print(instrument.query("MEAS:ADC:RAW? 0"))
 ```
 
+GNU Octave with the `instrument-control` package can use the same raw socket.
+Use its line-oriented helpers rather than `read(pico)` without a byte count;
+that form only reads the bytes already available and can return before the
+instrument has answered:
+
+```octave
+pkg load instrument-control;
+
+pico = tcpclient("pico-io-can-feather.local", 5025, "Timeout", 2);
+configureTerminator(pico, "lf");
+
+identity = writeread(pico, "*IDN?");
+voltage = str2double(writeread(pico, "MEAS:VOLT:DC? 1"));
+
+fprintf("Connected to: %s\n", identity);
+fprintf("ADC channel 1: %.3f V\n", voltage);
+clear pico;
+```
+
 Initial command set:
 
 | Command | Result or action |
