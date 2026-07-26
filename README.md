@@ -201,8 +201,14 @@ selected profile name in `board`.
 ## SCPI-RAW Instrument API
 
 The SCPI server listens on raw TCP port 5025 and accepts LF-terminated commands.
-It processes one instrument session at a time. A PyVISA socket resource can be
-opened with the pure-Python backend:
+It processes one instrument session at a time. Install PyVISA and its
+pure-Python backend:
+
+```sh
+python3 -m pip install pyvisa pyvisa-py
+```
+
+A PyVISA socket resource can then be opened with:
 
 ```python
 import pyvisa
