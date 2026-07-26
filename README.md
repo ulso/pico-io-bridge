@@ -3,13 +3,14 @@
 Rust firmware for supported RP2040 boards that exposes their hardware
 interfaces over USB CDC-NCM. The board appears as a small USB Ethernet device,
 advertises a board-specific `.local` hostname, serves browser consoles, and
-accepts bus commands over WebSocket.
+accepts bus commands over WebSocket and instrument commands over SCPI-RAW.
 
 A compile-time board profile selects the available interfaces, peripherals,
 pins, flash size, status indicator, and USB product name. The default Adafruit
 RP2040 CAN Bus Feather profile enables both its onboard CAN controller and
-STEMMA QT I2C bus. The Adafruit Feather RP2040 and KB2040 profiles enable I2C
-without compiling CAN support or configuring CAN/SPI pins.
+STEMMA QT I2C bus. All profiles enable the four external ADC channels. The
+Adafruit Feather RP2040 and KB2040 profiles enable I2C and ADC without
+compiling CAN support or configuring CAN/SPI pins.
 
 ## Current Features
 
@@ -18,8 +19,10 @@ without compiling CAN support or configuring CAN/SPI pins.
 - Stable locally administered MAC addresses derived from the Pico flash UID
 - Stable 16-character USB serial number derived from the full 64-bit flash UID
 - IPv6 link-local address derived from the device MAC
-- mDNS/DNS-SD advertisement for `_http._tcp`
+- mDNS/DNS-SD advertisement for `_http._tcp` and `_scpi-raw._tcp`
 - Predictable board-specific hostnames with a flash-UID fallback on conflict
+- SCPI-RAW instrument server on TCP port 5025 using `microscpi`
+- Four-channel 12-bit ADC measurements on A0-A3, plus internal temperature
 - Built-in browser CAN and I2C consoles
 - WebSocket CAN API at `/can`
 - WebSocket I2C API at `/i2c`
@@ -35,9 +38,9 @@ Supported board profiles:
 
 | Cargo feature | Interfaces | STEMMA QT | mDNS hostname |
 | --- | --- | --- | --- |
-| `board-adafruit-rp2040-can` | CAN and I2C | I2C1, SDA GP2, SCL GP3 | `pico-io-can-feather.local` |
-| `board-adafruit-feather-rp2040` | I2C | I2C1, SDA GP2, SCL GP3 | `pico-io-feather.local` |
-| `board-adafruit-kb2040` | I2C | I2C0, SDA GP12, SCL GP13 | `pico-io-kb2040.local` |
+| `board-adafruit-rp2040-can` | CAN, I2C, ADC | I2C1, SDA GP2, SCL GP3 | `pico-io-can-feather.local` |
+| `board-adafruit-feather-rp2040` | I2C, ADC | I2C1, SDA GP2, SCL GP3 | `pico-io-feather.local` |
+| `board-adafruit-kb2040` | I2C, ADC | I2C0, SDA GP12, SCL GP13 | `pico-io-kb2040.local` |
 
 The regular Feather RP2040 profile selects Embassy's generic `03h` second-stage
 flash bootloader. Adafruit boards of this model may contain either GD25Q64C or
@@ -58,11 +61,12 @@ The default CAN bitrate is 500 kbit/s.
 
 The I2C bus runs at 400 kHz. On the CAN Feather, CAN uses SPI1 while STEMMA QT
 uses I2C1, so both hardware blocks run concurrently without a pin conflict.
+All profiles expose the RP2040 ADC inputs A0-A3 on GP26-GP29 through SCPI.
 Pins for interfaces absent from the selected board profile are left untouched.
 
 The CAN Feather and regular Feather RP2040 use their red LED on GP13 as a
 startup indicator. The LED turns on after reset and turns off when DHCP has
-assigned the host an address and mDNS has established the advertised service.
+assigned the host an address and mDNS has established the advertised services.
 The KB2040 profile cannot use GP13 as an LED because it is the STEMMA QT clock
 pin. Its onboard NeoPixel is deliberately left untouched for now, so network
 readiness is reported through the UART log instead.
@@ -93,8 +97,8 @@ This complete board profile enables mDNS, the DHCP server, I2C, and the
 MCP25625-backed CAN interface. The lower-level `can`, `i2c`, `mcp2515`, and
 `mcp25625` features are implementation building blocks for board profiles and
 are not normally selected directly. Exactly one `board-*` feature must be
-enabled. Future profiles can add interfaces such as ADC or GPIO without
-changing the shared CDC-NCM, HTTP, or WebSocket layers.
+enabled. Future profiles can add interfaces such as GPIO without changing the
+shared CDC-NCM, HTTP, WebSocket, or SCPI layers.
 
 With the default features the Pico uses `10.x.y.1/24` and leases
 `10.x.y.2/24` to the USB host. The `x.y` subnet bytes are derived from the
@@ -114,7 +118,7 @@ For the Adafruit KB2040:
 cargo build --release --no-default-features --features board-adafruit-kb2040
 ```
 
-The two I2C-only profiles exclude the `mcp25xx` dependency, CAN task, CAN HTTP
+The two I2C/ADC profiles exclude the `mcp25xx` dependency, CAN task, CAN HTTP
 page and `/can` WebSocket endpoint from the resulting firmware.
 
 ## Flash
@@ -149,13 +153,16 @@ boards that run the same profile. The current development VID/PID remains
 `0xC0DE:0xCAFE` and must be replaced with an assigned identity before the
 firmware is distributed as a USB product.
 
-Each profile advertises its hostname from the hardware table and a matching,
-board-specific `_http._tcp` service instance. For example, the default profile
-advertises:
+Each profile advertises its hostname from the hardware table and matching,
+board-specific `_http._tcp` and `_scpi-raw._tcp` service instances. The HTTP
+TXT record includes `path=/`. The SCPI TXT record includes the manufacturer,
+board model, full flash-UID serial number, and firmware version, matching the
+fields returned by `*IDN?`. For example, the default profile advertises:
 
 ```text
 pico-io-can-feather.local
 _http._tcp
+_scpi-raw._tcp
 ```
 
 If another board has already claimed the same profile hostname, the conflicting
@@ -163,13 +170,15 @@ firmware automatically registers again with the final three flash-UID bytes as
 a six-character suffix, for example `pico-io-kb2040-635b2c.local`. Its DNS-SD
 service instance receives the same suffix. Thus a single board keeps a short,
 predictable CLI name while multiple identical boards remain independently
-addressable. `dns-sd -B _http._tcp` shows the active instances and
-`dns-sd -L <instance> _http._tcp local.` resolves an instance to its hostname.
+addressable. `dns-sd -B _http._tcp` and `dns-sd -B _scpi-raw._tcp` show the
+active instances. `dns-sd -L <instance> _scpi-raw._tcp local.` resolves an
+instrument to its hostname, port, and TXT metadata.
 
 Useful checks for the default profile on macOS:
 
 ```sh
 dns-sd -B _http._tcp
+dns-sd -B _scpi-raw._tcp
 dns-sd -G v4v6 pico-io-can-feather.local
 ping pico-io-can-feather.local
 ping6 pico-io-can-feather.local
@@ -188,6 +197,46 @@ are available. The CAN Feather uses the CAN console at `/`; the two I2C-only
 profiles serve the I2C console there. `/api/status` reports the active interface
 names and endpoint paths in its `interfaces` and `websockets` arrays, plus the
 selected profile name in `board`.
+
+## SCPI-RAW Instrument API
+
+The SCPI server listens on raw TCP port 5025 and accepts LF-terminated commands.
+It processes one instrument session at a time. A PyVISA socket resource can be
+opened with the pure-Python backend:
+
+```python
+import pyvisa
+
+rm = pyvisa.ResourceManager("@py")
+instrument = rm.open_resource(
+    "TCPIP0::pico-io-can-feather.local::5025::SOCKET",
+    read_termination="\n",
+    write_termination="\n",
+)
+
+print(instrument.query("*IDN?"))
+print(instrument.query("MEAS:VOLT:DC? 0"))
+print(instrument.query("MEAS:ADC:RAW? 0"))
+```
+
+Initial command set:
+
+| Command | Result or action |
+| --- | --- |
+| `*IDN?` | `manufacturer,model,serial,firmware` |
+| `*RST` | Reset SCPI status and error state |
+| `*TST?` | ADC self-test, `0` means pass |
+| `*CLS`, `*ESR?`, `*STB?`, `*ESE[?]`, `*SRE[?]`, `*OPC[?]` | IEEE 488.2 status handling |
+| `SYST:VERS?` | Supported SCPI standard version |
+| `SYST:ERR?`, `SYST:ERR:COUN?` | Read the error queue |
+| `SYST:CHAN:COUN?` | Number of external ADC channels (`4`) |
+| `MEAS:ADC:RAW? <channel>` | Averaged 12-bit ADC code for channel 0-3 |
+| `MEAS:VOLT:DC? <channel>` | Averaged nominal voltage for channel 0-3 |
+| `MEAS:TEMP?` | Approximate RP2040 internal temperature in degrees Celsius |
+
+SCPI channel 0 maps to A0/GP26, through channel 3 at A3/GP29. Voltage conversion
+assumes a nominal 3.3 V ADC reference and is not calibrated. Keep analog inputs
+between ground and 3.3 V; RP2040 GPIO pins are not 5 V tolerant.
 
 ## Local HTML Apps
 
@@ -304,6 +353,10 @@ Example:
 - The DHCP mode does not probe the UID-derived `10.x.y.0/24` subnet before
   using it. A subnet collision is unlikely but possible in principle.
 - The WebSocket protocol is intentionally small and JSON-only at the moment.
+- The SCPI server currently supports one TCP client at a time and scalar channel
+  numbers rather than SCPI channel-list expressions such as `(@1:4)`.
+- RP2040 ADC voltage and temperature results are nominal, not calibrated
+  instrument-grade measurements.
 - The Embassy RP2040 I2C driver has no address-only probe operation. `i2c.scan`
   therefore probes each address with a one-byte read, which may affect devices
   whose reads have side effects.

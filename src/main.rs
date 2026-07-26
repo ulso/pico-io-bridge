@@ -3,6 +3,9 @@
 #![no_std]
 #![no_main]
 
+#[cfg(feature = "mdns")]
+extern crate alloc;
+
 #[cfg(all(feature = "can", not(any(feature = "mcp2515", feature = "mcp25625"))))]
 compile_error!("the can feature requires one controller feature: mcp2515 or mcp25625");
 #[cfg(all(feature = "mcp2515", feature = "mcp25625"))]
@@ -21,6 +24,7 @@ mod json;
 #[cfg(feature = "mdns")]
 mod mdns;
 mod network;
+mod scpi;
 #[cfg(any(feature = "can", feature = "i2c"))]
 mod websocket;
 
@@ -51,6 +55,9 @@ const FLASH_UID_BYTES: usize = 8;
 const USB_SERIAL_BYTES: usize = FLASH_UID_BYTES * 2;
 pub(crate) const HTTP_PORT: u16 = 80;
 pub(crate) const HTTP_SOCKETS: usize = 4;
+pub(crate) const SCPI_PORT: u16 = 5025;
+pub(crate) const MANUFACTURER: &str = "Pico I/O Bridge Project";
+pub(crate) const FIRMWARE_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub(crate) const WS_TIMEOUT: Duration = Duration::from_secs(20);
 pub(crate) const WS_KEEPALIVE: Duration = Duration::from_secs(5);
 const CDC_NCM_LINK_UP_TIMEOUT: Duration = Duration::from_secs(6);
@@ -149,7 +156,7 @@ async fn main(spawner: Spawner) {
     let mut flash = Flash::<_, _, { board::FLASH_SIZE }>::new_blocking(flash);
     let mut flash_uid = [0; FLASH_UID_BYTES];
     if flash.blocking_unique_id(&mut flash_uid).is_err() {
-        flash_uid = *b"pico-can";
+        flash_uid = *b"pico-io!";
         warn!("flash unique ID read failed, using fallback identity seed");
     }
 
@@ -185,7 +192,7 @@ async fn main(spawner: Spawner) {
 
     let usb_driver = Driver::new(usb, UsbIrqs);
     let mut usb_config = UsbConfig::new(0xc0de, 0xcafe);
-    usb_config.manufacturer = Some("Pico I/O Bridge Project");
+    usb_config.manufacturer = Some(MANUFACTURER);
     usb_config.product = Some(board::USB_PRODUCT);
     usb_config.serial_number = Some(usb_serial);
     usb_config.device_class = cdc_ncm::USB_CLASS_CDC;
@@ -247,7 +254,7 @@ async fn main(spawner: Spawner) {
     for _ in 0..HTTP_SOCKETS {
         spawner.spawn(http::http_task(stack).unwrap());
     }
-    interfaces.spawn(spawner);
+    interfaces.spawn(spawner, stack, usb_serial);
 
     #[cfg(feature = "dhcp-server")]
     info!(
@@ -284,7 +291,7 @@ async fn main(spawner: Spawner) {
     #[cfg(feature = "mdns")]
     let mut mdns_state: Option<&'static mdns::MdnsState<mdns::MdnsRng>> = None;
     #[cfg(feature = "mdns")]
-    let mut mdns_service: Option<mdns::ServiceHandle> = None;
+    let mut mdns_registration: Option<mdns::Registration> = None;
     #[cfg(feature = "mdns")]
     let mut mdns_uses_uid_suffix = false;
     let mut link_ever_up = false;
@@ -373,7 +380,7 @@ async fn main(spawner: Spawner) {
         let mut dhcp_lease_logged = false;
         let mut network_ready_logged = false;
         #[cfg(feature = "mdns")]
-        let mut mdns_ready = false;
+        let mut mdns_service_ready = [false; mdns::SERVICE_COUNT];
 
         #[cfg(feature = "mdns")]
         {
@@ -403,17 +410,23 @@ async fn main(spawner: Spawner) {
             // RFC 6762 section 8.3 expects.
             Timer::after(MDNS_HOST_SETTLE_DELAY).await;
 
-            if let Some(handle) = mdns_service.take() {
-                mdns.unregister_service(handle);
+            if let Some(registration) = mdns_registration.take() {
+                registration.unregister(mdns);
             }
             let uid_suffix = mdns_uses_uid_suffix.then_some(mdns_uid_suffix);
-            match mdns::register_http_service(mdns, device_ipv4_octets, device_ipv6, uid_suffix) {
+            match mdns::register_services(
+                mdns,
+                device_ipv4_octets,
+                device_ipv6,
+                usb_serial,
+                uid_suffix,
+            ) {
                 Ok(registration) => {
                     uart.blocking_write(b"mDNS announced ").unwrap();
                     uart.blocking_write(registration.hostname.as_bytes())
                         .unwrap();
                     uart.blocking_write(b".local\r\n").unwrap();
-                    mdns_service = Some(registration.handle);
+                    mdns_registration = Some(registration);
                 }
                 Err(_) => {
                     warn!("mDNS service registration failed");
@@ -453,60 +466,70 @@ async fn main(spawner: Spawner) {
                     #[cfg(not(feature = "dhcp-server"))]
                     let network_ready = host_ready;
 
-                    if let (Some(mdns), Some(handle)) = (mdns_state, mdns_service) {
+                    if let (Some(mdns), Some(registration)) =
+                        (mdns_state, mdns_registration.as_ref())
+                    {
                         let mut retry_with_uid_suffix = false;
-                        while let Some(update) = mdns.poll_service_update(handle) {
-                            match update {
-                                mdns::ServiceUpdate::Established => {
-                                    mdns_ready = true;
-                                    uart.blocking_write(b"mDNS service locally established\r\n")
-                                        .unwrap();
-                                }
-                                mdns::ServiceUpdate::Renamed(renamed) => {
-                                    mdns_ready = false;
-                                    uart.blocking_write(b"mDNS service renamed to ").unwrap();
-                                    uart.blocking_write(renamed.new_name().as_str().as_bytes())
-                                        .unwrap();
-                                    uart.blocking_write(b"\r\n").unwrap();
-                                }
-                                mdns::ServiceUpdate::Conflict => {
-                                    mdns_ready = false;
-                                    uart.blocking_write(
-                                        b"mDNS CONFLICT: unresolved, service dead\r\n",
-                                    )
-                                    .unwrap();
-                                }
-                                mdns::ServiceUpdate::HostConflict => {
-                                    mdns_ready = false;
-                                    if mdns_uses_uid_suffix {
+                        for (index, (service_name, handle)) in
+                            registration.services().into_iter().enumerate()
+                        {
+                            while let Some(update) = mdns.poll_service_update(handle) {
+                                match update {
+                                    mdns::ServiceUpdate::Established => {
+                                        mdns_service_ready[index] = true;
+                                        uart.blocking_write(b"mDNS ").unwrap();
+                                        uart.blocking_write(service_name).unwrap();
+                                        uart.blocking_write(b" locally established\r\n").unwrap();
+                                    }
+                                    mdns::ServiceUpdate::Renamed(renamed) => {
+                                        mdns_service_ready[index] = false;
+                                        uart.blocking_write(b"mDNS service renamed to ").unwrap();
+                                        uart.blocking_write(renamed.new_name().as_str().as_bytes())
+                                            .unwrap();
+                                        uart.blocking_write(b"\r\n").unwrap();
+                                    }
+                                    mdns::ServiceUpdate::Conflict => {
+                                        mdns_service_ready[index] = false;
                                         uart.blocking_write(
-                                            b"mDNS CONFLICT: UID host name claimed by peer\r\n",
-                                        )
-                                        .unwrap();
-                                    } else {
-                                        retry_with_uid_suffix = true;
-                                        uart.blocking_write(
-                                            b"mDNS host conflict; retrying with flash UID suffix\r\n",
+                                            b"mDNS CONFLICT: unresolved, service dead\r\n",
                                         )
                                         .unwrap();
                                     }
-                                }
-                                _ => {
-                                    uart.blocking_write(b"mDNS service update (unknown)\r\n")
-                                        .unwrap();
+                                    mdns::ServiceUpdate::HostConflict => {
+                                        mdns_service_ready[index] = false;
+                                        if mdns_uses_uid_suffix {
+                                            uart.blocking_write(
+                                                b"mDNS CONFLICT: UID host name claimed by peer\r\n",
+                                            )
+                                            .unwrap();
+                                        } else {
+                                            retry_with_uid_suffix = true;
+                                            uart.blocking_write(
+                                                b"mDNS host conflict; retrying with flash UID suffix\r\n",
+                                            )
+                                            .unwrap();
+                                        }
+                                    }
+                                    _ => {
+                                        uart.blocking_write(b"mDNS service update (unknown)\r\n")
+                                            .unwrap();
+                                    }
                                 }
                             }
                         }
 
                         if retry_with_uid_suffix {
-                            mdns.unregister_service(handle);
-                            mdns_service = None;
+                            if let Some(registration) = mdns_registration.take() {
+                                registration.unregister(mdns);
+                            }
+                            mdns_service_ready.fill(false);
                             mdns_uses_uid_suffix = true;
 
-                            match mdns::register_http_service(
+                            match mdns::register_services(
                                 mdns,
                                 device_ipv4_octets,
                                 device_ipv6,
+                                usb_serial,
                                 Some(mdns_uid_suffix),
                             ) {
                                 Ok(registration) => {
@@ -514,7 +537,7 @@ async fn main(spawner: Spawner) {
                                     uart.blocking_write(registration.hostname.as_bytes())
                                         .unwrap();
                                     uart.blocking_write(b".local\r\n").unwrap();
-                                    mdns_service = Some(registration.handle);
+                                    mdns_registration = Some(registration);
                                 }
                                 Err(_) => {
                                     warn!("mDNS UID service registration failed");
@@ -524,7 +547,7 @@ async fn main(spawner: Spawner) {
                             }
                         }
                     }
-                    if network_ready && mdns_ready {
+                    if network_ready && mdns_service_ready.iter().all(|ready| *ready) {
                         status.set_ready();
                         if !network_ready_logged {
                             network_ready_logged = true;

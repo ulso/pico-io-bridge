@@ -1,3 +1,4 @@
+use alloc::vec::Vec;
 use core::{convert::Infallible, net::Ipv4Addr};
 
 use embassy_net::udp::{PacketMetadata, UdpSocket};
@@ -11,14 +12,32 @@ use rand_core::TryRng;
 use static_cell::StaticCell;
 
 pub(crate) const UID_SUFFIX_BYTES: usize = 6;
+pub(crate) const SERVICE_COUNT: usize = 2;
 const DNS_LABEL_BYTES: usize = 63;
 const DNS_NAME_BYTES: usize = 128;
+const HTTP_SERVICE_TYPE: &str = "_http._tcp.local.";
+const SCPI_SERVICE_TYPE: &str = "_scpi-raw._tcp.local.";
 
 pub(crate) struct MdnsRng(u64);
 
 pub(crate) struct Registration {
-    pub(crate) handle: ServiceHandle,
+    http_handle: ServiceHandle,
+    scpi_handle: ServiceHandle,
     pub(crate) hostname: String<DNS_LABEL_BYTES>,
+}
+
+impl Registration {
+    pub(crate) fn services(&self) -> [(&'static [u8], ServiceHandle); SERVICE_COUNT] {
+        [
+            (b"HTTP service", self.http_handle),
+            (b"SCPI service", self.scpi_handle),
+        ]
+    }
+
+    pub(crate) fn unregister(self, state: &MdnsState<MdnsRng>) {
+        state.unregister_service(self.http_handle);
+        state.unregister_service(self.scpi_handle);
+    }
 }
 
 impl MdnsRng {
@@ -82,23 +101,26 @@ fn build_mdns_records(
     ipv6: Ipv6Address,
     hostname: &str,
     uid_suffix: Option<&str>,
+    service_type: &str,
+    port: u16,
 ) -> ServiceRecords {
     let service_instance =
         label_with_optional_suffix(crate::board::MDNS_SERVICE_INSTANCE, uid_suffix);
 
     let mut instance_name: String<DNS_NAME_BYTES> = String::new();
     instance_name.push_str(&service_instance).unwrap();
-    instance_name.push_str("._http._tcp.local.").unwrap();
+    instance_name.push('.').unwrap();
+    instance_name.push_str(service_type).unwrap();
 
     let mut host_name: String<DNS_NAME_BYTES> = String::new();
     host_name.push_str(hostname).unwrap();
     host_name.push_str(".local.").unwrap();
 
     let mut records = ServiceRecords::new(
-        Name::try_from_str("_http._tcp.local.").unwrap(),
+        Name::try_from_str(service_type).unwrap(),
         Name::try_from_str(&instance_name).unwrap(),
         Name::try_from_str(&host_name).unwrap(),
-        crate::HTTP_PORT,
+        port,
         crate::MDNS_TTL_SECS,
     );
     records.add_a(Ipv4Addr::new(ipv4[0], ipv4[1], ipv4[2], ipv4[3]));
@@ -106,17 +128,60 @@ fn build_mdns_records(
     records
 }
 
-pub(crate) fn register_http_service(
+fn txt(key: &str, value: &str) -> Vec<u8> {
+    let mut segment = Vec::with_capacity(key.len() + value.len() + 1);
+    segment.extend_from_slice(key.as_bytes());
+    segment.push(b'=');
+    segment.extend_from_slice(value.as_bytes());
+    segment
+}
+
+pub(crate) fn register_services(
     state: &MdnsState<MdnsRng>,
     ipv4: [u8; 4],
     ipv6: Ipv6Address,
+    serial: &str,
     uid_suffix: Option<&str>,
 ) -> Result<Registration, RegisterServiceError> {
     let hostname = label_with_optional_suffix(crate::board::MDNS_HOST_LABEL, uid_suffix);
-    let records = build_mdns_records(ipv4, ipv6, &hostname, uid_suffix);
-    let handle = state.register_service(ServiceSpec::new(records))?;
+    let mut http_records = build_mdns_records(
+        ipv4,
+        ipv6,
+        &hostname,
+        uid_suffix,
+        HTTP_SERVICE_TYPE,
+        crate::HTTP_PORT,
+    );
+    http_records.add_txt_segment(txt("txtvers", "1"));
+    http_records.add_txt_segment(txt("path", "/"));
+    let http_handle = state.register_service(ServiceSpec::new(http_records))?;
 
-    Ok(Registration { handle, hostname })
+    let mut scpi_records = build_mdns_records(
+        ipv4,
+        ipv6,
+        &hostname,
+        uid_suffix,
+        SCPI_SERVICE_TYPE,
+        crate::SCPI_PORT,
+    );
+    scpi_records.add_txt_segment(txt("txtvers", "1"));
+    scpi_records.add_txt_segment(txt("Manufacturer", crate::MANUFACTURER));
+    scpi_records.add_txt_segment(txt("Model", crate::board::BOARD_NAME));
+    scpi_records.add_txt_segment(txt("SerialNumber", serial));
+    scpi_records.add_txt_segment(txt("FirmwareVersion", crate::FIRMWARE_VERSION));
+    let scpi_handle = match state.register_service(ServiceSpec::new(scpi_records)) {
+        Ok(handle) => handle,
+        Err(error) => {
+            state.unregister_service(http_handle);
+            return Err(error);
+        }
+    };
+
+    Ok(Registration {
+        http_handle,
+        scpi_handle,
+        hostname,
+    })
 }
 
 #[embassy_executor::task]

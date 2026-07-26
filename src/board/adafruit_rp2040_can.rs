@@ -6,7 +6,7 @@ use embassy_rp::uart::{Blocking, Config as UartConfig, UartTx};
 use embassy_rp::{Peri, Peripherals};
 
 use super::StatusIndicator;
-use crate::{can, i2c};
+use crate::{can, i2c, scpi};
 
 pub(crate) const FLASH_SIZE: usize = 8 * 1024 * 1024;
 pub(crate) const BOARD_NAME: &str = "RP2040 CAN Bus Feather";
@@ -15,7 +15,8 @@ pub(crate) const MDNS_HOST_LABEL: &str = "pico-io-can-feather";
 pub(crate) const MDNS_SERVICE_INSTANCE: &str = "Pico I/O Bridge - RP2040 CAN Bus Feather";
 pub(crate) const INTERFACE_STARTUP_LOG: &[u8] =
     b"CAN task starting, MCP25625 on SPI1 SCK GP14 MOSI GP15 MISO GP8 CS GP19\r\n\
-I2C task starting, I2C1 SCL GP3 SDA GP2 at 400 kHz\r\n";
+I2C task starting, I2C1 SCL GP3 SDA GP2 at 400 kHz\r\n\
+SCPI server starting, ADC A0-A3 on GP26-GP29, TCP port 5025\r\n";
 
 bind_interrupts!(struct I2cIrqs {
     I2C1_IRQ => InterruptHandler<I2C1>;
@@ -36,12 +37,19 @@ pub(crate) struct Interfaces {
     mosi: Peri<'static, PIN_15>,
     miso: Peri<'static, PIN_8>,
     cs: Peri<'static, PIN_19>,
+    scpi: scpi::Hardware,
 }
 
 impl Interfaces {
-    pub(crate) fn spawn(self, spawner: Spawner) {
+    pub(crate) fn spawn(
+        self,
+        spawner: Spawner,
+        stack: embassy_net::Stack<'static>,
+        serial: &'static str,
+    ) {
         spawner.spawn(can::can_task(self.spi, self.sck, self.mosi, self.miso, self.cs).unwrap());
         spawner.spawn(i2c::i2c1_task(self.i2c).unwrap());
+        self.scpi.spawn(spawner, stack, serial);
     }
 }
 
@@ -61,6 +69,14 @@ pub(crate) fn init(p: Peripherals) -> Board {
             mosi: p.PIN_15,
             miso: p.PIN_8,
             cs: p.PIN_19,
+            scpi: scpi::Hardware::new(
+                p.ADC,
+                p.ADC_TEMP_SENSOR,
+                p.PIN_26,
+                p.PIN_27,
+                p.PIN_28,
+                p.PIN_29,
+            ),
         },
     }
 }

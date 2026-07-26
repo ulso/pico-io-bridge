@@ -1238,6 +1238,37 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6b947ae49db0d222b1dbc6b113ce7248a3fc3a6ca21b696717bfc000ba4484d8"
 
 [[package]]
+name = "microscpi"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f2a6ae479ef6894ad01b1796ed002eabe7f9c83ec1fa265a91fddb6229e07423"
+dependencies = [
+ "bitflags 2.13.0",
+ "defmt 1.1.0",
+ "heapless 0.9.3",
+ "microscpi-macros",
+]
+
+[[package]]
+name = "microscpi-common"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9f7d554623824b76522443d566db3d1231e920e43ff31efe5532f5fdcef8e472"
+
+[[package]]
+name = "microscpi-macros"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "46dd99725b814ac59acfb8fa0fe156148844264cf06ffa986b16c9b00ffc845e"
+dependencies = [
+ "microscpi-common",
+ "proc-macro-error2",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
+]
+
+[[package]]
 name = "modular-bitfield"
 version = "0.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1419,6 +1450,7 @@ dependencies = [
  "log",
  "mcp25xx",
  "mdns-proto",
+ "microscpi",
  "nb 1.1.0",
  "panic-probe",
  "pio",
