@@ -130,7 +130,7 @@ readBtn.onclick=()=>{try{send({type:"i2c.read",bus:0,address:address(),length:re
 writeBtn.onclick=()=>{try{send({type:"i2c.write",bus:0,address:address(),data:writeData()})}catch(error){log("! "+error.message)}};
 writeReadBtn.onclick=()=>{try{send({type:"i2c.write_read",bus:0,address:address(),write:writeData(),readLength:readLength()})}catch(error){log("! "+error.message)}};
 clearBtn.onclick=()=>{logEl.textContent="";devicesEl.textContent="";deviceCountEl.textContent="0"};
-fetch("/api/status").then(response=>response.json()).then(status=>{if(status.board){const title="Pico I/O Bridge - "+status.board;pageTitle.textContent=title;document.title=title}for(const [name,path] of Object.entries(status.pages||{})){if(name==="i2c")continue;const link=document.createElement("a");link.href=path;link.textContent=name.toUpperCase();interfaceNav.prepend(link)}}).catch(()=>{});
+fetch("/api/status").then(response=>response.json()).then(status=>{if(status.board){const title="Pico I/O Bridge - "+status.board;pageTitle.textContent=title;document.title=title}interfaceNav.textContent="";for(const [name,path] of Object.entries(status.pages||{})){const link=document.createElement("a");link.href=path;link.textContent=name.toUpperCase();if(name==="i2c")link.className="active";interfaceNav.appendChild(link)}}).catch(()=>{});
 log("ready");
 setTimeout(connect,100);
 </script>

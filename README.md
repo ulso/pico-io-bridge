@@ -190,13 +190,15 @@ The built-in web UI is available at:
 ```text
 http://pico-io-can-feather.local/          CAN console
 http://pico-io-can-feather.local/i2c.html I2C console
+http://pico-io-can-feather.local/scpi.html SCPI instrument information
 ```
 
 Only pages and WebSocket endpoints for interfaces in the selected board profile
 are available. The CAN Feather uses the CAN console at `/`; the two I2C-only
-profiles serve the I2C console there. `/api/status` reports the active interface
-names and endpoint paths in its `interfaces` and `websockets` arrays, plus the
-selected profile name in `board`.
+profiles serve the I2C console there. The SCPI information page is available in
+every profile. `/api/status` reports instrument identity, SCPI-RAW connection
+metadata, the active interface names and the endpoint paths in its `pages` and
+`websockets` fields.
 
 ## SCPI-RAW Instrument API
 

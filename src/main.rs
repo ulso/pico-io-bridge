@@ -252,7 +252,7 @@ async fn main(spawner: Spawner) {
     #[cfg(feature = "dhcp-server")]
     spawner.spawn(dhcp::dhcp_task(stack, device_ipv4_octets, host_ipv4_octets).unwrap());
     for _ in 0..HTTP_SOCKETS {
-        spawner.spawn(http::http_task(stack).unwrap());
+        spawner.spawn(http::http_task(stack, usb_serial).unwrap());
     }
     interfaces.spawn(spawner, stack, usb_serial);
 

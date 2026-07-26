@@ -25,15 +25,14 @@ enum WebSocketEndpoint {
 }
 
 #[cfg(all(feature = "can", feature = "i2c"))]
-const API_STATUS_CAPABILITIES: &str = r#","interfaces":["can","i2c"],"websocket":"/can","websockets":["/can","/i2c"],"pages":{"can":"/","i2c":"/i2c.html"}"#;
+const API_STATUS_CAPABILITIES: &str = r#","interfaces":["can","i2c","scpi"],"websocket":"/can","websockets":["/can","/i2c"],"pages":{"can":"/","i2c":"/i2c.html","scpi":"/scpi.html"}"#;
 #[cfg(all(feature = "can", not(feature = "i2c")))]
-const API_STATUS_CAPABILITIES: &str =
-    r#","interfaces":["can"],"websocket":"/can","websockets":["/can"],"pages":{"can":"/"}"#;
+const API_STATUS_CAPABILITIES: &str = r#","interfaces":["can","scpi"],"websocket":"/can","websockets":["/can"],"pages":{"can":"/","scpi":"/scpi.html"}"#;
 #[cfg(all(not(feature = "can"), feature = "i2c"))]
-const API_STATUS_CAPABILITIES: &str =
-    r#","interfaces":["i2c"],"websocket":"/i2c","websockets":["/i2c"],"pages":{"i2c":"/"}"#;
+const API_STATUS_CAPABILITIES: &str = r#","interfaces":["i2c","scpi"],"websocket":"/i2c","websockets":["/i2c"],"pages":{"i2c":"/","scpi":"/scpi.html"}"#;
 #[cfg(not(any(feature = "can", feature = "i2c")))]
-const API_STATUS_CAPABILITIES: &str = r#","interfaces":[],"websockets":[]"#;
+const API_STATUS_CAPABILITIES: &str =
+    r#","interfaces":["scpi"],"websockets":[],"pages":{"scpi":"/scpi.html"}"#;
 
 fn websocket_endpoint(request: &str) -> Option<WebSocketEndpoint> {
     #[cfg(feature = "can")]
@@ -213,12 +212,17 @@ async fn write_http_response(
 
 async fn write_api_status_response(
     socket: &mut TcpSocket<'_>,
+    serial: &str,
 ) -> Result<(), embassy_net::tcp::Error> {
-    let mut body = String::<384>::new();
+    let mut body = String::<640>::new();
     write!(
         body,
-        "{{\"device\":\"pico-io-bridge\",\"board\":\"{}\",\"network\":\"cdc-ncm\"{}}}",
+        "{{\"device\":\"pico-io-bridge\",\"manufacturer\":\"{}\",\"board\":\"{}\",\"serial\":\"{}\",\"firmware\":\"{}\",\"network\":\"cdc-ncm\",\"scpi\":{{\"protocol\":\"SCPI-RAW\",\"port\":{},\"service\":\"_scpi-raw._tcp\"}}{}}}",
+        crate::MANUFACTURER,
         crate::board::BOARD_NAME,
+        serial,
+        crate::FIRMWARE_VERSION,
+        crate::SCPI_PORT,
         API_STATUS_CAPABILITIES
     )
     .unwrap();
@@ -280,6 +284,7 @@ async fn close_gracefully(socket: &mut TcpSocket<'_>) {
 async fn serve_http_connection(
     socket: &mut TcpSocket<'_>,
     rx_buf: &mut [u8],
+    serial: &str,
 ) -> Result<(), embassy_net::tcp::Error> {
     let mut len = 0;
 
@@ -313,6 +318,12 @@ async fn serve_http_connection(
         }
     }
 
+    if request.starts_with("GET /scpi.html ") {
+        const BODY: &[u8] = include_bytes!("scpi.html");
+        write_http_response(socket, "text/html", BODY).await?;
+        return Ok(());
+    }
+
     let websocket_endpoint = websocket_endpoint(request);
 
     if let Some(endpoint) = websocket_endpoint {
@@ -335,7 +346,7 @@ async fn serve_http_connection(
             write_empty_response(socket, "400 Bad Request").await?;
         }
     } else if request.starts_with("GET /api/status ") {
-        write_api_status_response(socket).await?;
+        write_api_status_response(socket, serial).await?;
     } else if request.starts_with("GET /favicon.ico ") {
         write_all(
             socket,
@@ -365,7 +376,7 @@ h1{font-size:24px;line-height:1.2;margin:0;font-weight:700}
 .toolbar{display:flex;flex-wrap:wrap;gap:8px}
 button{border:1px solid #9aa7b2;background:#fff;color:#17202a;border-radius:6px;padding:8px 12px;font:inherit;font-weight:650;min-height:38px}
 button:disabled{opacity:.45}.primary{background:#17202a;color:#fff;border-color:#17202a}
-.navlink{display:inline-flex;align-items:center;border:1px solid #9aa7b2;background:#fff;color:#17202a;border-radius:6px;padding:7px 12px;text-decoration:none;font-weight:650}.interfaceNav{display:contents}
+.navlink{display:inline-flex;align-items:center;border:1px solid #9aa7b2;background:#fff;color:#17202a;border-radius:6px;padding:7px 12px;text-decoration:none;font-weight:650}.navlink.active{background:#17202a;color:#fff;border-color:#17202a}.interfaceNav{display:contents}
 .grid{display:grid;grid-template-columns:minmax(300px,360px) 1fr;gap:16px;align-items:start}
 .stack{display:grid;gap:16px}
 section{margin-top:16px}.panel{border:1px solid #c7d0da;background:#fff;border-radius:8px;padding:14px}
@@ -388,7 +399,7 @@ th{position:sticky;top:0;background:#f9fafb;font:12px -apple-system,BlinkMacSyst
 .dirRx{color:#1f7a4d;font-weight:700}.dirTx{color:#285ea8;font-weight:700}.dirErr{color:#b42318;font-weight:700}
 pre{box-sizing:border-box;width:100%;min-height:120px;max-height:220px;overflow:auto;border:1px solid #c7d0da;border-radius:8px;background:#fff;color:#17202a;padding:10px;margin:0;font:12px ui-monospace,SFMono-Regular,Menlo,monospace;white-space:pre-wrap}
 @media(max-width:760px){main{padding:14px}.grid{grid-template-columns:1fr}.metrics{grid-template-columns:repeat(2,1fr)}header,.topbar{align-items:flex-start;flex-direction:column}.form{grid-template-columns:1fr}}
-@media(prefers-color-scheme:dark){body{background:#111820;color:#edf2f7}.panel,.tableWrap,pre,input,select,button,.navlink{background:#17212b;color:#edf2f7;border-color:#3b4b5c}.metric,th{background:#1d2a36;border-color:#3b4b5c}.primary{background:#edf2f7;color:#111820}.hint,.metric span,label{color:#b9c3cf}td,th{border-bottom-color:#273544}}
+@media(prefers-color-scheme:dark){body{background:#111820;color:#edf2f7}.panel,.tableWrap,pre,input,select,button,.navlink{background:#17212b;color:#edf2f7;border-color:#3b4b5c}.metric,th{background:#1d2a36;border-color:#3b4b5c}.primary,.navlink.active{background:#edf2f7;color:#111820}.hint,.metric span,label{color:#b9c3cf}td,th{border-bottom-color:#273544}}
 </style>
 </head>
 <body>
@@ -402,7 +413,7 @@ pre{box-sizing:border-box;width:100%;min-height:120px;max-height:220px;overflow:
 <button id="connect">Connect</button>
 <button id="disconnect" disabled>Disconnect</button>
 <button id="clear">Clear</button>
-<span id="interfaceNav" class="interfaceNav"></span>
+<span id="interfaceNav" class="interfaceNav"><a class="navlink active" href="/">CAN</a></span>
 </div>
 <div class="status"><span id="bitrateLabel">CAN -</span><span id="modeLabel">mode -</span></div>
 </div>
@@ -664,7 +675,7 @@ async fn i2c_websocket_loop(
 }
 
 #[embassy_executor::task(pool_size = HTTP_SOCKETS)]
-pub(crate) async fn http_task(stack: embassy_net::Stack<'static>) {
+pub(crate) async fn http_task(stack: embassy_net::Stack<'static>, serial: &'static str) {
     let mut rx_buf = [0; 2048];
     let mut tx_buf = [0; 2048];
     let mut request_buf = [0; 1024];
@@ -677,7 +688,7 @@ pub(crate) async fn http_task(stack: embassy_net::Stack<'static>) {
 
         if socket.accept(crate::HTTP_PORT).await.is_ok() {
             defmt::info!("HTTP client connected");
-            match serve_http_connection(&mut socket, &mut request_buf).await {
+            match serve_http_connection(&mut socket, &mut request_buf, serial).await {
                 Ok(()) => {
                     close_gracefully(&mut socket).await;
                 }

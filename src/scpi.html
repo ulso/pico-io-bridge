@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Pico I/O Bridge - SCPI</title>
+<link rel="icon" href="data:,">
+<style>
+:root{color-scheme:light dark;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+*{box-sizing:border-box}
+body{margin:0;background:#f3f5f7;color:#17202a}
+main{max-width:1080px;margin:0 auto;padding:20px}
+header{display:flex;align-items:flex-start;justify-content:space-between;gap:20px;margin-bottom:16px}
+h1{font-size:24px;line-height:1.2;margin:0 0 4px;font-weight:700}
+.model{margin:0;color:#52606d;font-size:14px}
+.status{display:inline-flex;align-items:center;gap:8px;font-size:14px;font-weight:650;white-space:nowrap}
+.dot{width:10px;height:10px;border-radius:50%;background:#d99a22}.online .dot{background:#1f9d55}.offline .dot{background:#d64545}
+.tabs{display:flex;flex-wrap:wrap;gap:4px;margin-bottom:16px}
+.tabs a{border:1px solid #9aa7b2;background:#fff;color:#17202a;border-radius:6px;padding:7px 12px;text-decoration:none;font-weight:650}
+.tabs a.active{background:#17202a;color:#fff;border-color:#17202a}
+.identity{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));border:1px solid #c7d0da;border-radius:8px;background:#fff;overflow:hidden;margin-bottom:16px}
+.identity div{padding:13px 14px;border-right:1px solid #e1e6eb;min-width:0}.identity div:last-child{border-right:0}
+.label{display:block;color:#65717d;font-size:11px;font-weight:700;text-transform:uppercase;margin-bottom:5px}
+.value{display:block;font-size:14px;font-weight:650;overflow-wrap:anywhere}
+.layout{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:16px;align-items:start}
+.panel{border:1px solid #c7d0da;background:#fff;border-radius:8px;padding:14px}
+.wide{grid-column:1/-1}
+h2{font-size:15px;margin:0 0 12px;font-weight:700}
+.facts{display:grid;grid-template-columns:140px minmax(0,1fr);margin:0}
+.facts dt,.facts dd{padding:8px 0;border-bottom:1px solid #edf0f3}
+.facts dt{color:#52606d;font-size:12px;font-weight:700}.facts dd{margin:0;font-size:13px;overflow-wrap:anywhere}
+.facts dt:last-of-type,.facts dd:last-of-type{border-bottom:0}
+code{font:12px ui-monospace,SFMono-Regular,Menlo,monospace;color:#173f73}
+.channelGrid{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:8px}
+.channel{border-left:3px solid #2f7d6d;background:#f7faf9;padding:9px 10px;min-width:0}
+.channel strong,.channel span{display:block}.channel strong{font-size:13px}.channel span{color:#65717d;font-size:11px;margin-top:3px}
+.specs{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px}
+.spec{border:1px solid #d7dee6;background:#f9fafb;border-radius:6px;padding:7px 9px;font-size:12px}
+.tableWrap{overflow:auto;border:1px solid #d7dee6;border-radius:6px}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th,td{padding:8px 10px;border-bottom:1px solid #edf0f3;text-align:left;vertical-align:top}
+tr:last-child td{border-bottom:0}th{background:#f9fafb;color:#52606d;font-size:12px;font-weight:700}
+td:first-child{width:38%;white-space:nowrap}td code{font-weight:650}
+.note{margin:10px 0 0;color:#65717d;font-size:12px;line-height:1.45}
+@media(max-width:760px){main{padding:14px}header{flex-direction:column;gap:10px}.identity{grid-template-columns:1fr 1fr}.identity div:nth-child(2){border-right:0}.identity div:nth-child(-n+2){border-bottom:1px solid #e1e6eb}.layout{grid-template-columns:1fr}.wide{grid-column:auto}.channelGrid{grid-template-columns:repeat(2,minmax(0,1fr))}.channel:last-child{grid-column:1/-1}.facts{grid-template-columns:110px minmax(0,1fr)}td:first-child{white-space:normal}}
+@media(max-width:420px){.identity{grid-template-columns:1fr}.identity div{border-right:0;border-bottom:1px solid #e1e6eb!important}.identity div:last-child{border-bottom:0!important}.tabs a{flex:1;text-align:center}.channelGrid{grid-template-columns:1fr}.channel:last-child{grid-column:auto}}
+@media(prefers-color-scheme:dark){body{background:#111820;color:#edf2f7}.model,.label,.facts dt,.channel span,.note{color:#b9c3cf}.identity,.panel,.tabs a{background:#17212b;color:#edf2f7;border-color:#3b4b5c}.tabs a.active{background:#edf2f7;color:#111820}.identity div,.facts dt,.facts dd,th,td{border-color:#273544}.channel{background:#172923;border-color:#3ea88d}.spec,th{background:#1d2a36;border-color:#3b4b5c}code{color:#8ab8ee}.tableWrap{border-color:#3b4b5c}}
+</style>
+</head>
+<body>
+<main>
+<header>
+<div>
+<h1>Pico I/O Bridge</h1>
+<p id="modelHeading" class="model">SCPI instrument</p>
+</div>
+<div id="status" class="status"><span class="dot"></span><span id="statusText">reading identity</span></div>
+</header>
+<nav id="interfaceNav" class="tabs"><a class="active" href="/scpi.html">SCPI</a></nav>
+
+<section class="identity" aria-label="Instrument identity">
+<div><span class="label">Manufacturer</span><span id="manufacturer" class="value">Pico I/O Bridge Project</span></div>
+<div><span class="label">Model</span><span id="model" class="value">RP2040 instrument</span></div>
+<div><span class="label">Serial number</span><span id="serial" class="value">-</span></div>
+<div><span class="label">Firmware</span><span id="firmware" class="value">-</span></div>
+</section>
+
+<div class="layout">
+<section class="panel">
+<h2>SCPI-RAW Network Interface</h2>
+<dl class="facts">
+<dt>VISA resource</dt><dd><code id="resource">TCPIP0::pico-io-bridge.local::5025::SOCKET</code></dd>
+<dt>Host</dt><dd><code id="hostname">pico-io-bridge.local</code></dd>
+<dt>TCP port</dt><dd><code id="port">5025</code></dd>
+<dt>DNS-SD service</dt><dd><code id="service">_scpi-raw._tcp</code></dd>
+<dt>Transport</dt><dd>Raw TCP, LF-terminated commands</dd>
+</dl>
+</section>
+
+<section class="panel">
+<h2>Measurement Capability</h2>
+<div class="channelGrid">
+<div class="channel"><strong>Channel 0</strong><span>A0 / GP26</span></div>
+<div class="channel"><strong>Channel 1</strong><span>A1 / GP27</span></div>
+<div class="channel"><strong>Channel 2</strong><span>A2 / GP28</span></div>
+<div class="channel"><strong>Channel 3</strong><span>A3 / GP29</span></div>
+<div class="channel"><strong>Internal</strong><span>Temperature</span></div>
+</div>
+<div class="specs">
+<span class="spec">12-bit ADC</span>
+<span class="spec">0-3.3 V nominal</span>
+<span class="spec">1-256 sample averaging</span>
+<span class="spec">16 samples default</span>
+</div>
+<p class="note">ADC voltage and temperature results are uncalibrated. External inputs are not 5 V tolerant.</p>
+</section>
+
+<section class="panel wide">
+<h2>Command Reference</h2>
+<div class="tableWrap">
+<table>
+<thead><tr><th>Command</th><th>Result or action</th></tr></thead>
+<tbody>
+<tr><td><code>*IDN?</code></td><td>Instrument manufacturer, model, serial number and firmware</td></tr>
+<tr><td><code>*RST</code></td><td>Reset status, errors and averaging to defaults</td></tr>
+<tr><td><code>*TST?</code></td><td>ADC self-test; 0 indicates pass</td></tr>
+<tr><td><code>*CLS, *ESR?, *STB?</code></td><td>IEEE 488.2 status handling</td></tr>
+<tr><td><code>*ESE[?], *SRE[?], *OPC[?]</code></td><td>IEEE 488.2 event and operation control</td></tr>
+<tr><td><code>SYST:VERS?</code></td><td>Supported SCPI standard version</td></tr>
+<tr><td><code>SYST:ERR?</code></td><td>Read the oldest queued error</td></tr>
+<tr><td><code>SYST:ERR:COUN?</code></td><td>Number of queued errors</td></tr>
+<tr><td><code>SYST:CHAN:COUN?</code></td><td>Number of external ADC channels</td></tr>
+<tr><td><code>SENS:AVER:COUN &lt;1-256&gt;</code></td><td>Set the global measurement averaging count</td></tr>
+<tr><td><code>SENS:AVER:COUN?</code></td><td>Read the measurement averaging count</td></tr>
+<tr><td><code>MEAS:ADC:RAW? &lt;0-3&gt;</code></td><td>Averaged 12-bit ADC code</td></tr>
+<tr><td><code>MEAS:VOLT:DC? &lt;0-3&gt;</code></td><td>Averaged nominal voltage in volts</td></tr>
+<tr><td><code>MEAS:TEMP?</code></td><td>Approximate internal temperature in degrees Celsius</td></tr>
+</tbody>
+</table>
+</div>
+</section>
+</div>
+</main>
+<script>
+const nav=document.getElementById("interfaceNav");
+const state=document.getElementById("status");
+const stateText=document.getElementById("statusText");
+const host=location.hostname||"pico-io-bridge.local";
+document.getElementById("hostname").textContent=host;
+function setResource(port){document.getElementById("resource").textContent="TCPIP0::"+host+"::"+port+"::SOCKET"}
+setResource(5025);
+fetch("/api/status").then(response=>{if(!response.ok)throw new Error("status");return response.json()}).then(info=>{
+ const model=info.board||"RP2040 instrument";
+ const port=info.scpi&&info.scpi.port||5025;
+ document.getElementById("manufacturer").textContent=info.manufacturer||"Pico I/O Bridge Project";
+ document.getElementById("model").textContent=model;
+ document.getElementById("modelHeading").textContent=model+" / SCPI instrument";
+ document.getElementById("serial").textContent=info.serial||"-";
+ document.getElementById("firmware").textContent=info.firmware||"-";
+ document.getElementById("port").textContent=port;
+ document.getElementById("service").textContent=info.scpi&&info.scpi.service||"_scpi-raw._tcp";
+ setResource(port);
+ nav.textContent="";
+ for(const [name,path] of Object.entries(info.pages||{})){const link=document.createElement("a");link.href=path;link.textContent=name.toUpperCase();if(name==="scpi")link.className="active";nav.appendChild(link)}
+ state.className="status online";stateText.textContent="device online";
+ document.title="Pico I/O Bridge - "+model+" - SCPI";
+}).catch(()=>{state.className="status offline";stateText.textContent="identity unavailable"});
+</script>
+</body>
+</html>
