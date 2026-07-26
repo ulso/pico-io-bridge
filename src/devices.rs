@@ -3,6 +3,7 @@ use embedded_hal_async::i2c::I2c;
 use vl53l4cd::{Vl53l4cd, wait::Poll};
 
 pub(crate) const MAX_DEVICES: usize = 8;
+const DISTANCE_MEASUREMENT_ATTEMPTS: usize = 3;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DeviceKind {
@@ -207,12 +208,17 @@ where
     match config.kind {
         DeviceKind::Vl53l4cd => {
             let mut sensor = Vl53l4cd::with_addr(&mut *bus, config.address, Delay, Poll);
-            let measurement = sensor.measure().await.map_err(map_vl53l4cd_error)?;
-            if measurement.is_valid() && measurement.distance != 0 {
-                Ok(measurement.distance)
-            } else {
-                Err(DeviceError::MeasurementInvalid)
+            if sensor.has_measurement().await.map_err(map_vl53l4cd_error)? {
+                sensor.clear_interrupt().await.map_err(map_vl53l4cd_error)?;
             }
+
+            for _ in 0..DISTANCE_MEASUREMENT_ATTEMPTS {
+                let measurement = sensor.measure().await.map_err(map_vl53l4cd_error)?;
+                if measurement.is_valid() && measurement.distance != 0 {
+                    return Ok(measurement.distance);
+                }
+            }
+            Err(DeviceError::MeasurementInvalid)
         }
     }
 }

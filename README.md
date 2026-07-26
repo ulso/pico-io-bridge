@@ -310,11 +310,13 @@ Example responses:
 ```
 
 `DEV:ADD` verifies the VL53L4CD identity, applies the sensor initialization
-sequence, and starts ranging. `MEAS:DIST?` waits for a fresh measurement and
-converts the sensor's millimeter result to meters. An invalid or zero-distance
-sample returns the SCPI NaN value `9.91E+37` instead of leaving a query without
-a response. It also queues a hardware error that can be inspected with
-`SYST:ERR?`.
+sequence, and starts ranging. Before measuring, `MEAS:DIST?` discards any
+sample that was already waiting when the command arrived. It then tries up to
+three fresh samples, returns the first valid nonzero measurement, and converts
+the sensor's millimeter result to meters. If all three samples are invalid or
+zero, the query returns the SCPI NaN value `9.91E+37` instead of leaving the
+client without a response. It also queues a hardware error that can be
+inspected with `SYST:ERR?`.
 
 Only one configured device may use a given address. Supporting multiple
 VL53L4CD sensors at reassigned addresses will additionally require control of

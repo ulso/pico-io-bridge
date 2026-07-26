@@ -93,7 +93,7 @@ td:first-child{width:38%;white-space:nowrap}td code{font-weight:650}
 <span class="spec">16 samples default</span>
 <span class="spec">VL53L4CD ranging</span>
 </div>
-<p class="note">ADC voltage and temperature results are uncalibrated. External inputs are not 5 V tolerant. Invalid distance samples return the SCPI NaN value 9.91E+37 and queue a hardware error.</p>
+<p class="note">ADC voltage and temperature results are uncalibrated. External inputs are not 5 V tolerant. Distance queries discard a pending stale sample and try up to three fresh samples; three invalid samples return the SCPI NaN value 9.91E+37 and queue a hardware error.</p>
 </section>
 
 <section class="panel wide">
