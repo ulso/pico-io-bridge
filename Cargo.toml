@@ -15,7 +15,7 @@ board-adafruit-kb2040 = ["mdns", "dhcp-server", "i2c"]
 mdns = ["dep:embedded-alloc", "dep:hick-embassy", "dep:mdns-proto", "hick-embassy/no-atomic", "mdns-proto/no-atomic", "embassy-net/mdns"]
 dhcp-server = ["dep:leasehund", "leasehund/defmt", "embassy-net/dhcpv4"]
 can = ["dep:embedded-hal-1", "dep:embedded-hal-bus", "dep:mcp25xx", "dep:nb"]
-i2c = []
+i2c = ["dep:vl53l4cd"]
 mcp2515 = ["can", "mcp25xx/mcp2515"]
 mcp25625 = ["can", "mcp25xx/mcp25625"]
 
@@ -60,6 +60,7 @@ leasehund = { version = "0.5.2", default-features = false, optional = true }
 mcp25xx = { version = "0.4.0", optional = true }
 nb = { version = "1.1.0", optional = true }
 microscpi = { version = "0.6.0", features = ["defmt"] }
+vl53l4cd = { version = "0.4.0", default-features = false, optional = true }
 
 [profile.release]
 debug = true

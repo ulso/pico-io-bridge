@@ -14,6 +14,8 @@ compile_error!("mcp2515 and mcp25625 are mutually exclusive");
 mod board;
 #[cfg(feature = "can")]
 mod can;
+#[cfg(feature = "i2c")]
+mod devices;
 #[cfg(feature = "dhcp-server")]
 mod dhcp;
 mod http;

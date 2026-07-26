@@ -16,7 +16,7 @@ use embassy_sync::mutex::Mutex;
 use embassy_time::{Duration, Timer};
 use heapless::String;
 
-use crate::json;
+use crate::{devices, json};
 
 pub(crate) const I2C_FREQUENCY: u32 = 400_000;
 pub(crate) const I2C_MAX_TRANSFER: usize = 64;
@@ -82,6 +82,23 @@ enum I2cCommand {
         write: I2cBuffer,
         read_len: u8,
     },
+    DeviceAdd {
+        slot: u8,
+        kind: devices::DeviceKind,
+        address: u8,
+    },
+    DeviceGet {
+        slot: u8,
+    },
+    DeviceList,
+    DeviceCount,
+    DeviceRemove {
+        slot: u8,
+    },
+    DeviceClear,
+    MeasureDistance {
+        slot: u8,
+    },
 }
 
 #[derive(Clone, Copy)]
@@ -108,6 +125,13 @@ enum I2cReply {
         code: &'static str,
         message: &'static str,
     },
+    DeviceConfig(devices::DeviceConfig),
+    DeviceList(devices::DeviceList),
+    DeviceCount(u8),
+    DeviceRemoved(devices::DeviceConfig),
+    DeviceCleared,
+    Distance(u16),
+    DeviceError(devices::DeviceError),
 }
 
 fn valid_address(address: u32) -> Option<u8> {
@@ -252,6 +276,15 @@ fn write_reply(out: &mut String<512>, reply: I2cReply) {
             let _ = core::write!(out, "]}}");
         }
         I2cReply::Error { code, message } => json::write_error(out, code, message),
+        I2cReply::DeviceConfig(_)
+        | I2cReply::DeviceList(_)
+        | I2cReply::DeviceCount(_)
+        | I2cReply::DeviceRemoved(_)
+        | I2cReply::DeviceCleared
+        | I2cReply::Distance(_)
+        | I2cReply::DeviceError(_) => {
+            json::write_error(out, "internal_error", "Unexpected I2C reply")
+        }
     }
 }
 
@@ -261,12 +294,78 @@ async fn send_command(command: I2cCommand) -> I2cReply {
     while I2C_REPLIES.try_receive().is_ok() {}
 
     I2C_COMMANDS.send(command).await;
-    match select(I2C_REPLIES.receive(), Timer::after(Duration::from_secs(2))).await {
+    match select(I2C_REPLIES.receive(), Timer::after(Duration::from_secs(5))).await {
         Either::First(reply) => reply,
         Either::Second(()) => I2cReply::Error {
             code: "i2c_timeout",
             message: "I2C controller did not answer",
         },
+    }
+}
+
+pub(crate) async fn device_add(
+    slot: u8,
+    kind: devices::DeviceKind,
+    address: u8,
+) -> Result<devices::DeviceConfig, devices::DeviceError> {
+    match send_command(I2cCommand::DeviceAdd {
+        slot,
+        kind,
+        address,
+    })
+    .await
+    {
+        I2cReply::DeviceConfig(config) => Ok(config),
+        I2cReply::DeviceError(error) => Err(error),
+        _ => Err(devices::DeviceError::Bus),
+    }
+}
+
+pub(crate) async fn device_get(slot: u8) -> Result<devices::DeviceConfig, devices::DeviceError> {
+    match send_command(I2cCommand::DeviceGet { slot }).await {
+        I2cReply::DeviceConfig(config) => Ok(config),
+        I2cReply::DeviceError(error) => Err(error),
+        _ => Err(devices::DeviceError::Bus),
+    }
+}
+
+pub(crate) async fn device_list() -> Result<devices::DeviceList, devices::DeviceError> {
+    match send_command(I2cCommand::DeviceList).await {
+        I2cReply::DeviceList(list) => Ok(list),
+        I2cReply::DeviceError(error) => Err(error),
+        _ => Err(devices::DeviceError::Bus),
+    }
+}
+
+pub(crate) async fn device_count() -> Result<u8, devices::DeviceError> {
+    match send_command(I2cCommand::DeviceCount).await {
+        I2cReply::DeviceCount(count) => Ok(count),
+        I2cReply::DeviceError(error) => Err(error),
+        _ => Err(devices::DeviceError::Bus),
+    }
+}
+
+pub(crate) async fn device_remove(slot: u8) -> Result<devices::DeviceConfig, devices::DeviceError> {
+    match send_command(I2cCommand::DeviceRemove { slot }).await {
+        I2cReply::DeviceRemoved(config) => Ok(config),
+        I2cReply::DeviceError(error) => Err(error),
+        _ => Err(devices::DeviceError::Bus),
+    }
+}
+
+pub(crate) async fn device_clear() -> Result<(), devices::DeviceError> {
+    match send_command(I2cCommand::DeviceClear).await {
+        I2cReply::DeviceCleared => Ok(()),
+        I2cReply::DeviceError(error) => Err(error),
+        _ => Err(devices::DeviceError::Bus),
+    }
+}
+
+pub(crate) async fn measure_distance(slot: u8) -> Result<u16, devices::DeviceError> {
+    match send_command(I2cCommand::MeasureDistance { slot }).await {
+        I2cReply::Distance(distance) => Ok(distance),
+        I2cReply::DeviceError(error) => Err(error),
+        _ => Err(devices::DeviceError::Bus),
     }
 }
 
@@ -298,6 +397,7 @@ fn operation_error(error: I2cError) -> I2cReply {
 async fn execute_command<T: Instance>(
     bus: &mut I2c<'static, T, Async>,
     state: &mut I2cState,
+    devices: &mut devices::DeviceRegistry,
     command: I2cCommand,
 ) -> I2cReply {
     match command {
@@ -377,16 +477,67 @@ async fn execute_command<T: Instance>(
                 }
             }
         }
+        I2cCommand::DeviceAdd {
+            slot,
+            kind,
+            address,
+        } => {
+            state.transaction_count = state.transaction_count.wrapping_add(1);
+            match devices::add(bus, devices, slot, kind, address).await {
+                Ok(config) => I2cReply::DeviceConfig(config),
+                Err(error) => {
+                    state.error_count = state.error_count.wrapping_add(1);
+                    I2cReply::DeviceError(error)
+                }
+            }
+        }
+        I2cCommand::DeviceGet { slot } => match devices.get(slot) {
+            Ok(config) => I2cReply::DeviceConfig(config),
+            Err(error) => I2cReply::DeviceError(error),
+        },
+        I2cCommand::DeviceList => I2cReply::DeviceList(devices.list()),
+        I2cCommand::DeviceCount => I2cReply::DeviceCount(devices.count()),
+        I2cCommand::DeviceRemove { slot } => {
+            state.transaction_count = state.transaction_count.wrapping_add(1);
+            match devices::remove(bus, devices, slot).await {
+                Ok(config) => I2cReply::DeviceRemoved(config),
+                Err(error) => {
+                    state.error_count = state.error_count.wrapping_add(1);
+                    I2cReply::DeviceError(error)
+                }
+            }
+        }
+        I2cCommand::DeviceClear => {
+            state.transaction_count = state.transaction_count.wrapping_add(1);
+            match devices::clear(bus, devices).await {
+                Ok(()) => I2cReply::DeviceCleared,
+                Err(error) => {
+                    state.error_count = state.error_count.wrapping_add(1);
+                    I2cReply::DeviceError(error)
+                }
+            }
+        }
+        I2cCommand::MeasureDistance { slot } => {
+            state.transaction_count = state.transaction_count.wrapping_add(1);
+            match devices::measure_distance(bus, devices, slot).await {
+                Ok(distance) => I2cReply::Distance(distance),
+                Err(error) => {
+                    state.error_count = state.error_count.wrapping_add(1);
+                    I2cReply::DeviceError(error)
+                }
+            }
+        }
     }
 }
 
 async fn run_i2c<T: Instance>(mut bus: I2c<'static, T, Async>) {
     let mut state = I2cState::ready();
+    let mut devices = devices::DeviceRegistry::new();
     info!("STEMMA QT I2C ready: 400 kHz");
 
     loop {
         let command = I2C_COMMANDS.receive().await;
-        let reply = execute_command(&mut bus, &mut state, command).await;
+        let reply = execute_command(&mut bus, &mut state, &mut devices, command).await;
         I2C_REPLIES.send(reply).await;
     }
 }

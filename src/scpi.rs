@@ -13,6 +13,8 @@ use microscpi::{
     StaticErrorQueue, StatusCommands, StatusRegisters,
 };
 
+use crate::devices;
+
 const CHANNEL_COUNT: usize = 4;
 const DEFAULT_AVERAGE_COUNT: u16 = 16;
 const MAX_AVERAGE_COUNT: u16 = 256;
@@ -20,6 +22,47 @@ const ADC_COUNTS: f32 = 4096.0;
 const ADC_VREF: f32 = 3.3;
 const SCPI_BUFFER_SIZE: usize = 1024;
 const SOCKET_BUFFER_SIZE: usize = 1024;
+
+struct DeviceListResponse(devices::DeviceList);
+
+impl scpi::Response for DeviceListResponse {
+    fn write_response(&self, output: &mut impl scpi::Write) -> Result<(), scpi::Error> {
+        let mut first = true;
+        for config in self.0.entries.iter().flatten() {
+            if !first {
+                output.write_char(';')?;
+            }
+            first = false;
+            output.write_fmt(format_args!(
+                "{},{},{},{}",
+                config.slot,
+                config.kind.name(),
+                config.bus,
+                config.address
+            ))?;
+        }
+        if first {
+            output.write_str("NONE")?;
+        }
+        Ok(())
+    }
+}
+
+fn device_error(error: devices::DeviceError) -> scpi::Error {
+    match error {
+        devices::DeviceError::InvalidSlot | devices::DeviceError::InvalidAddress => {
+            scpi::Error::DataOutOfRange
+        }
+        devices::DeviceError::SlotEmpty
+        | devices::DeviceError::SlotOccupied
+        | devices::DeviceError::AddressInUse
+        | devices::DeviceError::UnsupportedModel => scpi::Error::IllegalParameterValue,
+        devices::DeviceError::InvalidIdentity
+        | devices::DeviceError::MeasurementInvalid
+        | devices::DeviceError::Timeout
+        | devices::DeviceError::Bus => scpi::Error::HardwareError,
+    }
+}
 
 bind_interrupts!(struct AdcIrqs {
     ADC_IRQ_FIFO => InterruptHandler;
@@ -175,6 +218,67 @@ impl ScpiInstrument {
         Ok(CHANNEL_COUNT)
     }
 
+    #[scpi(cmd = "SYSTem:I2C:DEVice:CATalog?")]
+    async fn i2c_device_catalog(&mut self) -> Result<Characters<'static>, scpi::Error> {
+        Ok(Characters("VL53L4CD"))
+    }
+
+    #[scpi(cmd = "SYSTem:I2C:DEVice:ADD")]
+    async fn i2c_device_add(
+        &mut self,
+        slot: u8,
+        model: &str,
+        address: u8,
+    ) -> Result<(), scpi::Error> {
+        let kind = devices::DeviceKind::from_name(model)
+            .ok_or(devices::DeviceError::UnsupportedModel)
+            .map_err(device_error)?;
+        crate::i2c::device_add(slot, kind, address)
+            .await
+            .map_err(device_error)?;
+        Ok(())
+    }
+
+    #[scpi(cmd = "SYSTem:I2C:DEVice?")]
+    async fn i2c_device(
+        &mut self,
+        slot: u8,
+    ) -> Result<(u8, Characters<'static>, u8, u8), scpi::Error> {
+        let config = crate::i2c::device_get(slot).await.map_err(device_error)?;
+        Ok((
+            config.slot,
+            Characters(config.kind.name()),
+            config.bus,
+            config.address,
+        ))
+    }
+
+    #[scpi(cmd = "SYSTem:I2C:DEVice:LIST?")]
+    async fn i2c_device_list(&mut self) -> Result<DeviceListResponse, scpi::Error> {
+        crate::i2c::device_list()
+            .await
+            .map(DeviceListResponse)
+            .map_err(device_error)
+    }
+
+    #[scpi(cmd = "SYSTem:I2C:DEVice:COUNt?")]
+    async fn i2c_device_count(&mut self) -> Result<u8, scpi::Error> {
+        crate::i2c::device_count().await.map_err(device_error)
+    }
+
+    #[scpi(cmd = "SYSTem:I2C:DEVice:DELete")]
+    async fn i2c_device_delete(&mut self, slot: u8) -> Result<(), scpi::Error> {
+        crate::i2c::device_remove(slot)
+            .await
+            .map_err(device_error)?;
+        Ok(())
+    }
+
+    #[scpi(cmd = "SYSTem:I2C:DEVice:CLEar")]
+    async fn i2c_device_clear(&mut self) -> Result<(), scpi::Error> {
+        crate::i2c::device_clear().await.map_err(device_error)
+    }
+
     #[scpi(cmd = "SENSe:AVERage:COUNt")]
     async fn set_average_count(&mut self, count: u16) -> Result<(), scpi::Error> {
         if !(1..=MAX_AVERAGE_COUNT).contains(&count) {
@@ -205,6 +309,22 @@ impl ScpiInstrument {
         let raw = self.read_temperature_average().await?;
         let volts = raw as f32 * ADC_VREF / ADC_COUNTS;
         Ok(27.0 - (volts - 0.706) / 0.001721)
+    }
+
+    #[scpi(cmd = "MEASure:DISTance?")]
+    async fn measure_distance(&mut self, slot: u8) -> Result<f32, scpi::Error> {
+        match crate::i2c::measure_distance(slot).await {
+            Ok(millimeters) => Ok(f32::from(millimeters) / 1000.0),
+            Err(
+                error @ (devices::DeviceError::MeasurementInvalid
+                | devices::DeviceError::Timeout
+                | devices::DeviceError::Bus),
+            ) => {
+                self.errors.push_error(device_error(error));
+                Ok(f32::NAN)
+            }
+            Err(error) => Err(device_error(error)),
+        }
     }
 }
 

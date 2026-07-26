@@ -23,6 +23,7 @@ compiling CAN support or configuring CAN/SPI pins.
 - Predictable board-specific hostnames with a flash-UID fallback on conflict
 - SCPI-RAW instrument server on TCP port 5025 using `microscpi`
 - Four-channel 12-bit ADC measurements on A0-A3, plus internal temperature
+- Explicit SCPI configuration and ranging support for VL53L4CD I2C sensors
 - Built-in browser CAN and I2C consoles
 - WebSocket CAN API at `/can`
 - WebSocket I2C API at `/i2c`
@@ -261,11 +262,19 @@ Initial command set:
 | `SYST:VERS?` | Supported SCPI standard version |
 | `SYST:ERR?`, `SYST:ERR:COUN?` | Read the error queue |
 | `SYST:CHAN:COUN?` | Number of external ADC channels (`4`) |
+| `SYST:I2C:DEV:CAT?` | Supported I2C device models |
+| `SYST:I2C:DEV:ADD <slot>,"<model>",<address>` | Verify, initialize, and register a device |
+| `SYST:I2C:DEV? <slot>` | Device configuration as `slot,model,bus,address` |
+| `SYST:I2C:DEV:LIST?` | All configured devices, or `NONE` |
+| `SYST:I2C:DEV:COUN?` | Number of configured devices |
+| `SYST:I2C:DEV:DEL <slot>` | Stop and remove a configured device |
+| `SYST:I2C:DEV:CLEAR` | Stop and remove all configured devices |
 | `SENS:AVER:COUN <count>` | Set the global ADC averaging count (`1`-`256`) |
 | `SENS:AVER:COUN?` | Read the global ADC averaging count |
 | `MEAS:ADC:RAW? <channel>` | Averaged 12-bit ADC code for channel 0-3 |
 | `MEAS:VOLT:DC? <channel>` | Averaged nominal voltage for channel 0-3 |
 | `MEAS:TEMP?` | Approximate RP2040 internal temperature in degrees Celsius |
+| `MEAS:DIST? <slot>` | Distance in meters from a configured ranging sensor |
 
 SCPI channel 0 maps to A0/GP26, through channel 3 at A3/GP29. Voltage conversion
 assumes a nominal 3.3 V ADC reference and is not calibrated. Keep analog inputs
@@ -276,6 +285,40 @@ arithmetic mean. `SENS:AVER:COUN` controls the block size globally for A0-A3
 and the internal temperature sensor. The default is 16 samples; `*RST` restores
 that default. Larger values reduce uncorrelated noise but increase measurement
 latency proportionally.
+
+### Known I2C Devices
+
+Known devices are configured explicitly because an I2C scan generally reveals
+only addresses, not reliable model identities. Eight logical slots are
+available. The configuration is kept in RAM, survives `*RST`, and is cleared
+when the firmware restarts.
+
+The first supported device is the ST VL53L4CD time-of-flight distance sensor.
+For a sensor at its default 7-bit I2C address:
+
+```text
+SYST:I2C:DEV:ADD 1,"VL53L4CD",#H29
+SYST:I2C:DEV? 1
+MEAS:DIST? 1
+```
+
+Example responses:
+
+```text
+1,VL53L4CD,0,41
+0.347
+```
+
+`DEV:ADD` verifies the VL53L4CD identity, applies the sensor initialization
+sequence, and starts ranging. `MEAS:DIST?` waits for a fresh measurement and
+converts the sensor's millimeter result to meters. An invalid or zero-distance
+sample returns the SCPI NaN value `9.91E+37` instead of leaving a query without
+a response. It also queues a hardware error that can be inspected with
+`SYST:ERR?`.
+
+Only one configured device may use a given address. Supporting multiple
+VL53L4CD sensors at reassigned addresses will additionally require control of
+their XSHUT pins and is outside the initial implementation.
 
 ## Local HTML Apps
 
