@@ -246,6 +246,10 @@ fprintf("ADC channel 1: %.3f V\n", voltage);
 clear pico;
 ```
 
+SCPI Commander, an iPhone instrument-control app, has also been tested
+successfully with Pico I/O Bridge. The iPhone app can additionally run on Macs
+with Apple Silicon, where it has been verified with the same SCPI-RAW interface.
+
 Initial command set:
 
 | Command | Result or action |
