@@ -255,6 +255,8 @@ Initial command set:
 | `SYST:VERS?` | Supported SCPI standard version |
 | `SYST:ERR?`, `SYST:ERR:COUN?` | Read the error queue |
 | `SYST:CHAN:COUN?` | Number of external ADC channels (`4`) |
+| `SENS:AVER:COUN <count>` | Set the global ADC averaging count (`1`-`256`) |
+| `SENS:AVER:COUN?` | Read the global ADC averaging count |
 | `MEAS:ADC:RAW? <channel>` | Averaged 12-bit ADC code for channel 0-3 |
 | `MEAS:VOLT:DC? <channel>` | Averaged nominal voltage for channel 0-3 |
 | `MEAS:TEMP?` | Approximate RP2040 internal temperature in degrees Celsius |
@@ -262,6 +264,12 @@ Initial command set:
 SCPI channel 0 maps to A0/GP26, through channel 3 at A3/GP29. Voltage conversion
 assumes a nominal 3.3 V ADC reference and is not calibrated. Keep analog inputs
 between ground and 3.3 V; RP2040 GPIO pins are not 5 V tolerant.
+
+Each measurement takes a fresh block of samples and returns their rounded
+arithmetic mean. `SENS:AVER:COUN` controls the block size globally for A0-A3
+and the internal temperature sensor. The default is 16 samples; `*RST` restores
+that default. Larger values reduce uncorrelated noise but increase measurement
+latency proportionally.
 
 ## Local HTML Apps
 
