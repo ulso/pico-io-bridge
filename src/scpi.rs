@@ -9,8 +9,8 @@ use embassy_rp::gpio::Pull;
 use embassy_rp::peripherals::{ADC, ADC_TEMP_SENSOR, PIN_26, PIN_27, PIN_28, PIN_29};
 use embassy_time::{Duration, Timer};
 use microscpi::{
-    self as scpi, Adapter, Characters, ErrorCommands, ErrorQueue, Interface, StandardCommands,
-    StaticErrorQueue, StatusCommands, StatusRegisters,
+    self as scpi, Adapter, Characters, ErrorCommands, ErrorQueue, Interface, Response as _,
+    StandardCommands, StaticErrorQueue, StatusCommands, StatusRegisters,
 };
 
 use crate::devices;
@@ -25,6 +25,9 @@ const SOCKET_BUFFER_SIZE: usize = 1024;
 
 struct DeviceListResponse(devices::DeviceList);
 struct EnvironmentResponse(crate::bme688::Measurement);
+struct ImuVectorResponse(crate::bno08x::Vector3);
+struct ImuQuaternionResponse(crate::bno08x::Quaternion);
+struct ImuResponse(crate::bno08x::Measurement);
 struct ThermalFrameResponse([i16; crate::amg8833::PIXEL_COUNT]);
 
 impl scpi::Response for DeviceListResponse {
@@ -74,6 +77,60 @@ impl scpi::Response for EnvironmentResponse {
     }
 }
 
+fn write_imu_vector(
+    vector: crate::bno08x::Vector3,
+    output: &mut impl scpi::Write,
+) -> Result<(), scpi::Error> {
+    vector.x.write_response(output)?;
+    output.write_char(',')?;
+    vector.y.write_response(output)?;
+    output.write_char(',')?;
+    vector.z.write_response(output)?;
+    output.write_char(',')?;
+    vector.accuracy.write_response(output)
+}
+
+fn write_imu_quaternion(
+    quaternion: crate::bno08x::Quaternion,
+    output: &mut impl scpi::Write,
+) -> Result<(), scpi::Error> {
+    quaternion.i.write_response(output)?;
+    output.write_char(',')?;
+    quaternion.j.write_response(output)?;
+    output.write_char(',')?;
+    quaternion.k.write_response(output)?;
+    output.write_char(',')?;
+    quaternion.real.write_response(output)?;
+    output.write_char(',')?;
+    quaternion.accuracy_radians.write_response(output)?;
+    output.write_char(',')?;
+    quaternion.accuracy.write_response(output)
+}
+
+impl scpi::Response for ImuVectorResponse {
+    fn write_response(&self, output: &mut impl scpi::Write) -> Result<(), scpi::Error> {
+        write_imu_vector(self.0, output)
+    }
+}
+
+impl scpi::Response for ImuQuaternionResponse {
+    fn write_response(&self, output: &mut impl scpi::Write) -> Result<(), scpi::Error> {
+        write_imu_quaternion(self.0, output)
+    }
+}
+
+impl scpi::Response for ImuResponse {
+    fn write_response(&self, output: &mut impl scpi::Write) -> Result<(), scpi::Error> {
+        write_imu_vector(self.0.acceleration, output)?;
+        output.write_char(',')?;
+        write_imu_vector(self.0.gyroscope, output)?;
+        output.write_char(',')?;
+        write_imu_vector(self.0.magnetic_field, output)?;
+        output.write_char(',')?;
+        write_imu_quaternion(self.0.rotation, output)
+    }
+}
+
 fn device_error(error: devices::DeviceError) -> scpi::Error {
     match error {
         devices::DeviceError::InvalidSlot
@@ -89,6 +146,17 @@ fn device_error(error: devices::DeviceError) -> scpi::Error {
         | devices::DeviceError::MeasurementInvalid
         | devices::DeviceError::Timeout
         | devices::DeviceError::Bus => scpi::Error::HardwareError,
+    }
+}
+
+fn imu_error(error: devices::DeviceError) -> scpi::Error {
+    match error {
+        devices::DeviceError::MeasurementInvalid => {
+            scpi::Error::Custom(-301, "BNO08x protocol error")
+        }
+        devices::DeviceError::Timeout => scpi::Error::Custom(-302, "BNO08x timeout"),
+        devices::DeviceError::Bus => scpi::Error::Custom(-303, "BNO08x I2C error"),
+        error => device_error(error),
     }
 }
 
@@ -209,6 +277,21 @@ impl ScpiInstrument {
             Err(error) => Err(device_error(error)),
         }
     }
+
+    async fn read_imu(&mut self, slot: u8) -> Result<crate::bno08x::Measurement, scpi::Error> {
+        match crate::i2c::measure_imu(slot).await {
+            Ok(measurement) => Ok(measurement),
+            Err(
+                error @ (devices::DeviceError::MeasurementInvalid
+                | devices::DeviceError::Timeout
+                | devices::DeviceError::Bus),
+            ) => {
+                self.errors.push_error(imu_error(error));
+                Ok(crate::bno08x::Measurement::invalid())
+            }
+            Err(error) => Err(imu_error(error)),
+        }
+    }
 }
 
 impl ErrorCommands for ScpiInstrument {
@@ -272,7 +355,7 @@ impl ScpiInstrument {
     #[scpi(cmd = "SYSTem:I2C:DEVice:CATalog?")]
     async fn i2c_device_catalog(&mut self) -> Result<Characters<'static>, scpi::Error> {
         Ok(Characters(
-            "AMG8833,BME688,LC709203F,PCT2075,SEESAW_ENCODER,VL53L4CD",
+            "AMG8833,BME688,BNO08X,LC709203F,PCT2075,SEESAW_ENCODER,VL53L4CD",
         ))
     }
 
@@ -430,6 +513,45 @@ impl ScpiInstrument {
         slot: u8,
     ) -> Result<EnvironmentResponse, scpi::Error> {
         self.read_environment(slot).await.map(EnvironmentResponse)
+    }
+
+    #[scpi(cmd = "MEASure:IMU:ACCeleration?")]
+    async fn measure_imu_acceleration(
+        &mut self,
+        slot: u8,
+    ) -> Result<ImuVectorResponse, scpi::Error> {
+        self.read_imu(slot)
+            .await
+            .map(|measurement| ImuVectorResponse(measurement.acceleration))
+    }
+
+    #[scpi(cmd = "MEASure:IMU:GYRoscope?")]
+    async fn measure_imu_gyroscope(&mut self, slot: u8) -> Result<ImuVectorResponse, scpi::Error> {
+        self.read_imu(slot)
+            .await
+            .map(|measurement| ImuVectorResponse(measurement.gyroscope))
+    }
+
+    #[scpi(cmd = "MEASure:IMU:MAGNetic?")]
+    async fn measure_imu_magnetic(&mut self, slot: u8) -> Result<ImuVectorResponse, scpi::Error> {
+        self.read_imu(slot)
+            .await
+            .map(|measurement| ImuVectorResponse(measurement.magnetic_field))
+    }
+
+    #[scpi(cmd = "MEASure:IMU:QUATernion?")]
+    async fn measure_imu_quaternion(
+        &mut self,
+        slot: u8,
+    ) -> Result<ImuQuaternionResponse, scpi::Error> {
+        self.read_imu(slot)
+            .await
+            .map(|measurement| ImuQuaternionResponse(measurement.rotation))
+    }
+
+    #[scpi(cmd = "READ:IMU?")]
+    async fn read_imu_values(&mut self, slot: u8) -> Result<ImuResponse, scpi::Error> {
+        self.read_imu(slot).await.map(ImuResponse)
     }
 
     #[scpi(cmd = "MEASure:ENCoder:POSition?")]

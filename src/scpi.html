@@ -94,6 +94,7 @@ td:first-child{width:38%;white-space:nowrap}td code{font-weight:650}
 <span class="spec">VL53L4CD ranging</span>
 <span class="spec">AMG8833 8x8 thermal array</span>
 <span class="spec">BME688 environmental sensing</span>
+<span class="spec">BNO08x 9-DoF orientation</span>
 <span class="spec">LC709203F battery monitor</span>
 <span class="spec">PCT2075 external temperature</span>
 <span class="spec">seesaw rotary encoder</span>
@@ -137,6 +138,10 @@ td:first-child{width:38%;white-space:nowrap}td code{font-weight:650}
 <tr><td><code>MEAS:GAS:RES? &lt;slot&gt;</code></td><td>BME688 gas resistance in ohms</td></tr>
 <tr><td><code>MEAS:BATT:VOLT? &lt;slot&gt;</code></td><td>LC709203F cell voltage in volts</td></tr>
 <tr><td><code>MEAS:BATT:SOC? &lt;slot&gt;</code></td><td>LC709203F state of charge in percent</td></tr>
+<tr><td><code>MEAS:IMU:ACC? &lt;slot&gt;</code></td><td>BNO08x acceleration: x, y, z and accuracy</td></tr>
+<tr><td><code>MEAS:IMU:GYR? &lt;slot&gt;</code></td><td>BNO08x angular velocity: x, y, z and accuracy</td></tr>
+<tr><td><code>MEAS:IMU:MAGN? &lt;slot&gt;</code></td><td>BNO08x magnetic field: x, y, z and accuracy</td></tr>
+<tr><td><code>MEAS:IMU:QUAT? &lt;slot&gt;</code></td><td>BNO08x rotation quaternion and accuracy</td></tr>
 <tr><td><code>MEAS:ENC:POS? &lt;slot&gt;</code></td><td>Seesaw rotary encoder position</td></tr>
 <tr><td><code>MEAS:ENC:DELTA? &lt;slot&gt;</code></td><td>Encoder change since the previous position or delta query</td></tr>
 <tr><td><code>MEAS:ENC:BUTTON? &lt;slot&gt;</code></td><td>Push button state; 1 means pressed</td></tr>
@@ -146,6 +151,7 @@ td:first-child{width:38%;white-space:nowrap}td code{font-weight:650}
 <tr><td><code>MEAS:THERM:MAX? &lt;slot&gt;</code></td><td>Maximum AMG8833 frame temperature</td></tr>
 <tr><td><code>MEAS:THERM:AVER? &lt;slot&gt;</code></td><td>Mean AMG8833 frame temperature</td></tr>
 <tr><td><code>READ:ENV? &lt;slot&gt;</code></td><td>BME688 temperature, humidity, pressure and gas resistance</td></tr>
+<tr><td><code>READ:IMU? &lt;slot&gt;</code></td><td>Complete BNO08x motion and orientation measurement</td></tr>
 <tr><td><code>READ:THERM:ARR? &lt;slot&gt;</code></td><td>All 64 AMG8833 pixels in Celsius</td></tr>
 </tbody>
 </table>

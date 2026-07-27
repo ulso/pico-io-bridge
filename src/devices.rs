@@ -9,6 +9,7 @@ const DISTANCE_MEASUREMENT_ATTEMPTS: usize = 3;
 pub(crate) enum DeviceKind {
     Amg8833,
     Bme688,
+    Bno08x,
     Lc709203f,
     Pct2075,
     SeesawEncoder,
@@ -20,6 +21,7 @@ impl DeviceKind {
         match self {
             Self::Amg8833 => "AMG8833",
             Self::Bme688 => "BME688",
+            Self::Bno08x => "BNO08X",
             Self::Lc709203f => "LC709203F",
             Self::Pct2075 => "PCT2075",
             Self::SeesawEncoder => "SEESAW_ENCODER",
@@ -32,6 +34,8 @@ impl DeviceKind {
             Some(Self::Amg8833)
         } else if name.eq_ignore_ascii_case("BME688") {
             Some(Self::Bme688)
+        } else if name.eq_ignore_ascii_case("BNO08X") {
+            Some(Self::Bno08x)
         } else if name.eq_ignore_ascii_case("LC709203F") {
             Some(Self::Lc709203f)
         } else if name.eq_ignore_ascii_case("PCT2075") {
@@ -206,6 +210,16 @@ fn map_bme688_error<E>(error: crate::bme688::Error<E>) -> DeviceError {
     }
 }
 
+fn map_bno08x_error<E>(error: crate::bno08x::Error<E>) -> DeviceError {
+    match error {
+        crate::bno08x::Error::I2c(_) => DeviceError::Bus,
+        crate::bno08x::Error::InvalidAddress => DeviceError::InvalidAddress,
+        crate::bno08x::Error::InvalidIdentity => DeviceError::InvalidIdentity,
+        crate::bno08x::Error::Protocol => DeviceError::MeasurementInvalid,
+        crate::bno08x::Error::Timeout => DeviceError::Timeout,
+    }
+}
+
 fn map_seesaw_encoder_error<E>(error: crate::seesaw_encoder::Error<E>) -> DeviceError {
     match error {
         crate::seesaw_encoder::Error::I2c(_) => DeviceError::Bus,
@@ -241,6 +255,16 @@ where
                 .await
                 .map_err(map_bme688_error)?;
             registry.set_bme688_calibration(slot, calibration);
+        }
+        DeviceKind::Bno08x => {
+            if address != crate::bno08x::PRIMARY_ADDRESS
+                && address != crate::bno08x::SECONDARY_ADDRESS
+            {
+                return Err(DeviceError::InvalidAddress);
+            }
+            crate::bno08x::initialize(bus, address)
+                .await
+                .map_err(map_bno08x_error)?;
         }
         DeviceKind::Lc709203f => {
             if address != crate::lc709203f::ADDRESS {
@@ -297,6 +321,11 @@ where
                 .await
                 .map_err(map_bme688_error)?;
         }
+        DeviceKind::Bno08x => {
+            crate::bno08x::deinitialize(bus, config.address)
+                .await
+                .map_err(map_bno08x_error)?;
+        }
         DeviceKind::Lc709203f => {
             crate::lc709203f::sleep(bus, config.address)
                 .await
@@ -349,6 +378,7 @@ where
     match config.kind {
         DeviceKind::Amg8833
         | DeviceKind::Bme688
+        | DeviceKind::Bno08x
         | DeviceKind::Lc709203f
         | DeviceKind::Pct2075
         | DeviceKind::SeesawEncoder => Err(DeviceError::WrongDevice),
@@ -383,6 +413,7 @@ where
             .await
             .map_err(|_| DeviceError::Bus),
         DeviceKind::Bme688
+        | DeviceKind::Bno08x
         | DeviceKind::Lc709203f
         | DeviceKind::Pct2075
         | DeviceKind::SeesawEncoder
@@ -408,6 +439,7 @@ where
             .map(|eighths| f32::from(eighths) * 0.125)
             .map_err(|_| DeviceError::Bus),
         DeviceKind::Amg8833
+        | DeviceKind::Bno08x
         | DeviceKind::Lc709203f
         | DeviceKind::SeesawEncoder
         | DeviceKind::Vl53l4cd => Err(DeviceError::WrongDevice),
@@ -427,6 +459,23 @@ where
     crate::bme688::measure(bus, config.address, calibration)
         .await
         .map_err(map_bme688_error)
+}
+
+pub(crate) async fn measure_imu<I2C>(
+    bus: &mut I2C,
+    registry: &DeviceRegistry,
+    slot: u8,
+) -> Result<crate::bno08x::Measurement, DeviceError>
+where
+    I2C: I2c,
+{
+    let config = registry.get(slot)?;
+    if config.kind != DeviceKind::Bno08x {
+        return Err(DeviceError::WrongDevice);
+    }
+    crate::bno08x::read_measurement(bus, config.address)
+        .await
+        .map_err(map_bno08x_error)
 }
 
 fn encoder_config(registry: &DeviceRegistry, slot: u8) -> Result<DeviceConfig, DeviceError> {

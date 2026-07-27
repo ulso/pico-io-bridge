@@ -26,6 +26,7 @@ compiling CAN support or configuring CAN/SPI pins.
 - Explicit SCPI configuration and ranging support for VL53L4CD I2C sensors
 - AMG8833 8x8 thermal array measurements over SCPI
 - BME688 temperature, humidity, pressure, and gas resistance over SCPI
+- BNO08x acceleration, gyro, magnetic field, and fused orientation over SCPI
 - LC709203F battery voltage and state-of-charge measurements over SCPI
 - PCT2075 external temperature measurements over SCPI
 - Adafruit seesaw rotary encoder position, delta, and push-button state over SCPI
@@ -288,6 +289,10 @@ Initial command set:
 | `MEAS:GAS:RES? <slot>` | BME688 gas resistance in ohms |
 | `MEAS:BATT:VOLT? <slot>` | LC709203F cell voltage in volts |
 | `MEAS:BATT:SOC? <slot>` | LC709203F state of charge in percent |
+| `MEAS:IMU:ACC? <slot>` | BNO08x acceleration as `x,y,z,accuracy` |
+| `MEAS:IMU:GYR? <slot>` | BNO08x angular velocity as `x,y,z,accuracy` |
+| `MEAS:IMU:MAGN? <slot>` | BNO08x magnetic field as `x,y,z,accuracy` |
+| `MEAS:IMU:QUAT? <slot>` | BNO08x quaternion and accuracy |
 | `MEAS:ENC:POS? <slot>` | Seesaw rotary encoder position |
 | `MEAS:ENC:DELTA? <slot>` | Seesaw rotary encoder change since the previous encoder read |
 | `MEAS:ENC:BUTTON? <slot>` | Seesaw push button state, `1` means pressed |
@@ -297,6 +302,7 @@ Initial command set:
 | `MEAS:THERM:MAX? <slot>` | Maximum AMG8833 frame temperature |
 | `MEAS:THERM:AVER? <slot>` | Mean AMG8833 frame temperature |
 | `READ:ENV? <slot>` | BME688 temperature, humidity, pressure, and gas resistance |
+| `READ:IMU? <slot>` | Complete BNO08x motion and orientation measurement |
 | `READ:THERM:ARR? <slot>` | All 64 AMG8833 pixels in degrees Celsius |
 
 SCPI channel 0 maps to A0/GP26, through channel 3 at A3/GP29. Voltage conversion
@@ -408,6 +414,36 @@ slightly warmer than the surrounding air. Invalid measurements return SCPI NaN
 values and queue a hardware error for `SYST:ERR?`. `DEV:DEL` and `DEV:CLEAR`
 disable the gas heater and put the sensor into sleep mode.
 
+#### BNO08x
+
+The Adafruit BNO085 9-DoF Orientation IMU Fusion Breakout is supported at its
+default address `0x4A` and alternate address `0x4B` selected by pulling DI high:
+
+```text
+SYST:I2C:DEV:ADD 7,"BNO08X",#H4A
+MEAS:IMU:ACC? 7
+MEAS:IMU:GYR? 7
+MEAS:IMU:MAGN? 7
+MEAS:IMU:QUAT? 7
+READ:IMU? 7
+```
+
+`DEV:ADD` performs an SHTP software reset, verifies the product ID response,
+and enables calibrated acceleration, gyroscope, magnetic-field, and absolute
+rotation-vector reports at 10 Hz. Only the STEMMA QT connection is required;
+the breakout's interrupt and reset pins are not used.
+
+Acceleration is reported in m/s2, angular velocity in rad/s, and magnetic field
+in microteslas. Vector queries return `x,y,z,accuracy`. The quaternion query
+returns `i,j,k,real,accuracy_radians,accuracy`. Accuracy is the BNO08x status
+level: `0` unreliable, `1` low, `2` medium, and `3` high.
+
+`READ:IMU?` returns one complete measurement in this order:
+`accel_x,accel_y,accel_z,accel_accuracy,gyro_x,gyro_y,gyro_z,gyro_accuracy,`
+`mag_x,mag_y,mag_z,mag_accuracy,quat_i,quat_j,quat_k,quat_real,`
+`quat_accuracy_radians,quat_accuracy`. `DEV:DEL` and `DEV:CLEAR` reset the
+device and stop active reports.
+
 #### LC709203F
 
 The onsemi LC709203F battery monitor is supported at its fixed address `0x0B`.
@@ -511,6 +547,7 @@ Examples:
 - `examples/scpi_common.py`: shared interactive board selector for PyVISA examples
 - `examples/scpi_amg8833.py`: PyVISA AMG8833 8x8 thermal frame reader
 - `examples/scpi_bme688.py`: PyVISA BME688 environmental measurement
+- `examples/scpi_bno08x.py`: PyVISA BNO08x motion and orientation measurement
 - `examples/scpi_lc709203f.py`: PyVISA LC709203F battery monitor
 - `examples/scpi_pct2075.py`: PyVISA PCT2075 temperature measurement
 - `examples/scpi_seesaw_encoder.py`: PyVISA seesaw rotary encoder and button reader

@@ -108,6 +108,9 @@ enum I2cCommand {
     MeasureEnvironment {
         slot: u8,
     },
+    MeasureImu {
+        slot: u8,
+    },
     EncoderPositionGet {
         slot: u8,
     },
@@ -169,6 +172,7 @@ enum I2cReply {
     ThermalFrame([i16; crate::amg8833::PIXEL_COUNT]),
     ExternalTemperature(f32),
     Environment(crate::bme688::Measurement),
+    Imu(crate::bno08x::Measurement),
     EncoderPosition(i32),
     EncoderDelta(i32),
     EncoderButton(bool),
@@ -329,6 +333,7 @@ fn write_reply(out: &mut String<512>, reply: I2cReply) {
         | I2cReply::ThermalFrame(_)
         | I2cReply::ExternalTemperature(_)
         | I2cReply::Environment(_)
+        | I2cReply::Imu(_)
         | I2cReply::EncoderPosition(_)
         | I2cReply::EncoderDelta(_)
         | I2cReply::EncoderButton(_)
@@ -445,6 +450,16 @@ pub(crate) async fn measure_environment(
 ) -> Result<crate::bme688::Measurement, devices::DeviceError> {
     match send_command(I2cCommand::MeasureEnvironment { slot }).await {
         I2cReply::Environment(measurement) => Ok(measurement),
+        I2cReply::DeviceError(error) => Err(error),
+        _ => Err(devices::DeviceError::Bus),
+    }
+}
+
+pub(crate) async fn measure_imu(
+    slot: u8,
+) -> Result<crate::bno08x::Measurement, devices::DeviceError> {
+    match send_command(I2cCommand::MeasureImu { slot }).await {
+        I2cReply::Imu(measurement) => Ok(measurement),
         I2cReply::DeviceError(error) => Err(error),
         _ => Err(devices::DeviceError::Bus),
     }
@@ -702,6 +717,16 @@ async fn execute_command<T: Instance>(
             state.transaction_count = state.transaction_count.wrapping_add(1);
             match devices::measure_environment(bus, devices, slot).await {
                 Ok(measurement) => I2cReply::Environment(measurement),
+                Err(error) => {
+                    state.error_count = state.error_count.wrapping_add(1);
+                    I2cReply::DeviceError(error)
+                }
+            }
+        }
+        I2cCommand::MeasureImu { slot } => {
+            state.transaction_count = state.transaction_count.wrapping_add(1);
+            match devices::measure_imu(bus, devices, slot).await {
+                Ok(measurement) => I2cReply::Imu(measurement),
                 Err(error) => {
                     state.error_count = state.error_count.wrapping_add(1);
                     I2cReply::DeviceError(error)

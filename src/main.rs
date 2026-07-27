@@ -15,6 +15,8 @@ compile_error!("mcp2515 and mcp25625 are mutually exclusive");
 mod amg8833;
 #[cfg(feature = "i2c")]
 mod bme688;
+#[cfg(feature = "i2c")]
+mod bno08x;
 mod board;
 #[cfg(feature = "can")]
 mod can;
