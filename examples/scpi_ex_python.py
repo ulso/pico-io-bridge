@@ -4,17 +4,23 @@ Install the required packages with:
     python3 -m pip install pyvisa pyvisa-py
 """
 
+from typing import cast
+
 import pyvisa
+from pyvisa.resources import MessageBasedResource
+from scpi_common import select_visa_resource
 
 
-def main():
+def main() -> None:
+    visa_resource = select_visa_resource()
     resource_manager = pyvisa.ResourceManager("@py")
     try:
         with resource_manager.open_resource(
-            "TCPIP0::pico-io-can-feather.local::5025::SOCKET",
+            visa_resource,
             read_termination="\n",
             write_termination="\n",
-        ) as instrument:
+        ) as resource:
+            instrument = cast(MessageBasedResource, resource)
             identity = instrument.query("*IDN?")
             voltage = float(instrument.query("MEAS:VOLT:DC? 0"))
             raw = int(instrument.query("MEAS:ADC:RAW? 0"))

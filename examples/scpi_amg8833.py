@@ -9,8 +9,8 @@ from typing import cast
 
 import pyvisa
 from pyvisa.resources import MessageBasedResource
+from scpi_common import select_visa_resource
 
-VISA_RESOURCE = "TCPIP0::pico-io-kb2040.local::5025::SOCKET"
 SLOT = 2
 ADDRESS = 0x69
 EXPECTED_DEVICE = f"{SLOT},AMG8833,0,{ADDRESS}"
@@ -34,11 +34,12 @@ def print_frame(frame: list[float]) -> None:
 
 
 def main() -> None:
+    visa_resource = select_visa_resource()
     resource_manager = pyvisa.ResourceManager("@py")
 
     try:
         with resource_manager.open_resource(
-            VISA_RESOURCE,
+            visa_resource,
             read_termination="\n",
             write_termination="\n",
         ) as resource:

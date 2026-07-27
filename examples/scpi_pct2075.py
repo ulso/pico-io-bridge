@@ -10,19 +10,20 @@ from typing import cast
 
 import pyvisa
 from pyvisa.resources import MessageBasedResource
+from scpi_common import select_visa_resource
 
-VISA_RESOURCE = "TCPIP0::pico-io-kb2040.local::5025::SOCKET"
 SLOT = 3
 ADDRESS = 0x37
 EXPECTED_DEVICE = f"{SLOT},PCT2075,0,{ADDRESS}"
 
 
 def main() -> None:
+    visa_resource = select_visa_resource()
     resource_manager = pyvisa.ResourceManager("@py")
 
     try:
         with resource_manager.open_resource(
-            VISA_RESOURCE,
+            visa_resource,
             read_termination="\n",
             write_termination="\n",
         ) as resource:
@@ -43,9 +44,7 @@ def main() -> None:
                     raise RuntimeError(f"Sensor configuration failed: {error}")
 
             for _ in range(5):
-                temperature = float(
-                    instrument.query(f"MEAS:TEMP:EXT? {SLOT}")
-                )
+                temperature = float(instrument.query(f"MEAS:TEMP:EXT? {SLOT}"))
                 print(f"Temperature: {temperature:.3f} C")
                 time.sleep(0.5)
     finally:

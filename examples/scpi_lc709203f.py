@@ -10,8 +10,8 @@ from typing import cast
 
 import pyvisa
 from pyvisa.resources import MessageBasedResource
+from scpi_common import select_visa_resource
 
-VISA_RESOURCE = "TCPIP0::pico-io-can-feather.local::5025::SOCKET"
 SLOT = 4
 ADDRESS = 0x0B
 BATTERY_CAPACITY_MAH = 500
@@ -19,11 +19,12 @@ EXPECTED_DEVICE = f"{SLOT},LC709203F,0,{ADDRESS}"
 
 
 def main() -> None:
+    visa_resource = select_visa_resource()
     resource_manager = pyvisa.ResourceManager("@py")
 
     try:
         with resource_manager.open_resource(
-            VISA_RESOURCE,
+            visa_resource,
             read_termination="\n",
             write_termination="\n",
         ) as resource:
@@ -43,18 +44,14 @@ def main() -> None:
                 if not error.startswith("0,"):
                     raise RuntimeError(f"Battery monitor configuration failed: {error}")
 
-            _ = instrument.write(
-                f"SENS:BATT:CAP {SLOT},{BATTERY_CAPACITY_MAH}"
-            )
+            _ = instrument.write(f"SENS:BATT:CAP {SLOT},{BATTERY_CAPACITY_MAH}")
             error = instrument.query("SYST:ERR?").strip()
             if not error.startswith("0,"):
                 raise RuntimeError(f"Battery capacity configuration failed: {error}")
 
             for _ in range(5):
                 voltage = float(instrument.query(f"MEAS:BATT:VOLT? {SLOT}"))
-                state_of_charge = float(
-                    instrument.query(f"MEAS:BATT:SOC? {SLOT}")
-                )
+                state_of_charge = float(instrument.query(f"MEAS:BATT:SOC? {SLOT}"))
                 print(f"Battery: {voltage:.3f} V, {state_of_charge:.1f} %")
                 time.sleep(2)
     finally:

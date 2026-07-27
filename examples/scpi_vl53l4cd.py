@@ -9,8 +9,8 @@ from typing import cast
 
 import pyvisa
 from pyvisa.resources import MessageBasedResource
+from scpi_common import select_visa_resource
 
-VISA_RESOURCE = "TCPIP0::pico-io-kb2040.local::5025::SOCKET"
 EXPECTED_DEVICE = "1,VL53L4CD,0,41"
 INVALID_READING_LIMIT = 9.0e37
 
@@ -31,11 +31,12 @@ def measure_distance(inst: MessageBasedResource) -> float:
 
 
 def main() -> None:
+    visa_resource = select_visa_resource()
     resource_manager = pyvisa.ResourceManager("@py")
 
     try:
         with resource_manager.open_resource(
-            VISA_RESOURCE,
+            visa_resource,
             read_termination="\n",
             write_termination="\n",
         ) as resource:

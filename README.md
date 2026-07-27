@@ -440,6 +440,7 @@ Examples:
 
 - `examples/can_ws.py`: Python WebSocket client
 - `examples/led_control.html`: standalone browser LED control page
+- `examples/scpi_common.py`: shared interactive board selector for PyVISA examples
 - `examples/scpi_amg8833.py`: PyVISA AMG8833 8x8 thermal frame reader
 - `examples/scpi_lc709203f.py`: PyVISA LC709203F battery monitor
 - `examples/scpi_pct2075.py`: PyVISA PCT2075 temperature measurement
