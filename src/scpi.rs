@@ -63,14 +63,15 @@ impl scpi::Response for ThermalFrameResponse {
 
 fn device_error(error: devices::DeviceError) -> scpi::Error {
     match error {
-        devices::DeviceError::InvalidSlot | devices::DeviceError::InvalidAddress => {
-            scpi::Error::DataOutOfRange
-        }
+        devices::DeviceError::InvalidSlot
+        | devices::DeviceError::InvalidAddress
+        | devices::DeviceError::InvalidCapacity => scpi::Error::DataOutOfRange,
         devices::DeviceError::SlotEmpty
         | devices::DeviceError::SlotOccupied
         | devices::DeviceError::AddressInUse
         | devices::DeviceError::UnsupportedModel
         | devices::DeviceError::WrongDevice => scpi::Error::IllegalParameterValue,
+        devices::DeviceError::NotConfigured => scpi::Error::SettingsConflict,
         devices::DeviceError::InvalidIdentity
         | devices::DeviceError::MeasurementInvalid
         | devices::DeviceError::Timeout
@@ -234,7 +235,7 @@ impl ScpiInstrument {
 
     #[scpi(cmd = "SYSTem:I2C:DEVice:CATalog?")]
     async fn i2c_device_catalog(&mut self) -> Result<Characters<'static>, scpi::Error> {
-        Ok(Characters("AMG8833,PCT2075,VL53L4CD"))
+        Ok(Characters("AMG8833,LC709203F,PCT2075,VL53L4CD"))
     }
 
     #[scpi(cmd = "SYSTem:I2C:DEVice:ADD")]
@@ -307,6 +308,24 @@ impl ScpiInstrument {
         Ok(self.average_count)
     }
 
+    #[scpi(cmd = "SENSe:BATTery:CAPacity")]
+    async fn set_battery_capacity(
+        &mut self,
+        slot: u8,
+        capacity_mah: u16,
+    ) -> Result<(), scpi::Error> {
+        crate::i2c::set_battery_capacity(slot, capacity_mah)
+            .await
+            .map_err(device_error)
+    }
+
+    #[scpi(cmd = "SENSe:BATTery:CAPacity?")]
+    async fn battery_capacity(&mut self, slot: u8) -> Result<u16, scpi::Error> {
+        crate::i2c::battery_capacity(slot)
+            .await
+            .map_err(device_error)
+    }
+
     #[scpi(cmd = "MEASure:ADC:RAW?")]
     async fn measure_adc_raw(&mut self, channel: u8) -> Result<u16, scpi::Error> {
         self.read_average(channel).await
@@ -330,6 +349,22 @@ impl ScpiInstrument {
         crate::i2c::measure_external_temperature(slot)
             .await
             .map(|eighths| f32::from(eighths) * 0.125)
+            .map_err(device_error)
+    }
+
+    #[scpi(cmd = "MEASure:BATTery:VOLTage?")]
+    async fn measure_battery_voltage(&mut self, slot: u8) -> Result<f32, scpi::Error> {
+        crate::i2c::measure_battery_voltage(slot)
+            .await
+            .map(|millivolts| f32::from(millivolts) / 1000.0)
+            .map_err(device_error)
+    }
+
+    #[scpi(cmd = "MEASure:BATTery:SOC?")]
+    async fn measure_battery_soc(&mut self, slot: u8) -> Result<f32, scpi::Error> {
+        crate::i2c::measure_battery_soc(slot)
+            .await
+            .map(|tenths| f32::from(tenths) / 10.0)
             .map_err(device_error)
     }
 

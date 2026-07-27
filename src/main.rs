@@ -25,6 +25,8 @@ mod http;
 mod i2c;
 #[cfg(any(feature = "can", feature = "i2c"))]
 mod json;
+#[cfg(feature = "i2c")]
+mod lc709203f;
 #[cfg(feature = "mdns")]
 mod mdns;
 mod network;

@@ -8,6 +8,7 @@ const DISTANCE_MEASUREMENT_ATTEMPTS: usize = 3;
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DeviceKind {
     Amg8833,
+    Lc709203f,
     Pct2075,
     Vl53l4cd,
 }
@@ -16,6 +17,7 @@ impl DeviceKind {
     pub(crate) const fn name(self) -> &'static str {
         match self {
             Self::Amg8833 => "AMG8833",
+            Self::Lc709203f => "LC709203F",
             Self::Pct2075 => "PCT2075",
             Self::Vl53l4cd => "VL53L4CD",
         }
@@ -24,6 +26,8 @@ impl DeviceKind {
     pub(crate) fn from_name(name: &str) -> Option<Self> {
         if name.eq_ignore_ascii_case("AMG8833") {
             Some(Self::Amg8833)
+        } else if name.eq_ignore_ascii_case("LC709203F") {
+            Some(Self::Lc709203f)
         } else if name.eq_ignore_ascii_case("PCT2075") {
             Some(Self::Pct2075)
         } else if name.eq_ignore_ascii_case("VL53L4CD") {
@@ -49,12 +53,14 @@ pub(crate) struct DeviceList {
 
 pub(crate) struct DeviceRegistry {
     entries: [Option<DeviceConfig>; MAX_DEVICES],
+    battery_capacity_mah: [Option<u16>; MAX_DEVICES],
 }
 
 impl DeviceRegistry {
     pub(crate) const fn new() -> Self {
         Self {
             entries: [None; MAX_DEVICES],
+            battery_capacity_mah: [None; MAX_DEVICES],
         }
     }
 
@@ -109,7 +115,21 @@ impl DeviceRegistry {
 
     fn remove(&mut self, slot: u8) -> Result<DeviceConfig, DeviceError> {
         let index = slot_index(slot)?;
-        self.entries[index].take().ok_or(DeviceError::SlotEmpty)
+        let config = self.entries[index].take().ok_or(DeviceError::SlotEmpty)?;
+        self.battery_capacity_mah[index] = None;
+        Ok(config)
+    }
+
+    fn set_battery_capacity(&mut self, slot: u8, capacity_mah: u16) {
+        self.battery_capacity_mah[(slot - 1) as usize] = Some(capacity_mah);
+    }
+
+    fn battery_capacity(&self, slot: u8) -> Result<u16, DeviceError> {
+        let config = self.get(slot)?;
+        if config.kind != DeviceKind::Lc709203f {
+            return Err(DeviceError::WrongDevice);
+        }
+        self.battery_capacity_mah[(slot - 1) as usize].ok_or(DeviceError::NotConfigured)
     }
 }
 
@@ -122,6 +142,8 @@ pub(crate) enum DeviceError {
     AddressInUse,
     UnsupportedModel,
     WrongDevice,
+    NotConfigured,
+    InvalidCapacity,
     InvalidIdentity,
     MeasurementInvalid,
     Timeout,
@@ -145,6 +167,14 @@ fn map_vl53l4cd_error<E>(error: vl53l4cd::Error<E>) -> DeviceError {
     }
 }
 
+fn map_lc709203f_error<E>(error: crate::lc709203f::Error<E>) -> DeviceError {
+    match error {
+        crate::lc709203f::Error::I2c(_) | crate::lc709203f::Error::Crc => DeviceError::Bus,
+        crate::lc709203f::Error::InvalidIdentity => DeviceError::InvalidIdentity,
+        crate::lc709203f::Error::InvalidCapacity => DeviceError::InvalidCapacity,
+    }
+}
+
 pub(crate) async fn add<I2C>(
     bus: &mut I2C,
     registry: &mut DeviceRegistry,
@@ -162,6 +192,14 @@ where
             crate::amg8833::initialize(bus, address)
                 .await
                 .map_err(|_| DeviceError::Bus)?;
+        }
+        DeviceKind::Lc709203f => {
+            if address != crate::lc709203f::ADDRESS {
+                return Err(DeviceError::InvalidAddress);
+            }
+            crate::lc709203f::initialize(bus, address)
+                .await
+                .map_err(map_lc709203f_error)?;
         }
         DeviceKind::Pct2075 => {
             crate::pct2075::initialize(bus, address)
@@ -194,6 +232,11 @@ where
             crate::amg8833::sleep(bus, config.address)
                 .await
                 .map_err(|_| DeviceError::Bus)?;
+        }
+        DeviceKind::Lc709203f => {
+            crate::lc709203f::sleep(bus, config.address)
+                .await
+                .map_err(map_lc709203f_error)?;
         }
         DeviceKind::Pct2075 => {
             crate::pct2075::sleep(bus, config.address)
@@ -235,7 +278,9 @@ where
     let config = registry.get(slot)?;
 
     match config.kind {
-        DeviceKind::Amg8833 | DeviceKind::Pct2075 => Err(DeviceError::WrongDevice),
+        DeviceKind::Amg8833 | DeviceKind::Lc709203f | DeviceKind::Pct2075 => {
+            Err(DeviceError::WrongDevice)
+        }
         DeviceKind::Vl53l4cd => {
             let mut sensor = Vl53l4cd::with_addr(&mut *bus, config.address, Delay, Poll);
             if sensor.has_measurement().await.map_err(map_vl53l4cd_error)? {
@@ -266,7 +311,9 @@ where
         DeviceKind::Amg8833 => crate::amg8833::read_frame(bus, config.address)
             .await
             .map_err(|_| DeviceError::Bus),
-        DeviceKind::Pct2075 | DeviceKind::Vl53l4cd => Err(DeviceError::WrongDevice),
+        DeviceKind::Lc709203f | DeviceKind::Pct2075 | DeviceKind::Vl53l4cd => {
+            Err(DeviceError::WrongDevice)
+        }
     }
 }
 
@@ -283,6 +330,64 @@ where
         DeviceKind::Pct2075 => crate::pct2075::read_temperature_eighths(bus, config.address)
             .await
             .map_err(|_| DeviceError::Bus),
-        DeviceKind::Amg8833 | DeviceKind::Vl53l4cd => Err(DeviceError::WrongDevice),
+        DeviceKind::Amg8833 | DeviceKind::Lc709203f | DeviceKind::Vl53l4cd => {
+            Err(DeviceError::WrongDevice)
+        }
     }
+}
+
+pub(crate) async fn set_battery_capacity<I2C>(
+    bus: &mut I2C,
+    registry: &mut DeviceRegistry,
+    slot: u8,
+    capacity_mah: u16,
+) -> Result<(), DeviceError>
+where
+    I2C: I2c,
+{
+    let config = registry.get(slot)?;
+    if config.kind != DeviceKind::Lc709203f {
+        return Err(DeviceError::WrongDevice);
+    }
+    crate::lc709203f::set_capacity(bus, config.address, capacity_mah)
+        .await
+        .map_err(map_lc709203f_error)?;
+    registry.set_battery_capacity(slot, capacity_mah);
+    Ok(())
+}
+
+pub(crate) fn battery_capacity(registry: &DeviceRegistry, slot: u8) -> Result<u16, DeviceError> {
+    registry.battery_capacity(slot)
+}
+
+pub(crate) async fn measure_battery_voltage<I2C>(
+    bus: &mut I2C,
+    registry: &DeviceRegistry,
+    slot: u8,
+) -> Result<u16, DeviceError>
+where
+    I2C: I2c,
+{
+    let config = registry.get(slot)?;
+    if config.kind != DeviceKind::Lc709203f {
+        return Err(DeviceError::WrongDevice);
+    }
+    crate::lc709203f::read_voltage_mv(bus, config.address)
+        .await
+        .map_err(map_lc709203f_error)
+}
+
+pub(crate) async fn measure_battery_soc<I2C>(
+    bus: &mut I2C,
+    registry: &DeviceRegistry,
+    slot: u8,
+) -> Result<u16, DeviceError>
+where
+    I2C: I2c,
+{
+    let config = registry.get(slot)?;
+    let _ = registry.battery_capacity(slot)?;
+    crate::lc709203f::read_soc_tenths(bus, config.address)
+        .await
+        .map_err(map_lc709203f_error)
 }

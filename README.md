@@ -25,6 +25,7 @@ compiling CAN support or configuring CAN/SPI pins.
 - Four-channel 12-bit ADC measurements on A0-A3, plus internal temperature
 - Explicit SCPI configuration and ranging support for VL53L4CD I2C sensors
 - AMG8833 8x8 thermal array measurements over SCPI
+- LC709203F battery voltage and state-of-charge measurements over SCPI
 - PCT2075 external temperature measurements over SCPI
 - Built-in browser CAN and I2C consoles
 - WebSocket CAN API at `/can`
@@ -273,10 +274,14 @@ Initial command set:
 | `SYST:I2C:DEV:CLEAR` | Stop and remove all configured devices |
 | `SENS:AVER:COUN <count>` | Set the global ADC averaging count (`1`-`256`) |
 | `SENS:AVER:COUN?` | Read the global ADC averaging count |
+| `SENS:BATT:CAP <slot>,<mAh>` | Configure LC709203F battery capacity |
+| `SENS:BATT:CAP? <slot>` | Read configured battery capacity in mAh |
 | `MEAS:ADC:RAW? <channel>` | Averaged 12-bit ADC code for channel 0-3 |
 | `MEAS:VOLT:DC? <channel>` | Averaged nominal voltage for channel 0-3 |
 | `MEAS:TEMP?` | Approximate RP2040 internal temperature in degrees Celsius |
 | `MEAS:TEMP:EXT? <slot>` | PCT2075 temperature in degrees Celsius |
+| `MEAS:BATT:VOLT? <slot>` | LC709203F cell voltage in volts |
+| `MEAS:BATT:SOC? <slot>` | LC709203F state of charge in percent |
 | `MEAS:DIST? <slot>` | Distance in meters from a configured ranging sensor |
 | `MEAS:THERM:PIX? <slot>,<pixel>` | AMG8833 pixel 0-63 in degrees Celsius |
 | `MEAS:THERM:MIN? <slot>` | Minimum AMG8833 frame temperature |
@@ -359,6 +364,26 @@ register. Temperatures are reported in degrees Celsius at the sensor's
 0.125 degree resolution. `DEV:DEL` and `DEV:CLEAR` put the sensor into its
 low-power shutdown mode.
 
+The onsemi LC709203F battery monitor is supported at its fixed address `0x0B`.
+The monitor must have a sufficiently charged single-cell LiPo or LiIon battery
+connected because the IC is powered by the battery rather than STEMMA QT VIN:
+
+```text
+SYST:I2C:DEV:ADD 4,"LC709203F",#H0B
+SENS:BATT:CAP 4,500
+SENS:BATT:CAP? 4
+MEAS:BATT:VOLT? 4
+MEAS:BATT:SOC? 4
+```
+
+`DEV:ADD` verifies IC version `0x2717` and validates the response CRC before
+waking the monitor. `SENS:BATT:CAP` accepts `100`, `200`, `500`, `1000`, `2000`,
+or `3000` mAh, writes the corresponding APA value, selects the 4.2 V battery
+profile, and restarts the state-of-charge calculation. Voltage can be measured
+before capacity configuration; SOC returns a settings-conflict error until a
+capacity has been selected. Every register transaction uses the LC709203F CRC-8.
+`DEV:DEL` and `DEV:CLEAR` put the monitor into sleep mode.
+
 ## Local HTML Apps
 
 Custom control pages do not have to be uploaded to the Pico. A standalone HTML
@@ -416,6 +441,7 @@ Examples:
 - `examples/can_ws.py`: Python WebSocket client
 - `examples/led_control.html`: standalone browser LED control page
 - `examples/scpi_amg8833.py`: PyVISA AMG8833 8x8 thermal frame reader
+- `examples/scpi_lc709203f.py`: PyVISA LC709203F battery monitor
 - `examples/scpi_pct2075.py`: PyVISA PCT2075 temperature measurement
 - `examples/scpi_vl53l4cd.py`: PyVISA VL53L4CD distance measurement
 

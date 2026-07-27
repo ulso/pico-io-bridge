@@ -105,6 +105,19 @@ enum I2cCommand {
     MeasureExternalTemperature {
         slot: u8,
     },
+    BatteryCapacitySet {
+        slot: u8,
+        capacity_mah: u16,
+    },
+    BatteryCapacityGet {
+        slot: u8,
+    },
+    MeasureBatteryVoltage {
+        slot: u8,
+    },
+    MeasureBatterySoc {
+        slot: u8,
+    },
 }
 
 #[derive(Clone, Copy)]
@@ -139,6 +152,9 @@ enum I2cReply {
     Distance(u16),
     ThermalFrame([i16; crate::amg8833::PIXEL_COUNT]),
     ExternalTemperature(i16),
+    BatteryCapacity(u16),
+    BatteryVoltage(u16),
+    BatterySoc(u16),
     DeviceError(devices::DeviceError),
 }
 
@@ -292,6 +308,9 @@ fn write_reply(out: &mut String<512>, reply: I2cReply) {
         | I2cReply::Distance(_)
         | I2cReply::ThermalFrame(_)
         | I2cReply::ExternalTemperature(_)
+        | I2cReply::BatteryCapacity(_)
+        | I2cReply::BatteryVoltage(_)
+        | I2cReply::BatterySoc(_)
         | I2cReply::DeviceError(_) => {
             json::write_error(out, "internal_error", "Unexpected I2C reply")
         }
@@ -392,6 +411,41 @@ pub(crate) async fn measure_thermal_frame(
 pub(crate) async fn measure_external_temperature(slot: u8) -> Result<i16, devices::DeviceError> {
     match send_command(I2cCommand::MeasureExternalTemperature { slot }).await {
         I2cReply::ExternalTemperature(temperature) => Ok(temperature),
+        I2cReply::DeviceError(error) => Err(error),
+        _ => Err(devices::DeviceError::Bus),
+    }
+}
+
+pub(crate) async fn set_battery_capacity(
+    slot: u8,
+    capacity_mah: u16,
+) -> Result<(), devices::DeviceError> {
+    match send_command(I2cCommand::BatteryCapacitySet { slot, capacity_mah }).await {
+        I2cReply::BatteryCapacity(_) => Ok(()),
+        I2cReply::DeviceError(error) => Err(error),
+        _ => Err(devices::DeviceError::Bus),
+    }
+}
+
+pub(crate) async fn battery_capacity(slot: u8) -> Result<u16, devices::DeviceError> {
+    match send_command(I2cCommand::BatteryCapacityGet { slot }).await {
+        I2cReply::BatteryCapacity(capacity_mah) => Ok(capacity_mah),
+        I2cReply::DeviceError(error) => Err(error),
+        _ => Err(devices::DeviceError::Bus),
+    }
+}
+
+pub(crate) async fn measure_battery_voltage(slot: u8) -> Result<u16, devices::DeviceError> {
+    match send_command(I2cCommand::MeasureBatteryVoltage { slot }).await {
+        I2cReply::BatteryVoltage(millivolts) => Ok(millivolts),
+        I2cReply::DeviceError(error) => Err(error),
+        _ => Err(devices::DeviceError::Bus),
+    }
+}
+
+pub(crate) async fn measure_battery_soc(slot: u8) -> Result<u16, devices::DeviceError> {
+    match send_command(I2cCommand::MeasureBatterySoc { slot }).await {
+        I2cReply::BatterySoc(tenths) => Ok(tenths),
         I2cReply::DeviceError(error) => Err(error),
         _ => Err(devices::DeviceError::Bus),
     }
@@ -569,6 +623,40 @@ async fn execute_command<T: Instance>(
             state.transaction_count = state.transaction_count.wrapping_add(1);
             match devices::measure_external_temperature(bus, devices, slot).await {
                 Ok(temperature) => I2cReply::ExternalTemperature(temperature),
+                Err(error) => {
+                    state.error_count = state.error_count.wrapping_add(1);
+                    I2cReply::DeviceError(error)
+                }
+            }
+        }
+        I2cCommand::BatteryCapacitySet { slot, capacity_mah } => {
+            state.transaction_count = state.transaction_count.wrapping_add(1);
+            match devices::set_battery_capacity(bus, devices, slot, capacity_mah).await {
+                Ok(()) => I2cReply::BatteryCapacity(capacity_mah),
+                Err(error) => {
+                    state.error_count = state.error_count.wrapping_add(1);
+                    I2cReply::DeviceError(error)
+                }
+            }
+        }
+        I2cCommand::BatteryCapacityGet { slot } => match devices::battery_capacity(devices, slot) {
+            Ok(capacity_mah) => I2cReply::BatteryCapacity(capacity_mah),
+            Err(error) => I2cReply::DeviceError(error),
+        },
+        I2cCommand::MeasureBatteryVoltage { slot } => {
+            state.transaction_count = state.transaction_count.wrapping_add(1);
+            match devices::measure_battery_voltage(bus, devices, slot).await {
+                Ok(millivolts) => I2cReply::BatteryVoltage(millivolts),
+                Err(error) => {
+                    state.error_count = state.error_count.wrapping_add(1);
+                    I2cReply::DeviceError(error)
+                }
+            }
+        }
+        I2cCommand::MeasureBatterySoc { slot } => {
+            state.transaction_count = state.transaction_count.wrapping_add(1);
+            match devices::measure_battery_soc(bus, devices, slot).await {
+                Ok(tenths) => I2cReply::BatterySoc(tenths),
                 Err(error) => {
                     state.error_count = state.error_count.wrapping_add(1);
                     I2cReply::DeviceError(error)
