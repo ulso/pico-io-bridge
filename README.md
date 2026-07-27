@@ -25,6 +25,7 @@ compiling CAN support or configuring CAN/SPI pins.
 - Four-channel 12-bit ADC measurements on A0-A3, plus internal temperature
 - Explicit SCPI configuration and ranging support for VL53L4CD I2C sensors
 - AMG8833 8x8 thermal array measurements over SCPI
+- PCT2075 external temperature measurements over SCPI
 - Built-in browser CAN and I2C consoles
 - WebSocket CAN API at `/can`
 - WebSocket I2C API at `/i2c`
@@ -275,6 +276,7 @@ Initial command set:
 | `MEAS:ADC:RAW? <channel>` | Averaged 12-bit ADC code for channel 0-3 |
 | `MEAS:VOLT:DC? <channel>` | Averaged nominal voltage for channel 0-3 |
 | `MEAS:TEMP?` | Approximate RP2040 internal temperature in degrees Celsius |
+| `MEAS:TEMP:EXT? <slot>` | PCT2075 temperature in degrees Celsius |
 | `MEAS:DIST? <slot>` | Distance in meters from a configured ranging sensor |
 | `MEAS:THERM:PIX? <slot>,<pixel>` | AMG8833 pixel 0-63 in degrees Celsius |
 | `MEAS:THERM:MIN? <slot>` | Minimum AMG8833 frame temperature |
@@ -344,6 +346,19 @@ Pixels are numbered 0-63 in the sensor's native order and temperatures are
 reported in degrees Celsius at the AMG8833's 0.25 degree resolution. The array
 query returns all 64 pixels as a comma-separated list.
 
+The NXP PCT2075 temperature sensor is supported at the Adafruit breakout's
+default address `0x37` and at its strap-selectable alternate addresses:
+
+```text
+SYST:I2C:DEV:ADD 3,"PCT2075",#H37
+MEAS:TEMP:EXT? 3
+```
+
+`DEV:ADD` wakes the sensor and verifies its PCT2075-specific sample-period
+register. Temperatures are reported in degrees Celsius at the sensor's
+0.125 degree resolution. `DEV:DEL` and `DEV:CLEAR` put the sensor into its
+low-power shutdown mode.
+
 ## Local HTML Apps
 
 Custom control pages do not have to be uploaded to the Pico. A standalone HTML
@@ -401,6 +416,7 @@ Examples:
 - `examples/can_ws.py`: Python WebSocket client
 - `examples/led_control.html`: standalone browser LED control page
 - `examples/scpi_amg8833.py`: PyVISA AMG8833 8x8 thermal frame reader
+- `examples/scpi_pct2075.py`: PyVISA PCT2075 temperature measurement
 - `examples/scpi_vl53l4cd.py`: PyVISA VL53L4CD distance measurement
 
 ## I2C WebSocket API

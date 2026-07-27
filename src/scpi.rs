@@ -234,7 +234,7 @@ impl ScpiInstrument {
 
     #[scpi(cmd = "SYSTem:I2C:DEVice:CATalog?")]
     async fn i2c_device_catalog(&mut self) -> Result<Characters<'static>, scpi::Error> {
-        Ok(Characters("AMG8833,VL53L4CD"))
+        Ok(Characters("AMG8833,PCT2075,VL53L4CD"))
     }
 
     #[scpi(cmd = "SYSTem:I2C:DEVice:ADD")]
@@ -323,6 +323,14 @@ impl ScpiInstrument {
         let raw = self.read_temperature_average().await?;
         let volts = raw as f32 * ADC_VREF / ADC_COUNTS;
         Ok(27.0 - (volts - 0.706) / 0.001721)
+    }
+
+    #[scpi(cmd = "MEASure:TEMPerature:EXTernal?")]
+    async fn measure_external_temperature(&mut self, slot: u8) -> Result<f32, scpi::Error> {
+        crate::i2c::measure_external_temperature(slot)
+            .await
+            .map(|eighths| f32::from(eighths) * 0.125)
+            .map_err(device_error)
     }
 
     #[scpi(cmd = "MEASure:DISTance?")]

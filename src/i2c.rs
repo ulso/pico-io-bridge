@@ -102,6 +102,9 @@ enum I2cCommand {
     MeasureThermalFrame {
         slot: u8,
     },
+    MeasureExternalTemperature {
+        slot: u8,
+    },
 }
 
 #[derive(Clone, Copy)]
@@ -135,6 +138,7 @@ enum I2cReply {
     DeviceCleared,
     Distance(u16),
     ThermalFrame([i16; crate::amg8833::PIXEL_COUNT]),
+    ExternalTemperature(i16),
     DeviceError(devices::DeviceError),
 }
 
@@ -287,6 +291,7 @@ fn write_reply(out: &mut String<512>, reply: I2cReply) {
         | I2cReply::DeviceCleared
         | I2cReply::Distance(_)
         | I2cReply::ThermalFrame(_)
+        | I2cReply::ExternalTemperature(_)
         | I2cReply::DeviceError(_) => {
             json::write_error(out, "internal_error", "Unexpected I2C reply")
         }
@@ -379,6 +384,14 @@ pub(crate) async fn measure_thermal_frame(
 ) -> Result<[i16; crate::amg8833::PIXEL_COUNT], devices::DeviceError> {
     match send_command(I2cCommand::MeasureThermalFrame { slot }).await {
         I2cReply::ThermalFrame(frame) => Ok(frame),
+        I2cReply::DeviceError(error) => Err(error),
+        _ => Err(devices::DeviceError::Bus),
+    }
+}
+
+pub(crate) async fn measure_external_temperature(slot: u8) -> Result<i16, devices::DeviceError> {
+    match send_command(I2cCommand::MeasureExternalTemperature { slot }).await {
+        I2cReply::ExternalTemperature(temperature) => Ok(temperature),
         I2cReply::DeviceError(error) => Err(error),
         _ => Err(devices::DeviceError::Bus),
     }
@@ -546,6 +559,16 @@ async fn execute_command<T: Instance>(
             state.transaction_count = state.transaction_count.wrapping_add(1);
             match devices::measure_thermal_frame(bus, devices, slot).await {
                 Ok(frame) => I2cReply::ThermalFrame(frame),
+                Err(error) => {
+                    state.error_count = state.error_count.wrapping_add(1);
+                    I2cReply::DeviceError(error)
+                }
+            }
+        }
+        I2cCommand::MeasureExternalTemperature { slot } => {
+            state.transaction_count = state.transaction_count.wrapping_add(1);
+            match devices::measure_external_temperature(bus, devices, slot).await {
+                Ok(temperature) => I2cReply::ExternalTemperature(temperature),
                 Err(error) => {
                     state.error_count = state.error_count.wrapping_add(1);
                     I2cReply::DeviceError(error)
