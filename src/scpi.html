@@ -93,6 +93,7 @@ td:first-child{width:38%;white-space:nowrap}td code{font-weight:650}
 <span class="spec">16 samples default</span>
 <span class="spec">VL53L4CD ranging</span>
 <span class="spec">AMG8833 8x8 thermal array</span>
+<span class="spec">BME688 environmental sensing</span>
 <span class="spec">LC709203F battery monitor</span>
 <span class="spec">PCT2075 external temperature</span>
 </div>
@@ -128,7 +129,10 @@ td:first-child{width:38%;white-space:nowrap}td code{font-weight:650}
 <tr><td><code>MEAS:ADC:RAW? &lt;0-3&gt;</code></td><td>Averaged 12-bit ADC code</td></tr>
 <tr><td><code>MEAS:VOLT:DC? &lt;0-3&gt;</code></td><td>Averaged nominal voltage in volts</td></tr>
 <tr><td><code>MEAS:TEMP?</code></td><td>Approximate internal temperature in degrees Celsius</td></tr>
-<tr><td><code>MEAS:TEMP:EXT? &lt;slot&gt;</code></td><td>PCT2075 temperature in degrees Celsius</td></tr>
+<tr><td><code>MEAS:TEMP:EXT? &lt;slot&gt;</code></td><td>PCT2075 or BME688 temperature in degrees Celsius</td></tr>
+<tr><td><code>MEAS:HUM? &lt;slot&gt;</code></td><td>BME688 relative humidity in percent</td></tr>
+<tr><td><code>MEAS:PRES? &lt;slot&gt;</code></td><td>BME688 pressure in pascals</td></tr>
+<tr><td><code>MEAS:GAS:RES? &lt;slot&gt;</code></td><td>BME688 gas resistance in ohms</td></tr>
 <tr><td><code>MEAS:BATT:VOLT? &lt;slot&gt;</code></td><td>LC709203F cell voltage in volts</td></tr>
 <tr><td><code>MEAS:BATT:SOC? &lt;slot&gt;</code></td><td>LC709203F state of charge in percent</td></tr>
 <tr><td><code>MEAS:DIST? &lt;slot&gt;</code></td><td>VL53L4CD distance in meters</td></tr>
@@ -136,6 +140,7 @@ td:first-child{width:38%;white-space:nowrap}td code{font-weight:650}
 <tr><td><code>MEAS:THERM:MIN? &lt;slot&gt;</code></td><td>Minimum AMG8833 frame temperature</td></tr>
 <tr><td><code>MEAS:THERM:MAX? &lt;slot&gt;</code></td><td>Maximum AMG8833 frame temperature</td></tr>
 <tr><td><code>MEAS:THERM:AVER? &lt;slot&gt;</code></td><td>Mean AMG8833 frame temperature</td></tr>
+<tr><td><code>READ:ENV? &lt;slot&gt;</code></td><td>BME688 temperature, humidity, pressure and gas resistance</td></tr>
 <tr><td><code>READ:THERM:ARR? &lt;slot&gt;</code></td><td>All 64 AMG8833 pixels in Celsius</td></tr>
 </tbody>
 </table>

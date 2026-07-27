@@ -25,6 +25,7 @@ compiling CAN support or configuring CAN/SPI pins.
 - Four-channel 12-bit ADC measurements on A0-A3, plus internal temperature
 - Explicit SCPI configuration and ranging support for VL53L4CD I2C sensors
 - AMG8833 8x8 thermal array measurements over SCPI
+- BME688 temperature, humidity, pressure, and gas resistance over SCPI
 - LC709203F battery voltage and state-of-charge measurements over SCPI
 - PCT2075 external temperature measurements over SCPI
 - Built-in browser CAN and I2C consoles
@@ -279,7 +280,10 @@ Initial command set:
 | `MEAS:ADC:RAW? <channel>` | Averaged 12-bit ADC code for channel 0-3 |
 | `MEAS:VOLT:DC? <channel>` | Averaged nominal voltage for channel 0-3 |
 | `MEAS:TEMP?` | Approximate RP2040 internal temperature in degrees Celsius |
-| `MEAS:TEMP:EXT? <slot>` | PCT2075 temperature in degrees Celsius |
+| `MEAS:TEMP:EXT? <slot>` | PCT2075 or BME688 temperature in degrees Celsius |
+| `MEAS:HUM? <slot>` | BME688 relative humidity in percent |
+| `MEAS:PRES? <slot>` | BME688 pressure in pascals |
+| `MEAS:GAS:RES? <slot>` | BME688 gas resistance in ohms |
 | `MEAS:BATT:VOLT? <slot>` | LC709203F cell voltage in volts |
 | `MEAS:BATT:SOC? <slot>` | LC709203F state of charge in percent |
 | `MEAS:DIST? <slot>` | Distance in meters from a configured ranging sensor |
@@ -287,6 +291,7 @@ Initial command set:
 | `MEAS:THERM:MIN? <slot>` | Minimum AMG8833 frame temperature |
 | `MEAS:THERM:MAX? <slot>` | Maximum AMG8833 frame temperature |
 | `MEAS:THERM:AVER? <slot>` | Mean AMG8833 frame temperature |
+| `READ:ENV? <slot>` | BME688 temperature, humidity, pressure, and gas resistance |
 | `READ:THERM:ARR? <slot>` | All 64 AMG8833 pixels in degrees Celsius |
 
 SCPI channel 0 maps to A0/GP26, through channel 3 at A3/GP29. Voltage conversion
@@ -363,6 +368,32 @@ MEAS:TEMP:EXT? 3
 register. Temperatures are reported in degrees Celsius at the sensor's
 0.125 degree resolution. `DEV:DEL` and `DEV:CLEAR` put the sensor into its
 low-power shutdown mode.
+
+The Bosch BME688 environmental sensor is supported at the Adafruit breakout's
+default address `0x77` and alternate address `0x76`:
+
+```text
+SYST:I2C:DEV:ADD 5,"BME688",#H77
+MEAS:TEMP:EXT? 5
+MEAS:HUM? 5
+MEAS:PRES? 5
+MEAS:GAS:RES? 5
+READ:ENV? 5
+```
+
+`DEV:ADD` verifies chip ID `0x61` and the BME688 high-gas variant, reads the
+factory calibration coefficients, and configures temperature, humidity,
+pressure, filtering, and a 300 C gas-heater target. It also performs and
+discards one heater warm-up cycle. Each query starts a fresh forced-mode
+measurement. `READ:ENV?` is more efficient when all four values are needed
+because it returns one coherent sample as
+`temperature_C,humidity_percent,pressure_Pa,gas_resistance_ohm`.
+
+Gas resistance is a raw compensated resistance, not an IAQ or gas
+classification result. The heater can also make the reported temperature
+slightly warmer than the surrounding air. Invalid measurements return SCPI NaN
+values and queue a hardware error for `SYST:ERR?`. `DEV:DEL` and `DEV:CLEAR`
+disable the gas heater and put the sensor into sleep mode.
 
 The onsemi LC709203F battery monitor is supported at its fixed address `0x0B`.
 The monitor must have a sufficiently charged single-cell LiPo or LiIon battery
@@ -442,6 +473,7 @@ Examples:
 - `examples/led_control.html`: standalone browser LED control page
 - `examples/scpi_common.py`: shared interactive board selector for PyVISA examples
 - `examples/scpi_amg8833.py`: PyVISA AMG8833 8x8 thermal frame reader
+- `examples/scpi_bme688.py`: PyVISA BME688 environmental measurement
 - `examples/scpi_lc709203f.py`: PyVISA LC709203F battery monitor
 - `examples/scpi_pct2075.py`: PyVISA PCT2075 temperature measurement
 - `examples/scpi_vl53l4cd.py`: PyVISA VL53L4CD distance measurement

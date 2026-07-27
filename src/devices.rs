@@ -8,6 +8,7 @@ const DISTANCE_MEASUREMENT_ATTEMPTS: usize = 3;
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DeviceKind {
     Amg8833,
+    Bme688,
     Lc709203f,
     Pct2075,
     Vl53l4cd,
@@ -17,6 +18,7 @@ impl DeviceKind {
     pub(crate) const fn name(self) -> &'static str {
         match self {
             Self::Amg8833 => "AMG8833",
+            Self::Bme688 => "BME688",
             Self::Lc709203f => "LC709203F",
             Self::Pct2075 => "PCT2075",
             Self::Vl53l4cd => "VL53L4CD",
@@ -26,6 +28,8 @@ impl DeviceKind {
     pub(crate) fn from_name(name: &str) -> Option<Self> {
         if name.eq_ignore_ascii_case("AMG8833") {
             Some(Self::Amg8833)
+        } else if name.eq_ignore_ascii_case("BME688") {
+            Some(Self::Bme688)
         } else if name.eq_ignore_ascii_case("LC709203F") {
             Some(Self::Lc709203f)
         } else if name.eq_ignore_ascii_case("PCT2075") {
@@ -54,6 +58,7 @@ pub(crate) struct DeviceList {
 pub(crate) struct DeviceRegistry {
     entries: [Option<DeviceConfig>; MAX_DEVICES],
     battery_capacity_mah: [Option<u16>; MAX_DEVICES],
+    bme688_calibration: [Option<crate::bme688::Calibration>; MAX_DEVICES],
 }
 
 impl DeviceRegistry {
@@ -61,6 +66,7 @@ impl DeviceRegistry {
         Self {
             entries: [None; MAX_DEVICES],
             battery_capacity_mah: [None; MAX_DEVICES],
+            bme688_calibration: [None; MAX_DEVICES],
         }
     }
 
@@ -117,6 +123,7 @@ impl DeviceRegistry {
         let index = slot_index(slot)?;
         let config = self.entries[index].take().ok_or(DeviceError::SlotEmpty)?;
         self.battery_capacity_mah[index] = None;
+        self.bme688_calibration[index] = None;
         Ok(config)
     }
 
@@ -130,6 +137,18 @@ impl DeviceRegistry {
             return Err(DeviceError::WrongDevice);
         }
         self.battery_capacity_mah[(slot - 1) as usize].ok_or(DeviceError::NotConfigured)
+    }
+
+    fn set_bme688_calibration(&mut self, slot: u8, calibration: crate::bme688::Calibration) {
+        self.bme688_calibration[(slot - 1) as usize] = Some(calibration);
+    }
+
+    fn bme688_calibration(&self, slot: u8) -> Result<crate::bme688::Calibration, DeviceError> {
+        let config = self.get(slot)?;
+        if config.kind != DeviceKind::Bme688 {
+            return Err(DeviceError::WrongDevice);
+        }
+        self.bme688_calibration[(slot - 1) as usize].ok_or(DeviceError::NotConfigured)
     }
 }
 
@@ -175,6 +194,14 @@ fn map_lc709203f_error<E>(error: crate::lc709203f::Error<E>) -> DeviceError {
     }
 }
 
+fn map_bme688_error<E>(error: crate::bme688::Error<E>) -> DeviceError {
+    match error {
+        crate::bme688::Error::I2c(_) => DeviceError::Bus,
+        crate::bme688::Error::InvalidIdentity => DeviceError::InvalidIdentity,
+        crate::bme688::Error::MeasurementInvalid => DeviceError::MeasurementInvalid,
+    }
+}
+
 pub(crate) async fn add<I2C>(
     bus: &mut I2C,
     registry: &mut DeviceRegistry,
@@ -192,6 +219,17 @@ where
             crate::amg8833::initialize(bus, address)
                 .await
                 .map_err(|_| DeviceError::Bus)?;
+        }
+        DeviceKind::Bme688 => {
+            if address != crate::bme688::PRIMARY_ADDRESS
+                && address != crate::bme688::SECONDARY_ADDRESS
+            {
+                return Err(DeviceError::InvalidAddress);
+            }
+            let calibration = crate::bme688::initialize(bus, address)
+                .await
+                .map_err(map_bme688_error)?;
+            registry.set_bme688_calibration(slot, calibration);
         }
         DeviceKind::Lc709203f => {
             if address != crate::lc709203f::ADDRESS {
@@ -232,6 +270,11 @@ where
             crate::amg8833::sleep(bus, config.address)
                 .await
                 .map_err(|_| DeviceError::Bus)?;
+        }
+        DeviceKind::Bme688 => {
+            crate::bme688::sleep(bus, config.address)
+                .await
+                .map_err(map_bme688_error)?;
         }
         DeviceKind::Lc709203f => {
             crate::lc709203f::sleep(bus, config.address)
@@ -278,7 +321,7 @@ where
     let config = registry.get(slot)?;
 
     match config.kind {
-        DeviceKind::Amg8833 | DeviceKind::Lc709203f | DeviceKind::Pct2075 => {
+        DeviceKind::Amg8833 | DeviceKind::Bme688 | DeviceKind::Lc709203f | DeviceKind::Pct2075 => {
             Err(DeviceError::WrongDevice)
         }
         DeviceKind::Vl53l4cd => {
@@ -311,7 +354,7 @@ where
         DeviceKind::Amg8833 => crate::amg8833::read_frame(bus, config.address)
             .await
             .map_err(|_| DeviceError::Bus),
-        DeviceKind::Lc709203f | DeviceKind::Pct2075 | DeviceKind::Vl53l4cd => {
+        DeviceKind::Bme688 | DeviceKind::Lc709203f | DeviceKind::Pct2075 | DeviceKind::Vl53l4cd => {
             Err(DeviceError::WrongDevice)
         }
     }
@@ -321,19 +364,38 @@ pub(crate) async fn measure_external_temperature<I2C>(
     bus: &mut I2C,
     registry: &DeviceRegistry,
     slot: u8,
-) -> Result<i16, DeviceError>
+) -> Result<f32, DeviceError>
 where
     I2C: I2c,
 {
     let config = registry.get(slot)?;
     match config.kind {
+        DeviceKind::Bme688 => measure_environment(bus, registry, slot)
+            .await
+            .map(|measurement| measurement.temperature_c),
         DeviceKind::Pct2075 => crate::pct2075::read_temperature_eighths(bus, config.address)
             .await
+            .map(|eighths| f32::from(eighths) * 0.125)
             .map_err(|_| DeviceError::Bus),
         DeviceKind::Amg8833 | DeviceKind::Lc709203f | DeviceKind::Vl53l4cd => {
             Err(DeviceError::WrongDevice)
         }
     }
+}
+
+pub(crate) async fn measure_environment<I2C>(
+    bus: &mut I2C,
+    registry: &DeviceRegistry,
+    slot: u8,
+) -> Result<crate::bme688::Measurement, DeviceError>
+where
+    I2C: I2c,
+{
+    let config = registry.get(slot)?;
+    let calibration = registry.bme688_calibration(slot)?;
+    crate::bme688::measure(bus, config.address, calibration)
+        .await
+        .map_err(map_bme688_error)
 }
 
 pub(crate) async fn set_battery_capacity<I2C>(

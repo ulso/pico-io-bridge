@@ -105,6 +105,9 @@ enum I2cCommand {
     MeasureExternalTemperature {
         slot: u8,
     },
+    MeasureEnvironment {
+        slot: u8,
+    },
     BatteryCapacitySet {
         slot: u8,
         capacity_mah: u16,
@@ -151,7 +154,8 @@ enum I2cReply {
     DeviceCleared,
     Distance(u16),
     ThermalFrame([i16; crate::amg8833::PIXEL_COUNT]),
-    ExternalTemperature(i16),
+    ExternalTemperature(f32),
+    Environment(crate::bme688::Measurement),
     BatteryCapacity(u16),
     BatteryVoltage(u16),
     BatterySoc(u16),
@@ -308,6 +312,7 @@ fn write_reply(out: &mut String<512>, reply: I2cReply) {
         | I2cReply::Distance(_)
         | I2cReply::ThermalFrame(_)
         | I2cReply::ExternalTemperature(_)
+        | I2cReply::Environment(_)
         | I2cReply::BatteryCapacity(_)
         | I2cReply::BatteryVoltage(_)
         | I2cReply::BatterySoc(_)
@@ -408,9 +413,19 @@ pub(crate) async fn measure_thermal_frame(
     }
 }
 
-pub(crate) async fn measure_external_temperature(slot: u8) -> Result<i16, devices::DeviceError> {
+pub(crate) async fn measure_external_temperature(slot: u8) -> Result<f32, devices::DeviceError> {
     match send_command(I2cCommand::MeasureExternalTemperature { slot }).await {
         I2cReply::ExternalTemperature(temperature) => Ok(temperature),
+        I2cReply::DeviceError(error) => Err(error),
+        _ => Err(devices::DeviceError::Bus),
+    }
+}
+
+pub(crate) async fn measure_environment(
+    slot: u8,
+) -> Result<crate::bme688::Measurement, devices::DeviceError> {
+    match send_command(I2cCommand::MeasureEnvironment { slot }).await {
+        I2cReply::Environment(measurement) => Ok(measurement),
         I2cReply::DeviceError(error) => Err(error),
         _ => Err(devices::DeviceError::Bus),
     }
@@ -623,6 +638,16 @@ async fn execute_command<T: Instance>(
             state.transaction_count = state.transaction_count.wrapping_add(1);
             match devices::measure_external_temperature(bus, devices, slot).await {
                 Ok(temperature) => I2cReply::ExternalTemperature(temperature),
+                Err(error) => {
+                    state.error_count = state.error_count.wrapping_add(1);
+                    I2cReply::DeviceError(error)
+                }
+            }
+        }
+        I2cCommand::MeasureEnvironment { slot } => {
+            state.transaction_count = state.transaction_count.wrapping_add(1);
+            match devices::measure_environment(bus, devices, slot).await {
+                Ok(measurement) => I2cReply::Environment(measurement),
                 Err(error) => {
                     state.error_count = state.error_count.wrapping_add(1);
                     I2cReply::DeviceError(error)

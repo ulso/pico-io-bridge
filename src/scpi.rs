@@ -24,6 +24,7 @@ const SCPI_BUFFER_SIZE: usize = 1024;
 const SOCKET_BUFFER_SIZE: usize = 1024;
 
 struct DeviceListResponse(devices::DeviceList);
+struct EnvironmentResponse(crate::bme688::Measurement);
 struct ThermalFrameResponse([i16; crate::amg8833::PIXEL_COUNT]);
 
 impl scpi::Response for DeviceListResponse {
@@ -58,6 +59,18 @@ impl scpi::Response for ThermalFrameResponse {
             (f32::from(*quarters) * 0.25).write_response(output)?;
         }
         Ok(())
+    }
+}
+
+impl scpi::Response for EnvironmentResponse {
+    fn write_response(&self, output: &mut impl scpi::Write) -> Result<(), scpi::Error> {
+        self.0.temperature_c.write_response(output)?;
+        output.write_char(',')?;
+        self.0.humidity_percent.write_response(output)?;
+        output.write_char(',')?;
+        self.0.pressure_pa.write_response(output)?;
+        output.write_char(',')?;
+        self.0.gas_resistance_ohm.write_response(output)
     }
 }
 
@@ -173,6 +186,29 @@ impl ScpiInstrument {
 
         Ok(((sum + average_count / 2) / average_count) as u16)
     }
+
+    async fn read_environment(
+        &mut self,
+        slot: u8,
+    ) -> Result<crate::bme688::Measurement, scpi::Error> {
+        match crate::i2c::measure_environment(slot).await {
+            Ok(measurement) => Ok(measurement),
+            Err(
+                error @ (devices::DeviceError::MeasurementInvalid
+                | devices::DeviceError::Timeout
+                | devices::DeviceError::Bus),
+            ) => {
+                self.errors.push_error(device_error(error));
+                Ok(crate::bme688::Measurement {
+                    temperature_c: f32::NAN,
+                    humidity_percent: f32::NAN,
+                    pressure_pa: f32::NAN,
+                    gas_resistance_ohm: f32::NAN,
+                })
+            }
+            Err(error) => Err(device_error(error)),
+        }
+    }
 }
 
 impl ErrorCommands for ScpiInstrument {
@@ -235,7 +271,7 @@ impl ScpiInstrument {
 
     #[scpi(cmd = "SYSTem:I2C:DEVice:CATalog?")]
     async fn i2c_device_catalog(&mut self) -> Result<Characters<'static>, scpi::Error> {
-        Ok(Characters("AMG8833,LC709203F,PCT2075,VL53L4CD"))
+        Ok(Characters("AMG8833,BME688,LC709203F,PCT2075,VL53L4CD"))
     }
 
     #[scpi(cmd = "SYSTem:I2C:DEVice:ADD")]
@@ -346,10 +382,45 @@ impl ScpiInstrument {
 
     #[scpi(cmd = "MEASure:TEMPerature:EXTernal?")]
     async fn measure_external_temperature(&mut self, slot: u8) -> Result<f32, scpi::Error> {
-        crate::i2c::measure_external_temperature(slot)
+        let config = crate::i2c::device_get(slot).await.map_err(device_error)?;
+        if config.kind == devices::DeviceKind::Bme688 {
+            self.read_environment(slot)
+                .await
+                .map(|measurement| measurement.temperature_c)
+        } else {
+            crate::i2c::measure_external_temperature(slot)
+                .await
+                .map_err(device_error)
+        }
+    }
+
+    #[scpi(cmd = "MEASure:HUMidity?")]
+    async fn measure_humidity(&mut self, slot: u8) -> Result<f32, scpi::Error> {
+        self.read_environment(slot)
             .await
-            .map(|eighths| f32::from(eighths) * 0.125)
-            .map_err(device_error)
+            .map(|measurement| measurement.humidity_percent)
+    }
+
+    #[scpi(cmd = "MEASure:PRESsure?")]
+    async fn measure_pressure(&mut self, slot: u8) -> Result<f32, scpi::Error> {
+        self.read_environment(slot)
+            .await
+            .map(|measurement| measurement.pressure_pa)
+    }
+
+    #[scpi(cmd = "MEASure:GAS:RESistance?")]
+    async fn measure_gas_resistance(&mut self, slot: u8) -> Result<f32, scpi::Error> {
+        self.read_environment(slot)
+            .await
+            .map(|measurement| measurement.gas_resistance_ohm)
+    }
+
+    #[scpi(cmd = "READ:ENVironment?")]
+    async fn read_environment_values(
+        &mut self,
+        slot: u8,
+    ) -> Result<EnvironmentResponse, scpi::Error> {
+        self.read_environment(slot).await.map(EnvironmentResponse)
     }
 
     #[scpi(cmd = "MEASure:BATTery:VOLTage?")]
