@@ -316,6 +316,8 @@ only addresses, not reliable model identities. Eight logical slots are
 available. The configuration is kept in RAM, survives `*RST`, and is cleared
 when the firmware restarts.
 
+#### VL53L4CD
+
 The first supported device is the ST VL53L4CD time-of-flight distance sensor.
 For a sensor at its default 7-bit I2C address:
 
@@ -345,6 +347,8 @@ Only one configured device may use a given address. Supporting multiple
 VL53L4CD sensors at reassigned addresses will additionally require control of
 their XSHUT pins and is outside the initial implementation.
 
+#### AMG8833
+
 The Panasonic AMG8833 thermal array is supported at its default address
 `0x69` and alternate address `0x68`:
 
@@ -361,6 +365,8 @@ Pixels are numbered 0-63 in the sensor's native order and temperatures are
 reported in degrees Celsius at the AMG8833's 0.25 degree resolution. The array
 query returns all 64 pixels as a comma-separated list.
 
+#### PCT2075
+
 The NXP PCT2075 temperature sensor is supported at the Adafruit breakout's
 default address `0x37` and at its strap-selectable alternate addresses:
 
@@ -373,6 +379,8 @@ MEAS:TEMP:EXT? 3
 register. Temperatures are reported in degrees Celsius at the sensor's
 0.125 degree resolution. `DEV:DEL` and `DEV:CLEAR` put the sensor into its
 low-power shutdown mode.
+
+#### BME688
 
 The Bosch BME688 environmental sensor is supported at the Adafruit breakout's
 default address `0x77` and alternate address `0x76`:
@@ -400,6 +408,8 @@ slightly warmer than the surrounding air. Invalid measurements return SCPI NaN
 values and queue a hardware error for `SYST:ERR?`. `DEV:DEL` and `DEV:CLEAR`
 disable the gas heater and put the sensor into sleep mode.
 
+#### LC709203F
+
 The onsemi LC709203F battery monitor is supported at its fixed address `0x0B`.
 The monitor must have a sufficiently charged single-cell LiPo or LiIon battery
 connected because the IC is powered by the battery rather than STEMMA QT VIN:
@@ -419,6 +429,8 @@ profile, and restarts the state-of-charge calculation. Voltage can be measured
 before capacity configuration; SOC returns a settings-conflict error until a
 capacity has been selected. Every register transaction uses the LC709203F CRC-8.
 `DEV:DEL` and `DEV:CLEAR` put the monitor into sleep mode.
+
+#### Adafruit seesaw Rotary Encoder
 
 The Adafruit I2C QT seesaw Rotary Encoder is supported at its default address
 `0x36` and strap-selectable alternate addresses through `0x3D`:
