@@ -24,6 +24,7 @@ const SCPI_BUFFER_SIZE: usize = 1024;
 const SOCKET_BUFFER_SIZE: usize = 1024;
 
 struct DeviceListResponse(devices::DeviceList);
+struct ThermalFrameResponse([i16; crate::amg8833::PIXEL_COUNT]);
 
 impl scpi::Response for DeviceListResponse {
     fn write_response(&self, output: &mut impl scpi::Write) -> Result<(), scpi::Error> {
@@ -48,6 +49,18 @@ impl scpi::Response for DeviceListResponse {
     }
 }
 
+impl scpi::Response for ThermalFrameResponse {
+    fn write_response(&self, output: &mut impl scpi::Write) -> Result<(), scpi::Error> {
+        for (index, quarters) in self.0.iter().enumerate() {
+            if index > 0 {
+                output.write_char(',')?;
+            }
+            (f32::from(*quarters) * 0.25).write_response(output)?;
+        }
+        Ok(())
+    }
+}
+
 fn device_error(error: devices::DeviceError) -> scpi::Error {
     match error {
         devices::DeviceError::InvalidSlot | devices::DeviceError::InvalidAddress => {
@@ -56,7 +69,8 @@ fn device_error(error: devices::DeviceError) -> scpi::Error {
         devices::DeviceError::SlotEmpty
         | devices::DeviceError::SlotOccupied
         | devices::DeviceError::AddressInUse
-        | devices::DeviceError::UnsupportedModel => scpi::Error::IllegalParameterValue,
+        | devices::DeviceError::UnsupportedModel
+        | devices::DeviceError::WrongDevice => scpi::Error::IllegalParameterValue,
         devices::DeviceError::InvalidIdentity
         | devices::DeviceError::MeasurementInvalid
         | devices::DeviceError::Timeout
@@ -220,7 +234,7 @@ impl ScpiInstrument {
 
     #[scpi(cmd = "SYSTem:I2C:DEVice:CATalog?")]
     async fn i2c_device_catalog(&mut self) -> Result<Characters<'static>, scpi::Error> {
-        Ok(Characters("VL53L4CD"))
+        Ok(Characters("AMG8833,VL53L4CD"))
     }
 
     #[scpi(cmd = "SYSTem:I2C:DEVice:ADD")]
@@ -325,6 +339,52 @@ impl ScpiInstrument {
             }
             Err(error) => Err(device_error(error)),
         }
+    }
+
+    #[scpi(cmd = "MEASure:THERMal:PIXel?")]
+    async fn measure_thermal_pixel(&mut self, slot: u8, pixel: u8) -> Result<f32, scpi::Error> {
+        let frame = crate::i2c::measure_thermal_frame(slot)
+            .await
+            .map_err(device_error)?;
+        let quarters = frame
+            .get(usize::from(pixel))
+            .ok_or(scpi::Error::DataOutOfRange)?;
+        Ok(f32::from(*quarters) * 0.25)
+    }
+
+    #[scpi(cmd = "MEASure:THERMal:MINimum?")]
+    async fn measure_thermal_minimum(&mut self, slot: u8) -> Result<f32, scpi::Error> {
+        let frame = crate::i2c::measure_thermal_frame(slot)
+            .await
+            .map_err(device_error)?;
+        let quarters = frame.iter().min().ok_or(scpi::Error::HardwareError)?;
+        Ok(f32::from(*quarters) * 0.25)
+    }
+
+    #[scpi(cmd = "MEASure:THERMal:MAXimum?")]
+    async fn measure_thermal_maximum(&mut self, slot: u8) -> Result<f32, scpi::Error> {
+        let frame = crate::i2c::measure_thermal_frame(slot)
+            .await
+            .map_err(device_error)?;
+        let quarters = frame.iter().max().ok_or(scpi::Error::HardwareError)?;
+        Ok(f32::from(*quarters) * 0.25)
+    }
+
+    #[scpi(cmd = "MEASure:THERMal:AVERage?")]
+    async fn measure_thermal_average(&mut self, slot: u8) -> Result<f32, scpi::Error> {
+        let frame = crate::i2c::measure_thermal_frame(slot)
+            .await
+            .map_err(device_error)?;
+        let sum: i32 = frame.iter().map(|value| i32::from(*value)).sum();
+        Ok(sum as f32 * 0.25 / crate::amg8833::PIXEL_COUNT as f32)
+    }
+
+    #[scpi(cmd = "READ:THERMal:ARRay?")]
+    async fn read_thermal_array(&mut self, slot: u8) -> Result<ThermalFrameResponse, scpi::Error> {
+        crate::i2c::measure_thermal_frame(slot)
+            .await
+            .map(ThermalFrameResponse)
+            .map_err(device_error)
     }
 }
 

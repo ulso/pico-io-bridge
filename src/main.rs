@@ -11,6 +11,8 @@ compile_error!("the can feature requires one controller feature: mcp2515 or mcp2
 #[cfg(all(feature = "mcp2515", feature = "mcp25625"))]
 compile_error!("mcp2515 and mcp25625 are mutually exclusive");
 
+#[cfg(feature = "i2c")]
+mod amg8833;
 mod board;
 #[cfg(feature = "can")]
 mod can;

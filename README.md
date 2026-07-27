@@ -24,6 +24,7 @@ compiling CAN support or configuring CAN/SPI pins.
 - SCPI-RAW instrument server on TCP port 5025 using `microscpi`
 - Four-channel 12-bit ADC measurements on A0-A3, plus internal temperature
 - Explicit SCPI configuration and ranging support for VL53L4CD I2C sensors
+- AMG8833 8x8 thermal array measurements over SCPI
 - Built-in browser CAN and I2C consoles
 - WebSocket CAN API at `/can`
 - WebSocket I2C API at `/i2c`
@@ -275,6 +276,11 @@ Initial command set:
 | `MEAS:VOLT:DC? <channel>` | Averaged nominal voltage for channel 0-3 |
 | `MEAS:TEMP?` | Approximate RP2040 internal temperature in degrees Celsius |
 | `MEAS:DIST? <slot>` | Distance in meters from a configured ranging sensor |
+| `MEAS:THERM:PIX? <slot>,<pixel>` | AMG8833 pixel 0-63 in degrees Celsius |
+| `MEAS:THERM:MIN? <slot>` | Minimum AMG8833 frame temperature |
+| `MEAS:THERM:MAX? <slot>` | Maximum AMG8833 frame temperature |
+| `MEAS:THERM:AVER? <slot>` | Mean AMG8833 frame temperature |
+| `READ:THERM:ARR? <slot>` | All 64 AMG8833 pixels in degrees Celsius |
 
 SCPI channel 0 maps to A0/GP26, through channel 3 at A3/GP29. Voltage conversion
 assumes a nominal 3.3 V ADC reference and is not calibrated. Keep analog inputs
@@ -321,6 +327,22 @@ inspected with `SYST:ERR?`.
 Only one configured device may use a given address. Supporting multiple
 VL53L4CD sensors at reassigned addresses will additionally require control of
 their XSHUT pins and is outside the initial implementation.
+
+The Panasonic AMG8833 thermal array is supported at its default address
+`0x69` and alternate address `0x68`:
+
+```text
+SYST:I2C:DEV:ADD 2,"AMG8833",#H69
+MEAS:THERM:PIX? 2,0
+MEAS:THERM:MAX? 2
+READ:THERM:ARR? 2
+```
+
+`DEV:ADD` wakes and resets the sensor, selects its 10 frames-per-second mode,
+and clears status flags. Each measurement command reads a fresh 8x8 frame.
+Pixels are numbered 0-63 in the sensor's native order and temperatures are
+reported in degrees Celsius at the AMG8833's 0.25 degree resolution. The array
+query returns all 64 pixels as a comma-separated list.
 
 ## Local HTML Apps
 
@@ -378,6 +400,8 @@ Examples:
 
 - `examples/can_ws.py`: Python WebSocket client
 - `examples/led_control.html`: standalone browser LED control page
+- `examples/scpi_amg8833.py`: PyVISA AMG8833 8x8 thermal frame reader
+- `examples/scpi_vl53l4cd.py`: PyVISA VL53L4CD distance measurement
 
 ## I2C WebSocket API
 

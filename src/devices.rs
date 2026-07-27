@@ -7,18 +7,22 @@ const DISTANCE_MEASUREMENT_ATTEMPTS: usize = 3;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DeviceKind {
+    Amg8833,
     Vl53l4cd,
 }
 
 impl DeviceKind {
     pub(crate) const fn name(self) -> &'static str {
         match self {
+            Self::Amg8833 => "AMG8833",
             Self::Vl53l4cd => "VL53L4CD",
         }
     }
 
     pub(crate) fn from_name(name: &str) -> Option<Self> {
-        if name.eq_ignore_ascii_case("VL53L4CD") {
+        if name.eq_ignore_ascii_case("AMG8833") {
+            Some(Self::Amg8833)
+        } else if name.eq_ignore_ascii_case("VL53L4CD") {
             Some(Self::Vl53l4cd)
         } else {
             None
@@ -113,6 +117,7 @@ pub(crate) enum DeviceError {
     InvalidAddress,
     AddressInUse,
     UnsupportedModel,
+    WrongDevice,
     InvalidIdentity,
     MeasurementInvalid,
     Timeout,
@@ -149,6 +154,11 @@ where
     let config = registry.validate_add(slot, kind, address)?;
 
     match kind {
+        DeviceKind::Amg8833 => {
+            crate::amg8833::initialize(bus, address)
+                .await
+                .map_err(|_| DeviceError::Bus)?;
+        }
         DeviceKind::Vl53l4cd => {
             let mut sensor = Vl53l4cd::with_addr(&mut *bus, address, Delay, Poll);
             sensor.init().await.map_err(map_vl53l4cd_error)?;
@@ -171,6 +181,11 @@ where
     let config = registry.get(slot)?;
 
     match config.kind {
+        DeviceKind::Amg8833 => {
+            crate::amg8833::sleep(bus, config.address)
+                .await
+                .map_err(|_| DeviceError::Bus)?;
+        }
         DeviceKind::Vl53l4cd => {
             let mut sensor = Vl53l4cd::with_addr(&mut *bus, config.address, Delay, Poll);
             sensor.stop_ranging().await.map_err(map_vl53l4cd_error)?;
@@ -206,6 +221,7 @@ where
     let config = registry.get(slot)?;
 
     match config.kind {
+        DeviceKind::Amg8833 => Err(DeviceError::WrongDevice),
         DeviceKind::Vl53l4cd => {
             let mut sensor = Vl53l4cd::with_addr(&mut *bus, config.address, Delay, Poll);
             if sensor.has_measurement().await.map_err(map_vl53l4cd_error)? {
@@ -220,5 +236,22 @@ where
             }
             Err(DeviceError::MeasurementInvalid)
         }
+    }
+}
+
+pub(crate) async fn measure_thermal_frame<I2C>(
+    bus: &mut I2C,
+    registry: &DeviceRegistry,
+    slot: u8,
+) -> Result<[i16; crate::amg8833::PIXEL_COUNT], DeviceError>
+where
+    I2C: I2c,
+{
+    let config = registry.get(slot)?;
+    match config.kind {
+        DeviceKind::Amg8833 => crate::amg8833::read_frame(bus, config.address)
+            .await
+            .map_err(|_| DeviceError::Bus),
+        DeviceKind::Vl53l4cd => Err(DeviceError::WrongDevice),
     }
 }
