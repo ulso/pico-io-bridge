@@ -28,6 +28,7 @@ compiling CAN support or configuring CAN/SPI pins.
 - BME688 temperature, humidity, pressure, and gas resistance over SCPI
 - LC709203F battery voltage and state-of-charge measurements over SCPI
 - PCT2075 external temperature measurements over SCPI
+- Adafruit seesaw rotary encoder position, delta, and push-button state over SCPI
 - Built-in browser CAN and I2C consoles
 - WebSocket CAN API at `/can`
 - WebSocket I2C API at `/i2c`
@@ -277,6 +278,7 @@ Initial command set:
 | `SENS:AVER:COUN?` | Read the global ADC averaging count |
 | `SENS:BATT:CAP <slot>,<mAh>` | Configure LC709203F battery capacity |
 | `SENS:BATT:CAP? <slot>` | Read configured battery capacity in mAh |
+| `SENS:ENC:POS <slot>,<position>` | Set a seesaw rotary encoder position |
 | `MEAS:ADC:RAW? <channel>` | Averaged 12-bit ADC code for channel 0-3 |
 | `MEAS:VOLT:DC? <channel>` | Averaged nominal voltage for channel 0-3 |
 | `MEAS:TEMP?` | Approximate RP2040 internal temperature in degrees Celsius |
@@ -286,6 +288,9 @@ Initial command set:
 | `MEAS:GAS:RES? <slot>` | BME688 gas resistance in ohms |
 | `MEAS:BATT:VOLT? <slot>` | LC709203F cell voltage in volts |
 | `MEAS:BATT:SOC? <slot>` | LC709203F state of charge in percent |
+| `MEAS:ENC:POS? <slot>` | Seesaw rotary encoder position |
+| `MEAS:ENC:DELTA? <slot>` | Seesaw rotary encoder change since the previous encoder read |
+| `MEAS:ENC:BUTTON? <slot>` | Seesaw push button state, `1` means pressed |
 | `MEAS:DIST? <slot>` | Distance in meters from a configured ranging sensor |
 | `MEAS:THERM:PIX? <slot>,<pixel>` | AMG8833 pixel 0-63 in degrees Celsius |
 | `MEAS:THERM:MIN? <slot>` | Minimum AMG8833 frame temperature |
@@ -415,6 +420,26 @@ before capacity configuration; SOC returns a settings-conflict error until a
 capacity has been selected. Every register transaction uses the LC709203F CRC-8.
 `DEV:DEL` and `DEV:CLEAR` put the monitor into sleep mode.
 
+The Adafruit I2C QT seesaw Rotary Encoder is supported at its default address
+`0x36` and strap-selectable alternate addresses through `0x3D`:
+
+```text
+SYST:I2C:DEV:ADD 6,"SEESAW_ENCODER",#H36
+MEAS:ENC:POS? 6
+MEAS:ENC:DELTA? 6
+MEAS:ENC:BUTTON? 6
+SENS:ENC:POS 6,0
+```
+
+`DEV:ADD` resets the seesaw coprocessor, verifies that its encoder module is
+present, configures the breakout's GPIO 24 push button with a pull-up, and
+clears any initial encoder delta. Position and delta are signed 32-bit counts.
+The button query returns `1` while pressed and `0` while released.
+Reading either position or delta clears the seesaw firmware's accumulated
+delta. Query delta before position when both values are needed in the same
+polling cycle. `SENS:ENC:POS` can set or zero the absolute position. `DEV:DEL`
+and `DEV:CLEAR` disable the button pull-up.
+
 ## Local HTML Apps
 
 Custom control pages do not have to be uploaded to the Pico. A standalone HTML
@@ -476,6 +501,7 @@ Examples:
 - `examples/scpi_bme688.py`: PyVISA BME688 environmental measurement
 - `examples/scpi_lc709203f.py`: PyVISA LC709203F battery monitor
 - `examples/scpi_pct2075.py`: PyVISA PCT2075 temperature measurement
+- `examples/scpi_seesaw_encoder.py`: PyVISA seesaw rotary encoder and button reader
 - `examples/scpi_vl53l4cd.py`: PyVISA VL53L4CD distance measurement
 
 ## I2C WebSocket API

@@ -108,6 +108,19 @@ enum I2cCommand {
     MeasureEnvironment {
         slot: u8,
     },
+    EncoderPositionGet {
+        slot: u8,
+    },
+    EncoderPositionSet {
+        slot: u8,
+        position: i32,
+    },
+    EncoderDelta {
+        slot: u8,
+    },
+    EncoderButton {
+        slot: u8,
+    },
     BatteryCapacitySet {
         slot: u8,
         capacity_mah: u16,
@@ -156,6 +169,9 @@ enum I2cReply {
     ThermalFrame([i16; crate::amg8833::PIXEL_COUNT]),
     ExternalTemperature(f32),
     Environment(crate::bme688::Measurement),
+    EncoderPosition(i32),
+    EncoderDelta(i32),
+    EncoderButton(bool),
     BatteryCapacity(u16),
     BatteryVoltage(u16),
     BatterySoc(u16),
@@ -313,6 +329,9 @@ fn write_reply(out: &mut String<512>, reply: I2cReply) {
         | I2cReply::ThermalFrame(_)
         | I2cReply::ExternalTemperature(_)
         | I2cReply::Environment(_)
+        | I2cReply::EncoderPosition(_)
+        | I2cReply::EncoderDelta(_)
+        | I2cReply::EncoderButton(_)
         | I2cReply::BatteryCapacity(_)
         | I2cReply::BatteryVoltage(_)
         | I2cReply::BatterySoc(_)
@@ -426,6 +445,41 @@ pub(crate) async fn measure_environment(
 ) -> Result<crate::bme688::Measurement, devices::DeviceError> {
     match send_command(I2cCommand::MeasureEnvironment { slot }).await {
         I2cReply::Environment(measurement) => Ok(measurement),
+        I2cReply::DeviceError(error) => Err(error),
+        _ => Err(devices::DeviceError::Bus),
+    }
+}
+
+pub(crate) async fn encoder_position(slot: u8) -> Result<i32, devices::DeviceError> {
+    match send_command(I2cCommand::EncoderPositionGet { slot }).await {
+        I2cReply::EncoderPosition(position) => Ok(position),
+        I2cReply::DeviceError(error) => Err(error),
+        _ => Err(devices::DeviceError::Bus),
+    }
+}
+
+pub(crate) async fn set_encoder_position(
+    slot: u8,
+    position: i32,
+) -> Result<(), devices::DeviceError> {
+    match send_command(I2cCommand::EncoderPositionSet { slot, position }).await {
+        I2cReply::EncoderPosition(_) => Ok(()),
+        I2cReply::DeviceError(error) => Err(error),
+        _ => Err(devices::DeviceError::Bus),
+    }
+}
+
+pub(crate) async fn encoder_delta(slot: u8) -> Result<i32, devices::DeviceError> {
+    match send_command(I2cCommand::EncoderDelta { slot }).await {
+        I2cReply::EncoderDelta(delta) => Ok(delta),
+        I2cReply::DeviceError(error) => Err(error),
+        _ => Err(devices::DeviceError::Bus),
+    }
+}
+
+pub(crate) async fn encoder_button(slot: u8) -> Result<bool, devices::DeviceError> {
+    match send_command(I2cCommand::EncoderButton { slot }).await {
+        I2cReply::EncoderButton(pressed) => Ok(pressed),
         I2cReply::DeviceError(error) => Err(error),
         _ => Err(devices::DeviceError::Bus),
     }
@@ -648,6 +702,46 @@ async fn execute_command<T: Instance>(
             state.transaction_count = state.transaction_count.wrapping_add(1);
             match devices::measure_environment(bus, devices, slot).await {
                 Ok(measurement) => I2cReply::Environment(measurement),
+                Err(error) => {
+                    state.error_count = state.error_count.wrapping_add(1);
+                    I2cReply::DeviceError(error)
+                }
+            }
+        }
+        I2cCommand::EncoderPositionGet { slot } => {
+            state.transaction_count = state.transaction_count.wrapping_add(1);
+            match devices::encoder_position(bus, devices, slot).await {
+                Ok(position) => I2cReply::EncoderPosition(position),
+                Err(error) => {
+                    state.error_count = state.error_count.wrapping_add(1);
+                    I2cReply::DeviceError(error)
+                }
+            }
+        }
+        I2cCommand::EncoderPositionSet { slot, position } => {
+            state.transaction_count = state.transaction_count.wrapping_add(1);
+            match devices::set_encoder_position(bus, devices, slot, position).await {
+                Ok(()) => I2cReply::EncoderPosition(position),
+                Err(error) => {
+                    state.error_count = state.error_count.wrapping_add(1);
+                    I2cReply::DeviceError(error)
+                }
+            }
+        }
+        I2cCommand::EncoderDelta { slot } => {
+            state.transaction_count = state.transaction_count.wrapping_add(1);
+            match devices::encoder_delta(bus, devices, slot).await {
+                Ok(delta) => I2cReply::EncoderDelta(delta),
+                Err(error) => {
+                    state.error_count = state.error_count.wrapping_add(1);
+                    I2cReply::DeviceError(error)
+                }
+            }
+        }
+        I2cCommand::EncoderButton { slot } => {
+            state.transaction_count = state.transaction_count.wrapping_add(1);
+            match devices::encoder_button(bus, devices, slot).await {
+                Ok(pressed) => I2cReply::EncoderButton(pressed),
                 Err(error) => {
                     state.error_count = state.error_count.wrapping_add(1);
                     I2cReply::DeviceError(error)

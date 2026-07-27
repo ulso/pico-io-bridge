@@ -271,7 +271,9 @@ impl ScpiInstrument {
 
     #[scpi(cmd = "SYSTem:I2C:DEVice:CATalog?")]
     async fn i2c_device_catalog(&mut self) -> Result<Characters<'static>, scpi::Error> {
-        Ok(Characters("AMG8833,BME688,LC709203F,PCT2075,VL53L4CD"))
+        Ok(Characters(
+            "AMG8833,BME688,LC709203F,PCT2075,SEESAW_ENCODER,VL53L4CD",
+        ))
     }
 
     #[scpi(cmd = "SYSTem:I2C:DEVice:ADD")]
@@ -362,6 +364,13 @@ impl ScpiInstrument {
             .map_err(device_error)
     }
 
+    #[scpi(cmd = "SENSe:ENCoder:POSition")]
+    async fn set_encoder_position(&mut self, slot: u8, position: i32) -> Result<(), scpi::Error> {
+        crate::i2c::set_encoder_position(slot, position)
+            .await
+            .map_err(device_error)
+    }
+
     #[scpi(cmd = "MEASure:ADC:RAW?")]
     async fn measure_adc_raw(&mut self, channel: u8) -> Result<u16, scpi::Error> {
         self.read_average(channel).await
@@ -421,6 +430,26 @@ impl ScpiInstrument {
         slot: u8,
     ) -> Result<EnvironmentResponse, scpi::Error> {
         self.read_environment(slot).await.map(EnvironmentResponse)
+    }
+
+    #[scpi(cmd = "MEASure:ENCoder:POSition?")]
+    async fn measure_encoder_position(&mut self, slot: u8) -> Result<i32, scpi::Error> {
+        crate::i2c::encoder_position(slot)
+            .await
+            .map_err(device_error)
+    }
+
+    #[scpi(cmd = "MEASure:ENCoder:DELTa?")]
+    async fn measure_encoder_delta(&mut self, slot: u8) -> Result<i32, scpi::Error> {
+        crate::i2c::encoder_delta(slot).await.map_err(device_error)
+    }
+
+    #[scpi(cmd = "MEASure:ENCoder:BUTTon?")]
+    async fn measure_encoder_button(&mut self, slot: u8) -> Result<u8, scpi::Error> {
+        crate::i2c::encoder_button(slot)
+            .await
+            .map(u8::from)
+            .map_err(device_error)
     }
 
     #[scpi(cmd = "MEASure:BATTery:VOLTage?")]

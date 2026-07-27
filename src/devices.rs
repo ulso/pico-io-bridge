@@ -11,6 +11,7 @@ pub(crate) enum DeviceKind {
     Bme688,
     Lc709203f,
     Pct2075,
+    SeesawEncoder,
     Vl53l4cd,
 }
 
@@ -21,6 +22,7 @@ impl DeviceKind {
             Self::Bme688 => "BME688",
             Self::Lc709203f => "LC709203F",
             Self::Pct2075 => "PCT2075",
+            Self::SeesawEncoder => "SEESAW_ENCODER",
             Self::Vl53l4cd => "VL53L4CD",
         }
     }
@@ -34,6 +36,8 @@ impl DeviceKind {
             Some(Self::Lc709203f)
         } else if name.eq_ignore_ascii_case("PCT2075") {
             Some(Self::Pct2075)
+        } else if name.eq_ignore_ascii_case("SEESAW_ENCODER") {
+            Some(Self::SeesawEncoder)
         } else if name.eq_ignore_ascii_case("VL53L4CD") {
             Some(Self::Vl53l4cd)
         } else {
@@ -202,6 +206,13 @@ fn map_bme688_error<E>(error: crate::bme688::Error<E>) -> DeviceError {
     }
 }
 
+fn map_seesaw_encoder_error<E>(error: crate::seesaw_encoder::Error<E>) -> DeviceError {
+    match error {
+        crate::seesaw_encoder::Error::I2c(_) => DeviceError::Bus,
+        crate::seesaw_encoder::Error::InvalidIdentity => DeviceError::InvalidIdentity,
+    }
+}
+
 pub(crate) async fn add<I2C>(
     bus: &mut I2C,
     registry: &mut DeviceRegistry,
@@ -243,6 +254,16 @@ where
             crate::pct2075::initialize(bus, address)
                 .await
                 .map_err(|_| DeviceError::Bus)?;
+        }
+        DeviceKind::SeesawEncoder => {
+            if !(crate::seesaw_encoder::FIRST_ADDRESS..=crate::seesaw_encoder::LAST_ADDRESS)
+                .contains(&address)
+            {
+                return Err(DeviceError::InvalidAddress);
+            }
+            crate::seesaw_encoder::initialize(bus, address)
+                .await
+                .map_err(map_seesaw_encoder_error)?;
         }
         DeviceKind::Vl53l4cd => {
             let mut sensor = Vl53l4cd::with_addr(&mut *bus, address, Delay, Poll);
@@ -286,6 +307,11 @@ where
                 .await
                 .map_err(|_| DeviceError::Bus)?;
         }
+        DeviceKind::SeesawEncoder => {
+            crate::seesaw_encoder::deinitialize(bus, config.address)
+                .await
+                .map_err(map_seesaw_encoder_error)?;
+        }
         DeviceKind::Vl53l4cd => {
             let mut sensor = Vl53l4cd::with_addr(&mut *bus, config.address, Delay, Poll);
             sensor.stop_ranging().await.map_err(map_vl53l4cd_error)?;
@@ -321,9 +347,11 @@ where
     let config = registry.get(slot)?;
 
     match config.kind {
-        DeviceKind::Amg8833 | DeviceKind::Bme688 | DeviceKind::Lc709203f | DeviceKind::Pct2075 => {
-            Err(DeviceError::WrongDevice)
-        }
+        DeviceKind::Amg8833
+        | DeviceKind::Bme688
+        | DeviceKind::Lc709203f
+        | DeviceKind::Pct2075
+        | DeviceKind::SeesawEncoder => Err(DeviceError::WrongDevice),
         DeviceKind::Vl53l4cd => {
             let mut sensor = Vl53l4cd::with_addr(&mut *bus, config.address, Delay, Poll);
             if sensor.has_measurement().await.map_err(map_vl53l4cd_error)? {
@@ -354,9 +382,11 @@ where
         DeviceKind::Amg8833 => crate::amg8833::read_frame(bus, config.address)
             .await
             .map_err(|_| DeviceError::Bus),
-        DeviceKind::Bme688 | DeviceKind::Lc709203f | DeviceKind::Pct2075 | DeviceKind::Vl53l4cd => {
-            Err(DeviceError::WrongDevice)
-        }
+        DeviceKind::Bme688
+        | DeviceKind::Lc709203f
+        | DeviceKind::Pct2075
+        | DeviceKind::SeesawEncoder
+        | DeviceKind::Vl53l4cd => Err(DeviceError::WrongDevice),
     }
 }
 
@@ -377,9 +407,10 @@ where
             .await
             .map(|eighths| f32::from(eighths) * 0.125)
             .map_err(|_| DeviceError::Bus),
-        DeviceKind::Amg8833 | DeviceKind::Lc709203f | DeviceKind::Vl53l4cd => {
-            Err(DeviceError::WrongDevice)
-        }
+        DeviceKind::Amg8833
+        | DeviceKind::Lc709203f
+        | DeviceKind::SeesawEncoder
+        | DeviceKind::Vl53l4cd => Err(DeviceError::WrongDevice),
     }
 }
 
@@ -396,6 +427,71 @@ where
     crate::bme688::measure(bus, config.address, calibration)
         .await
         .map_err(map_bme688_error)
+}
+
+fn encoder_config(registry: &DeviceRegistry, slot: u8) -> Result<DeviceConfig, DeviceError> {
+    let config = registry.get(slot)?;
+    if config.kind != DeviceKind::SeesawEncoder {
+        return Err(DeviceError::WrongDevice);
+    }
+    Ok(config)
+}
+
+pub(crate) async fn encoder_position<I2C>(
+    bus: &mut I2C,
+    registry: &DeviceRegistry,
+    slot: u8,
+) -> Result<i32, DeviceError>
+where
+    I2C: I2c,
+{
+    let config = encoder_config(registry, slot)?;
+    crate::seesaw_encoder::position(bus, config.address)
+        .await
+        .map_err(map_seesaw_encoder_error)
+}
+
+pub(crate) async fn set_encoder_position<I2C>(
+    bus: &mut I2C,
+    registry: &DeviceRegistry,
+    slot: u8,
+    position: i32,
+) -> Result<(), DeviceError>
+where
+    I2C: I2c,
+{
+    let config = encoder_config(registry, slot)?;
+    crate::seesaw_encoder::set_position(bus, config.address, position)
+        .await
+        .map_err(map_seesaw_encoder_error)
+}
+
+pub(crate) async fn encoder_delta<I2C>(
+    bus: &mut I2C,
+    registry: &DeviceRegistry,
+    slot: u8,
+) -> Result<i32, DeviceError>
+where
+    I2C: I2c,
+{
+    let config = encoder_config(registry, slot)?;
+    crate::seesaw_encoder::delta(bus, config.address)
+        .await
+        .map_err(map_seesaw_encoder_error)
+}
+
+pub(crate) async fn encoder_button<I2C>(
+    bus: &mut I2C,
+    registry: &DeviceRegistry,
+    slot: u8,
+) -> Result<bool, DeviceError>
+where
+    I2C: I2c,
+{
+    let config = encoder_config(registry, slot)?;
+    crate::seesaw_encoder::button_pressed(bus, config.address)
+        .await
+        .map_err(map_seesaw_encoder_error)
 }
 
 pub(crate) async fn set_battery_capacity<I2C>(

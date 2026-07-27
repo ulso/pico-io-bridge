@@ -35,6 +35,8 @@ mod network;
 #[cfg(feature = "i2c")]
 mod pct2075;
 mod scpi;
+#[cfg(feature = "i2c")]
+mod seesaw_encoder;
 #[cfg(any(feature = "can", feature = "i2c"))]
 mod websocket;
 
