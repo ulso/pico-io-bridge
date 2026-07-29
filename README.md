@@ -432,17 +432,36 @@ opens it at a fixed 115200 baud, 8 data bits, no parity, and one stop bit, with
 DTR and RTS asserted. Vendor-specific serial adapters such as FTDI are not yet
 supported by this port.
 
-The standard-library-only Python client sends `AT` followed by CRLF by default,
-then waits for the first response and collects further bytes until the stream
-has briefly been idle:
+The standard-library-only Python client sends `AT` followed by CRLF by default.
+For that exact probe it reassembles arbitrary USB/TCP fragments until the
+echoed `AT` and a complete CRLF-delimited BleuIO `OK` or `ERROR` line arrive:
 
 ```sh
 python3 examples/usb_serial_tcp.py
-python3 examples/usb_serial_tcp.py ATI
 ```
 
-For binary protocols, `--hex` sends exactly the supplied bytes and never
-appends a terminator:
+The packet-independent `AT` framing assumes BleuIO command echo is enabled, as
+it is by default. With echo disabled (`ATE0`), select idle-delimited collection
+explicitly:
+
+```sh
+python3 examples/usb_serial_tcp.py --idle-response
+```
+
+Other text commands use idle-delimited collection because `OK` is not a
+universal BleuIO end marker; some commands have no final `OK`, while others
+produce meaningful data after one. The idle timeout defaults to two seconds and
+is configurable:
+
+```sh
+python3 examples/usb_serial_tcp.py ATI
+python3 examples/usb_serial_tcp.py --idle-timeout 5 ATI
+```
+
+This response handling belongs only to the example client; the firmware bridge
+remains a raw byte stream. For binary protocols, `--hex` sends exactly the
+supplied bytes, never appends a terminator, and uses the same idle-delimited
+collection:
 
 ```sh
 python3 examples/usb_serial_tcp.py --hex "00 FF 0D 0A"

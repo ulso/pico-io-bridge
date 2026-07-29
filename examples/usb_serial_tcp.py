@@ -1,7 +1,11 @@
 """Send bytes through the Pico I/O Bridge raw USB-serial TCP port.
 
 No third-party Python packages are required. The default request is ``AT``
-followed by CRLF, which is suitable for a connected BleuIO.
+followed by CRLF, which is suitable for a connected BleuIO. For that exact
+probe, the client reassembles arbitrary stream fragments until the echoed
+command and a complete ``OK`` or ``ERROR`` line arrive. Other commands remain
+unframed and end when the stream is idle. ``--idle-response`` also selects
+idle-delimited collection for ``AT`` when command echo is disabled.
 
 Examples:
     python3 examples/usb_serial_tcp.py
@@ -11,15 +15,17 @@ Examples:
 
 import argparse
 import socket
+from typing import Optional, Union
 
 
 DEFAULT_HOST = "pico-io-usb-host.local"
 DEFAULT_PORT = 7000
 DEFAULT_CONNECT_TIMEOUT_SECONDS = 5.0
 DEFAULT_FIRST_RESPONSE_TIMEOUT_SECONDS = 10.0
-DEFAULT_IDLE_TIMEOUT_SECONDS = 0.25
+DEFAULT_IDLE_TIMEOUT_SECONDS = 2.0
 DEFAULT_MAX_RESPONSE_BYTES = 65536
 RECEIVE_CHUNK_BYTES = 1024
+BLEUIO_TERMINAL_LINES = {b"OK", b"ERROR"}
 TERMINATORS = {
     "crlf": b"\r\n",
     "cr": b"\r",
@@ -44,15 +50,34 @@ def positive_int(value: str) -> int:
     return parsed
 
 
+def line_response_complete(
+    response: Union[bytes, bytearray],
+    expected_echo: bytes,
+) -> bool:
+    """Return whether an echoed command is followed by a terminal line."""
+    complete_lines = bytes(response).split(b"\r\n")[:-1]
+    try:
+        echo_index = complete_lines.index(expected_echo)
+    except ValueError:
+        return False
+    return any(
+        line in BLEUIO_TERMINAL_LINES
+        for line in complete_lines[echo_index + 1 :]
+    )
+
+
 def collect_response(
     connection: socket.socket,
-    first_timeout: float,
+    response_timeout: float,
     idle_timeout: float,
     max_bytes: int,
-) -> tuple[bytes, bool]:
-    """Collect the first response and then continue until the stream is idle."""
+    *,
+    expected_echo: Optional[bytes],
+) -> tuple[bytes, bool, bool]:
+    """Collect an echo-framed response or an idle-delimited raw response."""
     response = bytearray()
-    connection.settimeout(first_timeout)
+    connection.settimeout(response_timeout)
+    complete = False
 
     while len(response) < max_bytes:
         try:
@@ -70,9 +95,17 @@ def collect_response(
             break
 
         response.extend(chunk)
-        connection.settimeout(idle_timeout)
+        if expected_echo is not None:
+            complete = line_response_complete(response, expected_echo)
+            if complete:
+                break
+        else:
+            connection.settimeout(idle_timeout)
 
-    return bytes(response), len(response) == max_bytes
+    reached_limit = len(response) == max_bytes and (
+        expected_echo is None or not complete
+    )
+    return bytes(response), reached_limit, complete
 
 
 def main() -> None:
@@ -115,14 +148,28 @@ def main() -> None:
         type=positive_float,
         default=DEFAULT_FIRST_RESPONSE_TIMEOUT_SECONDS,
         metavar="SECONDS",
-        help="time to wait for the first response byte (default: 10)",
+        help=(
+            "time to wait for the first byte, or between exact AT response "
+            "fragments (default: 10)"
+        ),
     )
     parser.add_argument(
         "--idle-timeout",
         type=positive_float,
         default=DEFAULT_IDLE_TIMEOUT_SECONDS,
         metavar="SECONDS",
-        help="idle time that ends response collection (default: 0.25)",
+        help=(
+            "idle time ending --hex and non-AT response collection; exact AT "
+            "waits for its echo and OK or ERROR (default: 2)"
+        ),
+    )
+    parser.add_argument(
+        "--idle-response",
+        action="store_true",
+        help=(
+            "always end response collection on --idle-timeout, including "
+            "exact AT; useful when command echo is disabled"
+        ),
     )
     parser.add_argument(
         "--max-bytes",
@@ -133,6 +180,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    command_bytes: Optional[bytes] = None
     if args.hex_payload is not None:
         if args.command is not None:
             parser.error("a text command cannot be combined with --hex")
@@ -147,9 +195,20 @@ def main() -> None:
     else:
         command = "AT" if args.command is None else args.command
         terminator = "crlf" if args.terminator is None else args.terminator
-        payload = command.encode("utf-8") + TERMINATORS[terminator]
+        command_bytes = command.encode("utf-8")
+        payload = command_bytes + TERMINATORS[terminator]
         if not payload:
             parser.error("payload must contain at least one byte")
+
+    expected_echo = (
+        b"AT"
+        if (
+            command_bytes == b"AT"
+            and payload == b"AT\r\n"
+            and not args.idle_response
+        )
+        else None
+    )
 
     try:
         with socket.create_connection(
@@ -157,11 +216,12 @@ def main() -> None:
             timeout=args.connect_timeout,
         ) as connection:
             connection.sendall(payload)
-            response, reached_limit = collect_response(
+            response, reached_limit, response_complete = collect_response(
                 connection,
                 args.first_timeout,
                 args.idle_timeout,
                 args.max_bytes,
+                expected_echo=expected_echo,
             )
     except OSError as error:
         raise SystemExit(
@@ -179,6 +239,18 @@ def main() -> None:
     print(f"Received {len(response)} bytes")
     print(f"RX hex:  {response.hex().upper()}")
     print(f"RX text: {response.decode('utf-8', errors='backslashreplace')!r}")
+    if expected_echo is not None and not response_complete:
+        if reached_limit:
+            raise SystemExit(
+                "Incomplete AT response: the "
+                f"{args.max_bytes}-byte response limit was reached before a "
+                "complete echoed AT and OK or ERROR line."
+            )
+        raise SystemExit(
+            "Incomplete AT response: the stream ended or the "
+            f"{args.first_timeout:g}-second response timeout expired before a "
+            "complete echoed AT and OK or ERROR line."
+        )
     if reached_limit:
         print(
             f"Response reached the {args.max_bytes}-byte limit; "
