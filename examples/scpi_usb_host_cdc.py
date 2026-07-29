@@ -16,7 +16,7 @@ from scpi_common import SCPI_PORT
 
 DEFAULT_HOST = "pico-io-usb-host.local"
 DEFAULT_READ_LENGTH = 64
-DEFAULT_TIMEOUT_SECONDS = 4.0
+DEFAULT_TIMEOUT_SECONDS = 20.0
 TERMINATORS = {
     "crlf": b"\r\n",
     "cr": b"\r",
@@ -30,8 +30,6 @@ def scpi_exchange(
     port: int,
     command: str,
     timeout: float,
-    *,
-    line_terminated: bool = True,
 ) -> str:
     """Execute one SCPI command using a short-lived TCP connection."""
     with socket.create_connection((host, port), timeout=timeout) as connection:
@@ -47,10 +45,8 @@ def scpi_exchange(
             if not chunk:
                 break
             response.extend(chunk)
-            if line_terminated and b"\n" in response:
+            if b"\n" in response:
                 break
-            if not line_terminated:
-                connection.settimeout(0.1)
 
     return response.decode("ascii").strip()
 
@@ -96,7 +92,7 @@ def main() -> None:
         "--timeout",
         type=float,
         default=DEFAULT_TIMEOUT_SECONDS,
-        help="TCP timeout in seconds (default: 4)",
+        help="TCP timeout in seconds (default: 20)",
     )
     args = parser.parse_args()
 
@@ -115,31 +111,23 @@ def main() -> None:
 
     payload = args.command.encode("utf-8") + TERMINATORS[args.terminator]
     payload_hex = payload.hex().upper()
-    written = scpi_exchange(
-        args.host,
-        args.port,
-        f'SYST:USB:HOST:CDC:WRITE:HEX "{payload_hex}"',
-        args.timeout,
-        line_terminated=False,
-    )
-    if not written:
-        raise SystemExit(f"CDC write failed: {scpi_error(args.host, args.port, args.timeout)}")
-    print(f"Sent {written} bytes: {payload!r}")
-
     response_hex = scpi_exchange(
         args.host,
         args.port,
-        f"SYST:USB:HOST:CDC:READ:HEX? {args.read_length}",
+        f'SYST:USB:HOST:CDC:EXCH:HEX? "{payload_hex}",{args.read_length}',
         args.timeout,
     )
     if not response_hex:
-        raise SystemExit(f"CDC read failed: {scpi_error(args.host, args.port, args.timeout)}")
+        raise SystemExit(
+            f"CDC exchange failed: {scpi_error(args.host, args.port, args.timeout)}"
+        )
 
     try:
         response = bytes.fromhex(response_hex)
     except ValueError as error:
         raise SystemExit(f"Invalid hex response from bridge: {response_hex!r}") from error
 
+    print(f"Sent {len(payload)} bytes: {payload!r}")
     print(f"Received {len(response)} bytes")
     print(f"Hex:  {response_hex}")
     print(f"Text: {response.decode('utf-8', errors='backslashreplace')!r}")

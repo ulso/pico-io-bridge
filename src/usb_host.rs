@@ -29,8 +29,11 @@ const ATTACH_DEBOUNCE_SAMPLES: u16 = 100;
 const CONFIG_DESCRIPTOR_CAPACITY: usize = 512;
 const COMMAND_CAPACITY: usize = 4;
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(4);
+const EXCHANGE_COMMAND_TIMEOUT: Duration = Duration::from_secs(18);
 const CLASS_CONTROL_TIMEOUT: Duration = Duration::from_secs(2);
 const TRANSFER_TIMEOUT: Duration = Duration::from_secs(2);
+const EXCHANGE_FIRST_RESPONSE_TIMEOUT: Duration = Duration::from_secs(10);
+const EXCHANGE_IDLE_TIMEOUT: Duration = Duration::from_millis(50);
 pub(crate) const CDC_MAX_TRANSFER: usize = crate::USB_HOST_CDC_MAX_TRANSFER;
 
 bind_interrupts!(struct PioUsbHostIrqs {
@@ -177,6 +180,7 @@ pub(crate) enum Error {
 enum Operation {
     Read { length: u8 },
     Write(CdcData),
+    Exchange { write: CdcData, read_length: u8 },
 }
 
 #[derive(Clone, Copy)]
@@ -189,6 +193,7 @@ struct Command {
 enum ReplyResult {
     Read(Result<CdcData, Error>),
     Write(Result<u8, Error>),
+    Exchange(Result<CdcData, Error>),
 }
 
 #[derive(Clone, Copy)]
@@ -240,6 +245,10 @@ async fn send_command(operation: Operation) -> Result<ReplyResult, Error> {
     if status().await.phase != Phase::CdcReady {
         return Err(Error::NotReady);
     }
+    let reply_timeout = match operation {
+        Operation::Exchange { .. } => EXCHANGE_COMMAND_TIMEOUT,
+        Operation::Read { .. } | Operation::Write(_) => COMMAND_TIMEOUT,
+    };
 
     let _guard = HOST_COMMAND_LOCK.lock().await;
     let sequence = {
@@ -264,7 +273,7 @@ async fn send_command(operation: Operation) -> Result<ReplyResult, Error> {
         }
     };
 
-    match select(matching_reply, Timer::after(COMMAND_TIMEOUT)).await {
+    match select(matching_reply, Timer::after(reply_timeout)).await {
         Either::First(reply) => Ok(reply),
         Either::Second(()) => Err(Error::Timeout),
     }
@@ -274,7 +283,7 @@ pub(crate) async fn cdc_write_hex(value: &str) -> Result<u8, Error> {
     let data = parse_hex(value)?;
     match send_command(Operation::Write(data)).await? {
         ReplyResult::Write(result) => result,
-        ReplyResult::Read(_) => Err(Error::Transfer),
+        ReplyResult::Read(_) | ReplyResult::Exchange(_) => Err(Error::Transfer),
     }
 }
 
@@ -285,7 +294,19 @@ pub(crate) async fn cdc_read(length: u8) -> Result<CdcData, Error> {
 
     match send_command(Operation::Read { length }).await? {
         ReplyResult::Read(result) => result,
-        ReplyResult::Write(_) => Err(Error::Transfer),
+        ReplyResult::Write(_) | ReplyResult::Exchange(_) => Err(Error::Transfer),
+    }
+}
+
+pub(crate) async fn cdc_exchange_hex(value: &str, read_length: u8) -> Result<CdcData, Error> {
+    if read_length == 0 || usize::from(read_length) > CDC_MAX_TRANSFER {
+        return Err(Error::InvalidLength);
+    }
+
+    let write = parse_hex(value)?;
+    match send_command(Operation::Exchange { write, read_length }).await? {
+        ReplyResult::Exchange(result) => result,
+        ReplyResult::Read(_) | ReplyResult::Write(_) => Err(Error::Transfer),
     }
 }
 
@@ -323,6 +344,7 @@ fn reject_command(command: Command, error: Error) {
     let result = match command.operation {
         Operation::Read { .. } => ReplyResult::Read(Err(error)),
         Operation::Write(_) => ReplyResult::Write(Err(error)),
+        Operation::Exchange { .. } => ReplyResult::Exchange(Err(error)),
     };
     send_reply(Reply {
         sequence: command.sequence,
@@ -582,6 +604,125 @@ async fn run(hardware: Hardware) {
                                     send_reply(Reply {
                                         sequence,
                                         result: ReplyResult::Write(result),
+                                    });
+                                }
+                                Either::Second(Command {
+                                    sequence,
+                                    operation: Operation::Exchange { write, read_length },
+                                }) => {
+                                    // Keep the first bulk-IN poll adjacent to
+                                    // bulk-OUT in this sole pipe-owning task.
+                                    // Once data starts, collect subsequent USB
+                                    // packets until the CDC stream is briefly
+                                    // idle or the caller's fixed buffer is full.
+                                    let result = match with_timeout(
+                                        TRANSFER_TIMEOUT,
+                                        cdc.write(write.as_bytes()),
+                                    )
+                                    .await
+                                    {
+                                        Ok(Ok(count)) => {
+                                            let mut state = HOST_STATE.lock().await;
+                                            state.tx_bytes =
+                                                state.tx_bytes.wrapping_add(count as u32);
+                                            drop(state);
+
+                                            let mut data = CdcData::empty();
+                                            match with_timeout(
+                                                EXCHANGE_FIRST_RESPONSE_TIMEOUT,
+                                                cdc.read(
+                                                    &mut data.bytes[..usize::from(read_length)],
+                                                ),
+                                            )
+                                            .await
+                                            {
+                                                Ok(Ok(0)) => {
+                                                    set_error_phase(Phase::CdcError).await;
+                                                    Err(Error::Transfer)
+                                                }
+                                                Ok(Ok(count)) => {
+                                                    data.len = count as u8;
+                                                    let mut state = HOST_STATE.lock().await;
+                                                    state.rx_bytes =
+                                                        state.rx_bytes.wrapping_add(count as u32);
+                                                    drop(state);
+
+                                                    let mut exchange_result = Ok(data);
+                                                    while usize::from(data.len)
+                                                        < usize::from(read_length)
+                                                    {
+                                                        let start = usize::from(data.len);
+                                                        let end = usize::from(read_length);
+                                                        match with_timeout(
+                                                            EXCHANGE_IDLE_TIMEOUT,
+                                                            cdc.read(&mut data.bytes[start..end]),
+                                                        )
+                                                        .await
+                                                        {
+                                                            Ok(Ok(0)) => {
+                                                                set_error_phase(Phase::CdcError)
+                                                                    .await;
+                                                                exchange_result =
+                                                                    Err(Error::Transfer);
+                                                                break;
+                                                            }
+                                                            Ok(Ok(count)) => {
+                                                                debug_assert!(count <= end - start);
+                                                                data.len += count as u8;
+                                                                let mut state =
+                                                                    HOST_STATE.lock().await;
+                                                                state.rx_bytes = state
+                                                                    .rx_bytes
+                                                                    .wrapping_add(count as u32);
+                                                                exchange_result = Ok(data);
+                                                            }
+                                                            Ok(Err(CdcAcmError::Transfer(
+                                                                PipeError::Disconnected,
+                                                            ))) => {
+                                                                exchange_result =
+                                                                    Err(Error::NotReady);
+                                                                break;
+                                                            }
+                                                            Ok(Err(_)) => {
+                                                                set_error_phase(Phase::CdcError)
+                                                                    .await;
+                                                                exchange_result =
+                                                                    Err(Error::Transfer);
+                                                                break;
+                                                            }
+                                                            Err(_) => break,
+                                                        }
+                                                    }
+                                                    exchange_result
+                                                }
+                                                Ok(Err(CdcAcmError::Transfer(
+                                                    PipeError::Disconnected,
+                                                ))) => Err(Error::NotReady),
+                                                Ok(Err(_)) => {
+                                                    set_error_phase(Phase::CdcError).await;
+                                                    Err(Error::Transfer)
+                                                }
+                                                Err(_) => {
+                                                    record_error().await;
+                                                    Err(Error::Timeout)
+                                                }
+                                            }
+                                        }
+                                        Ok(Err(CdcAcmError::Transfer(PipeError::Disconnected))) => {
+                                            Err(Error::NotReady)
+                                        }
+                                        Ok(Err(_)) => {
+                                            set_error_phase(Phase::CdcError).await;
+                                            Err(Error::Transfer)
+                                        }
+                                        Err(_) => {
+                                            record_error().await;
+                                            Err(Error::Timeout)
+                                        }
+                                    };
+                                    send_reply(Reply {
+                                        sequence,
+                                        result: ReplyResult::Exchange(result),
                                     });
                                 }
                             }

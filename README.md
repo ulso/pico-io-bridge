@@ -309,6 +309,7 @@ Initial command set:
 | `SYST:USB:HOST:STAT?` | PIO USB host state and transfer counters; USB-host profile only |
 | `SYST:USB:HOST:CDC:WRITE:HEX "<hex>"` | Write 1-64 bytes to the enumerated CDC-ACM stream; USB-host profile only |
 | `SYST:USB:HOST:CDC:READ:HEX? <length>` | Read up to 1-64 CDC-ACM bytes and return uppercase hex; USB-host profile only |
+| `SYST:USB:HOST:CDC:EXCH:HEX? "<hex>",<max-length>` | Atomically write and collect a 1-64 byte CDC-ACM response; USB-host profile only |
 | `SYST:I2C:DEV:CAT?` | Supported I2C device models |
 | `SYST:I2C:DEV:ADD <slot>,"<model>",<address>` | Verify, initialize, and register a device |
 | `SYST:I2C:DEV? <slot>` | Device configuration as `slot,model,bus,address` |
@@ -366,23 +367,27 @@ the manager remains the sole owner of enumeration state and all control,
 bulk-IN, and bulk-OUT pipes. Hex input must contain an even number of
 hexadecimal digits. The manager asserts DTR and RTS, then selects 115200 baud,
 8 data bits, no parity, and one stop bit when it opens a CDC-ACM function. For
-example, this writes `AT` followed by CRLF and then requests up to 64 response
-bytes:
+example, this atomically writes `AT` followed by CRLF and collects up to 64
+response bytes without returning through SCPI between bulk-OUT and bulk-IN:
 
 ```text
-SYST:USB:HOST:CDC:WRITE:HEX "41540D0A"
-SYST:USB:HOST:CDC:READ:HEX? 64
+SYST:USB:HOST:CDC:EXCH:HEX? "41540D0A",64
 ```
 
-The write command returns the byte count. The read query returns uppercase hex
-without separators and can return fewer bytes than requested. Each transfer
-has a two-second deadline. Data commands report a settings conflict unless the
-phase is `CDC_READY`. A timed-out write has an indeterminate device-side byte
-count and must not be retried blindly, because the device may already have
-accepted part or all of it.
+The exchange query returns uppercase hex without separators. It waits up to ten
+seconds for the first non-empty response packet, then accumulates further
+packets until the requested maximum is full or the stream is idle for 50 ms.
+If the result exactly fills that maximum, more stream data may remain for a
+subsequent raw read.
+The separate write and read commands remain available for raw stream access;
+their transfers have a two-second deadline, and the write command returns the
+byte count. Data commands report a settings conflict unless the phase is
+`CDC_READY`. A timed-out write has an indeterminate device-side byte count and
+must not be retried blindly, because the device may already have accepted part
+or all of it.
 
-A standard-library-only Python example performs the status, write, read, error,
-hex-decoding, and text-decoding steps:
+A standard-library-only Python example performs the status, atomic exchange,
+error, hex-decoding, and text-decoding steps:
 
 ```sh
 python3 examples/scpi_usb_host_cdc.py

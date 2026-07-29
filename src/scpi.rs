@@ -483,6 +483,26 @@ impl ScpiInstrument {
         }
     }
 
+    #[scpi(cmd = "SYSTem:USB:HOST:CDC:EXCHange:HEX?")]
+    async fn usb_host_cdc_exchange_hex(
+        &mut self,
+        data: &str,
+        read_length: u8,
+    ) -> Result<UsbHostDataResponse, scpi::Error> {
+        #[cfg(feature = "board-adafruit-rp2040-usb-host")]
+        {
+            crate::usb_host::cdc_exchange_hex(data, read_length)
+                .await
+                .map(UsbHostDataResponse::from_cdc)
+                .map_err(usb_host_error)
+        }
+        #[cfg(not(feature = "board-adafruit-rp2040-usb-host"))]
+        {
+            let _ = (data, read_length);
+            Err(scpi::Error::SettingsConflict)
+        }
+    }
+
     #[scpi(cmd = "SYSTem:I2C:DEVice:CATalog?")]
     async fn i2c_device_catalog(&mut self) -> Result<Characters<'static>, scpi::Error> {
         Ok(Characters(
