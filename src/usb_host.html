@@ -14,7 +14,7 @@ header{display:flex;align-items:flex-start;justify-content:space-between;gap:20p
 h1{font-size:24px;line-height:1.2;margin:0 0 4px;font-weight:700}
 .model{margin:0;color:#52606d;font-size:14px}
 .status{display:inline-flex;align-items:center;gap:8px;font-size:14px;font-weight:650;white-space:nowrap}
-.dot{width:10px;height:10px;border-radius:50%;background:#d99a22}.online .dot{background:#1f9d55}.offline .dot{background:#d64545}
+.dot{width:10px;height:10px;border-radius:50%;background:#d99a22}.online .dot{background:#1f9d55}.warning .dot{background:#d99a22}.offline .dot{background:#d64545}
 .tabs{display:flex;flex-wrap:wrap;gap:4px;margin-bottom:16px}
 .tabs a{border:1px solid #9aa7b2;background:#fff;color:#17202a;border-radius:6px;padding:7px 12px;text-decoration:none;font-weight:650}
 .tabs a.active{background:#17202a;color:#fff;border-color:#17202a}
@@ -77,6 +77,7 @@ code{font:12px ui-monospace,SFMono-Regular,Menlo,monospace;color:#173f73}
 <dt>VID:PID</dt><dd><code id="vidPid">----</code></dd>
 <dt>USB address</dt><dd id="address">-</dd>
 <dt>Class</dt><dd id="deviceClass">-</dd>
+<dt>Driver</dt><dd id="deviceDriver">-</dd>
 <dt>VBUS</dt><dd id="vbus">-</dd>
 </dl>
 </section>
@@ -90,6 +91,9 @@ code{font:12px ui-monospace,SFMono-Regular,Menlo,monospace;color:#173f73}
 <dt>PIO blocks</dt><dd><code>PIO0 + PIO1</code></dd>
 <dt>DMA</dt><dd><code>DMA_CH0</code></dd>
 <dt>System clock</dt><dd><code>120 MHz</code></dd>
+<dt>Raw TCP bridge</dt><dd id="serialBridge">-</dd>
+<dt>DNS-SD service</dt><dd><code id="serialService">-</code></dd>
+<dt>TCP client</dt><dd id="serialClient">-</dd>
 </dl>
 </section>
 
@@ -116,21 +120,42 @@ const deviceEl=document.getElementById("device");
 const vidPidEl=document.getElementById("vidPid");
 const addressEl=document.getElementById("address");
 const classEl=document.getElementById("deviceClass");
+const driverEl=document.getElementById("deviceDriver");
 const vbusEl=document.getElementById("vbus");
+const serialBridgeEl=document.getElementById("serialBridge");
+const serialServiceEl=document.getElementById("serialService");
+const serialClientEl=document.getElementById("serialClient");
 const eventsEl=document.getElementById("events");
 let lastPhase=null;
 let refreshing=false;
 let events=[];
 function phaseLabel(value){return String(value||"-").toLowerCase().split("_").map(word=>word.charAt(0).toUpperCase()+word.slice(1)).join(" ")}
 function hex16(value){return Number(value||0).toString(16).toUpperCase().padStart(4,"0")}
+function isFtdi(info){return info.vendorId===0x0403&&info.productId===0x6001}
 function deviceName(info){
  if(info.vendorId===0x2dcf&&info.productId===0x6001)return "BleuIO bootloader";
  if(info.vendorId===0x2dcf&&info.productId===0x6002)return "BleuIO";
  if(info.vendorId===0x10cf&&info.productId>=0x5500&&info.productId<=0x5503)return "Velleman K8055 / P8055";
+ if(isFtdi(info))return "FTDI FT232R / FT245R";
  if(info.vendorId!==null||info.productId!==null)return "USB device";
  if(info.phase==="UNSUPPORTED_SPEED")return "Unsupported-speed USB device";
  if(info.speed!==null)return "Enumerating USB device";
  return "No device";
+}
+function deviceClass(info){
+ if(isFtdi(info))return "Vendor-specific USB serial";
+ if(info.phase==="P8055_READY"||info.phase==="P8055_ERROR")return "HID / P8055";
+ if(info.phase==="CDC_READY"||info.phase==="CDC_ERROR")return "CDC-ACM";
+ return "-";
+}
+function driverName(info){
+ if(isFtdi(info))return "Not installed";
+ if(info.phase==="P8055_READY")return "P8055 HID";
+ if(info.phase==="P8055_ERROR")return "P8055 HID (error)";
+ if(info.phase==="CDC_READY")return "CDC-ACM";
+ if(info.phase==="CDC_ERROR")return "CDC-ACM (error)";
+ if(info.phase==="UNSUPPORTED_DEVICE")return "Not installed";
+ return "-";
 }
 function addEvent(text){events.unshift({time:new Date().toLocaleTimeString(),text});events=events.slice(0,12);eventsEl.textContent="";for(const item of events){const row=document.createElement("li");const time=document.createElement("time");const text=document.createElement("span");time.textContent=item.time;text.textContent=item.text;row.append(time,text);eventsEl.appendChild(row)}}
 function showPhase(phase){
@@ -138,6 +163,7 @@ function showPhase(phase){
  if(phase==="CDC_READY"||phase==="P8055_READY"){statusEl.className="status online";statusText.textContent=phase==="P8055_READY"?"P8055 HID ready":"CDC-ACM ready";phaseEl.className="stateOk"}
  else if(phase==="WAITING"||phase==="POWER_OFF"){statusEl.className="status";statusText.textContent=phase==="WAITING"?"waiting for device":"host powered off";phaseEl.className="stateOff"}
  else if(phase==="RESETTING"||phase==="ENUMERATING"){statusEl.className="status";statusText.textContent=label.toLowerCase();phaseEl.className="stateWait"}
+ else if(phase==="UNSUPPORTED_DEVICE"){statusEl.className="status warning";statusText.textContent="unsupported device";phaseEl.className="stateWait"}
  else{statusEl.className="status offline";statusText.textContent=label.toLowerCase();phaseEl.className="stateBad"}
 }
 function updateHost(info){
@@ -147,13 +173,22 @@ function updateHost(info){
  txBytesEl.textContent=Number(info.txBytes||0).toLocaleString();
  errorsEl.textContent=Number(info.errorCount||0).toLocaleString();
  errorsEl.className=Number(info.errorCount||0)>0?"stateBad":"";
- maxTransferEl.textContent=Number(info.maxTransfer??64)+" B";
+ const transferReady=info.phase==="CDC_READY"||info.phase==="P8055_READY";
+ maxTransferEl.textContent=transferReady?Number(info.maxTransfer??64)+" B":"—";
  deviceEl.textContent=deviceName(info);
  const hasIdentity=info.vendorId!==null||info.productId!==null;
  vidPidEl.textContent=hasIdentity?hex16(info.vendorId)+":"+hex16(info.productId):"----";
  addressEl.textContent=info.address===null?"-":String(info.address);
- classEl.textContent=info.phase==="P8055_READY"?"HID / P8055":info.phase==="P8055_ERROR"?"HID / P8055 (error)":info.phase==="CDC_READY"?"CDC-ACM":info.phase==="CDC_ERROR"?"CDC-ACM (error)":"-";
+ classEl.textContent=deviceClass(info);
+ driverEl.textContent=driverName(info);
  vbusEl.textContent=info.phase==="POWER_OFF"?"Off":"Enabled (firmware output)";
+ const bridge=info.serialBridge||(info.usbHost&&info.usbHost.serialBridge)||{};
+ const bridgePort=Number.isInteger(bridge.port)&&bridge.port>0?bridge.port:null;
+ serialBridgeEl.textContent=bridgePort===null?"-":bridge.available?"TCP "+bridgePort+" available":"TCP "+bridgePort+" unavailable";
+ serialBridgeEl.className=bridge.available?"stateOk":"stateOff";
+ serialServiceEl.textContent=typeof bridge.service==="string"&&bridge.service?bridge.service:"-";
+ serialClientEl.textContent=bridge.clientConnected?"Connected":bridge.available?"Not connected":"Unavailable";
+ serialClientEl.className=bridge.clientConnected?"stateOk":bridge.available?"stateOff":"stateWait";
  if(lastPhase!==info.phase){addEvent(lastPhase===null?"Host state: "+phaseLabel(info.phase):phaseLabel(lastPhase)+" → "+phaseLabel(info.phase));lastPhase=info.phase}
 }
 async function refresh(){

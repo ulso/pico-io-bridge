@@ -302,7 +302,9 @@ fn usb_host_error(error: crate::usb_host::Error) -> scpi::Error {
         crate::usb_host::Error::InvalidHex => scpi::Error::InvalidStringData,
         crate::usb_host::Error::InvalidParameter => scpi::Error::DataOutOfRange,
         crate::usb_host::Error::DataStale => scpi::Error::DataCorruptOrStale,
-        crate::usb_host::Error::NotReady => scpi::Error::SettingsConflict,
+        crate::usb_host::Error::NotReady | crate::usb_host::Error::ResourceBusy => {
+            scpi::Error::SettingsConflict
+        }
         crate::usb_host::Error::Timeout => scpi::Error::Custom(-310, "USB host timeout"),
         crate::usb_host::Error::Transfer => scpi::Error::Custom(-311, "USB host transfer error"),
         crate::usb_host::Error::Protocol => scpi::Error::Custom(-312, "P8055 protocol error"),

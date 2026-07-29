@@ -25,7 +25,7 @@ enum WebSocketEndpoint {
 }
 
 #[cfg(feature = "board-adafruit-rp2040-usb-host")]
-const API_STATUS_CAPABILITIES: &str = r#","interfaces":["usb-host","i2c","scpi"],"websocket":"/i2c","websockets":["/i2c"],"pages":{"i2c":"/","usb":"/usb-host.html","scpi":"/scpi.html"}"#;
+const API_STATUS_CAPABILITIES: &str = r#","interfaces":["usb-host","usb-serial","i2c","scpi"],"usbSerial":{"protocol":"RAW","port":7000,"service":"_usbserial._tcp"},"websocket":"/i2c","websockets":["/i2c"],"pages":{"i2c":"/","usb":"/usb-host.html","scpi":"/scpi.html"}"#;
 #[cfg(all(
     not(feature = "board-adafruit-rp2040-usb-host"),
     feature = "can",
@@ -271,10 +271,10 @@ async fn write_usb_host_status_response(
         write!(product_id, "{}", status.product_id).unwrap();
     }
 
-    let mut body = String::<384>::new();
+    let mut body = String::<512>::new();
     write!(
         body,
-        "{{\"phase\":\"{}\",\"ready\":{},\"speed\":{},\"address\":{},\"vendorId\":{},\"productId\":{},\"rxBytes\":{},\"txBytes\":{},\"errorCount\":{},\"maxTransfer\":{}}}",
+        "{{\"phase\":\"{}\",\"ready\":{},\"speed\":{},\"address\":{},\"vendorId\":{},\"productId\":{},\"rxBytes\":{},\"txBytes\":{},\"errorCount\":{},\"maxTransfer\":{},\"serialBridge\":{{\"port\":{},\"service\":\"_usbserial._tcp\",\"available\":{},\"clientConnected\":{}}}}}",
         status.phase.as_str(),
         matches!(
             status.phase,
@@ -291,6 +291,9 @@ async fn write_usb_host_status_response(
             Some(crate::usb_host::HostSpeed::Low) => crate::p8055::REPORT_LEN,
             Some(crate::usb_host::HostSpeed::Full) | None => crate::USB_HOST_CDC_MAX_TRANSFER,
         },
+        crate::USB_SERIAL_PORT,
+        status.phase == crate::usb_host::Phase::CdcReady,
+        status.bridge_connected,
     )
     .unwrap();
     write_http_response(socket, "application/json", body.as_bytes()).await

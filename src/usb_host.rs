@@ -7,7 +7,9 @@
 
 use defmt::{info, warn};
 use embassy_futures::join::join;
-use embassy_futures::select::{Either, select};
+use embassy_futures::select::{Either, Either3, select, select3};
+use embassy_net::Stack;
+use embassy_net::tcp::{TcpReader, TcpSocket, TcpWriter};
 use embassy_rp::Peri;
 use embassy_rp::bind_interrupts;
 use embassy_rp::dma::InterruptHandler as DmaInterruptHandler;
@@ -15,19 +17,23 @@ use embassy_rp::gpio::{Level, Output};
 use embassy_rp::peripherals::{DMA_CH0, PIN_16, PIN_17, PIN_18, PIO0, PIO1};
 use embassy_rp::pio::InterruptHandler as PioInterruptHandler;
 use embassy_rp_pio_usb_host::cdc_acm::{
-    CdcAcmError, allocate_from_enumeration as allocate_cdc_from_enumeration,
+    CdcAcmCreateError, CdcAcmError, CdcAcmHost,
+    allocate_from_enumeration as allocate_cdc_from_enumeration,
 };
 use embassy_rp_pio_usb_host::hid::{
     HidError, allocate_from_enumeration as allocate_hid_from_enumeration,
 };
-use embassy_rp_pio_usb_host::host::{DeviceEvent, PipeError, Speed, UsbHostController};
+use embassy_rp_pio_usb_host::host::{
+    DeviceEvent, PipeError, Speed, UsbHostController, UsbPipe, pipe,
+};
 use embassy_rp_pio_usb_host::pio_host::PioHostState;
 use embassy_rp_pio_usb_host::pio_host::rp2040::Rp2040PioEngine;
-use embassy_rp_pio_usb_host::usb::CdcLineCoding;
+use embassy_rp_pio_usb_host::usb::{CdcLineCoding, ConfigurationError};
 use embassy_rp_pio_usb_host::{AttachDetector, BusEvent, DeviceSpeed};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
 use embassy_sync::mutex::Mutex;
+use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Ticker, Timer, with_timeout};
 use embassy_usb_host::{BusController, BusRoute, BusState};
 
@@ -37,6 +43,8 @@ const ATTACH_DEBOUNCE_SAMPLES: u16 = 100;
 const CONFIG_DESCRIPTOR_CAPACITY: usize = 512;
 const REPORT_DESCRIPTOR_CAPACITY: usize = 256;
 const COMMAND_CAPACITY: usize = 4;
+const BRIDGE_CHANNEL_CAPACITY: usize = 4;
+const BRIDGE_SOCKET_BUFFER_SIZE: usize = 1024;
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(4);
 const EXCHANGE_COMMAND_TIMEOUT: Duration = Duration::from_secs(18);
 const CLASS_CONTROL_TIMEOUT: Duration = Duration::from_secs(2);
@@ -138,6 +146,7 @@ pub(crate) struct Status {
     pub(crate) rx_bytes: u32,
     pub(crate) tx_bytes: u32,
     pub(crate) error_count: u32,
+    pub(crate) bridge_connected: bool,
     generation: u32,
 }
 
@@ -152,6 +161,7 @@ impl Status {
             rx_bytes: 0,
             tx_bytes: 0,
             error_count: 0,
+            bridge_connected: false,
             generation: 0,
         }
     }
@@ -165,6 +175,7 @@ impl Status {
         self.address = 0;
         self.vendor_id = 0;
         self.product_id = 0;
+        self.bridge_connected = false;
     }
 }
 
@@ -187,6 +198,62 @@ impl CdcData {
     }
 }
 
+struct CdcRxBuffer {
+    start: u8,
+    end: u8,
+    bytes: [u8; CDC_MAX_TRANSFER],
+}
+
+impl CdcRxBuffer {
+    const fn empty() -> Self {
+        Self {
+            start: 0,
+            end: 0,
+            bytes: [0; CDC_MAX_TRANSFER],
+        }
+    }
+
+    fn copy_into(&mut self, destination: &mut [u8]) -> usize {
+        let available = usize::from(self.end - self.start);
+        let count = available.min(destination.len());
+        let start = usize::from(self.start);
+        destination[..count].copy_from_slice(&self.bytes[start..start + count]);
+        self.start += count as u8;
+        if self.start == self.end {
+            self.start = 0;
+            self.end = 0;
+        }
+        count
+    }
+
+    fn load(&mut self, packet: &[u8]) {
+        debug_assert_eq!(self.start, self.end);
+        debug_assert!(packet.len() <= self.bytes.len());
+        self.bytes[..packet.len()].copy_from_slice(packet);
+        self.start = 0;
+        self.end = packet.len() as u8;
+    }
+
+    fn take(&mut self) -> Option<CdcData> {
+        if self.start == self.end {
+            return None;
+        }
+        let mut data = CdcData::empty();
+        data.len = self.end - self.start;
+        let start = usize::from(self.start);
+        data.bytes[..usize::from(data.len)]
+            .copy_from_slice(&self.bytes[start..usize::from(self.end)]);
+        self.start = 0;
+        self.end = 0;
+        Some(data)
+    }
+}
+
+struct ManagedCdcRead {
+    copied: usize,
+    received: usize,
+}
+
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub(crate) enum Error {
     InvalidLength,
@@ -194,6 +261,7 @@ pub(crate) enum Error {
     InvalidParameter,
     DataStale,
     NotReady,
+    ResourceBusy,
     Timeout,
     Transfer,
     Protocol,
@@ -210,6 +278,8 @@ enum Operation {
     P8055ResetCounter { channel: u8 },
     P8055SetDebounce { channel: u8, microseconds: u32 },
     P8055GetDebounce { channel: u8 },
+    BridgeOpen,
+    BridgeClose { session: u32 },
 }
 
 impl Operation {
@@ -222,7 +292,15 @@ impl Operation {
             | Self::P8055ResetCounter { .. }
             | Self::P8055SetDebounce { .. }
             | Self::P8055GetDebounce { .. } => Phase::P8055Ready,
+            Self::BridgeOpen | Self::BridgeClose { .. } => Phase::CdcReady,
         }
+    }
+
+    const fn is_cdc_data(self) -> bool {
+        matches!(
+            self,
+            Self::Read { .. } | Self::Write(_) | Self::Exchange { .. }
+        )
     }
 
     const fn reply_timeout(self) -> Duration {
@@ -235,7 +313,9 @@ impl Operation {
             | Self::P8055SetOutput(_)
             | Self::P8055ResetCounter { .. }
             | Self::P8055SetDebounce { .. }
-            | Self::P8055GetDebounce { .. } => COMMAND_TIMEOUT,
+            | Self::P8055GetDebounce { .. }
+            | Self::BridgeOpen
+            | Self::BridgeClose { .. } => COMMAND_TIMEOUT,
         }
     }
 }
@@ -256,6 +336,8 @@ enum ReplyResult {
     P8055Output(Result<p8055::OutputState, Error>),
     P8055Unit(Result<(), Error>),
     P8055Debounce(Result<u32, Error>),
+    BridgeOpen(Result<u32, Error>),
+    BridgeClose(Result<(), Error>),
 }
 
 #[derive(Clone, Copy)]
@@ -264,11 +346,27 @@ struct Reply {
     result: ReplyResult,
 }
 
+#[derive(Clone, Copy)]
+struct BridgeFrame {
+    session: u32,
+    data: CdcData,
+}
+
+#[derive(Clone, Copy)]
+enum BridgeEvent {
+    Closed { session: u32 },
+}
+
 static HOST_STATE: Mutex<CriticalSectionRawMutex, Status> = Mutex::new(Status::power_off());
 static HOST_COMMANDS: Channel<CriticalSectionRawMutex, Command, COMMAND_CAPACITY> = Channel::new();
 static HOST_REPLIES: Channel<CriticalSectionRawMutex, Reply, COMMAND_CAPACITY> = Channel::new();
 static HOST_COMMAND_LOCK: Mutex<CriticalSectionRawMutex, ()> = Mutex::new(());
 static HOST_COMMAND_SEQUENCE: Mutex<CriticalSectionRawMutex, u32> = Mutex::new(0);
+static BRIDGE_TO_USB: Channel<CriticalSectionRawMutex, BridgeFrame, BRIDGE_CHANNEL_CAPACITY> =
+    Channel::new();
+static USB_TO_BRIDGE: Channel<CriticalSectionRawMutex, BridgeFrame, BRIDGE_CHANNEL_CAPACITY> =
+    Channel::new();
+static BRIDGE_EVENT: Signal<CriticalSectionRawMutex, BridgeEvent> = Signal::new();
 
 pub(crate) async fn status() -> Status {
     *HOST_STATE.lock().await
@@ -310,6 +408,9 @@ async fn send_command(operation: Operation) -> Result<ReplyResult, Error> {
     let state = status().await;
     if state.phase != operation.ready_phase() {
         return Err(Error::NotReady);
+    }
+    if state.bridge_connected && operation.is_cdc_data() {
+        return Err(Error::ResourceBusy);
     }
     let sequence = {
         let mut next = HOST_COMMAND_SEQUENCE.lock().await;
@@ -436,6 +537,20 @@ pub(crate) async fn p8055_get_debounce(channel: u8) -> Result<u32, Error> {
     }
 }
 
+async fn bridge_open() -> Result<u32, Error> {
+    match send_command(Operation::BridgeOpen).await? {
+        ReplyResult::BridgeOpen(result) => result,
+        _ => Err(Error::Transfer),
+    }
+}
+
+async fn bridge_close(session: u32) -> Result<(), Error> {
+    match send_command(Operation::BridgeClose { session }).await? {
+        ReplyResult::BridgeClose(result) => result,
+        _ => Err(Error::Transfer),
+    }
+}
+
 async fn set_waiting() {
     HOST_STATE.lock().await.clear_device(Phase::Waiting);
 }
@@ -455,6 +570,10 @@ async fn set_resetting(speed: HostSpeed) {
     state.address = 0;
     state.vendor_id = 0;
     state.product_id = 0;
+    state.rx_bytes = 0;
+    state.tx_bytes = 0;
+    state.error_count = 0;
+    state.bridge_connected = false;
 }
 
 async fn begin_enumeration(speed: HostSpeed) -> Option<u32> {
@@ -495,6 +614,7 @@ async fn set_error_phase(phase: Phase) {
     let mut state = HOST_STATE.lock().await;
     state.phase = phase;
     state.error_count = state.error_count.wrapping_add(1);
+    state.bridge_connected = false;
 }
 
 async fn set_error_phase_if_current(generation: u32, expected: Phase, phase: Phase) -> bool {
@@ -504,6 +624,19 @@ async fn set_error_phase_if_current(generation: u32, expected: Phase, phase: Pha
     }
     state.phase = phase;
     state.error_count = state.error_count.wrapping_add(1);
+    state.bridge_connected = false;
+    true
+}
+
+async fn set_bridge_connected_if_current(generation: u32, expected: bool, connected: bool) -> bool {
+    let mut state = HOST_STATE.lock().await;
+    if state.generation != generation
+        || state.phase != Phase::CdcReady
+        || state.bridge_connected != expected
+    {
+        return false;
+    }
+    state.bridge_connected = connected;
     true
 }
 
@@ -573,6 +706,8 @@ fn reject_command(command: Command, error: Error) {
         | Operation::P8055ResetCounter { .. }
         | Operation::P8055SetDebounce { .. } => ReplyResult::P8055Unit(Err(error)),
         Operation::P8055GetDebounce { .. } => ReplyResult::P8055Debounce(Err(error)),
+        Operation::BridgeOpen => ReplyResult::BridgeOpen(Err(error)),
+        Operation::BridgeClose { .. } => ReplyResult::BridgeClose(Err(error)),
     };
     send_reply(Reply {
         sequence: command.sequence,
@@ -587,6 +722,221 @@ async fn command_is_current(command: &Command) -> bool {
 async fn session_is_current(generation: u32, expected: Phase) -> bool {
     let state = status().await;
     state.generation == generation && state.phase == expected
+}
+
+enum BridgeOutputEnd {
+    Closed,
+    Failed,
+}
+
+enum BridgeRunOutcome {
+    Closed,
+    Disconnected,
+    Failed,
+}
+
+async fn managed_cdc_read<C, I, O>(
+    cdc: &mut CdcAcmHost<C, I, O>,
+    buffered: &mut CdcRxBuffer,
+    destination: &mut [u8],
+) -> Result<ManagedCdcRead, CdcAcmError>
+where
+    C: UsbPipe<pipe::Control, pipe::InOut>,
+    I: UsbPipe<pipe::Bulk, pipe::In>,
+    O: UsbPipe<pipe::Bulk, pipe::Out>,
+{
+    if buffered.start != buffered.end {
+        return Ok(ManagedCdcRead {
+            copied: buffered.copy_into(destination),
+            received: 0,
+        });
+    }
+
+    // Always drain a complete full-speed packet from CdcAcmHost. Any bytes
+    // beyond the SCPI caller's requested length live here instead of in the
+    // class driver's private buffer, so a later bridge split cannot lose them.
+    let mut packet = [0_u8; CDC_MAX_TRANSFER];
+    let received = cdc.read(&mut packet).await?;
+    buffered.load(&packet[..received]);
+    Ok(ManagedCdcRead {
+        copied: buffered.copy_into(destination),
+        received,
+    })
+}
+
+async fn bridge_wait_for_disconnect<'d, C>(controller: &mut BusController<'d, C>)
+where
+    C: UsbHostController<'d>,
+{
+    loop {
+        match controller.wait_for_device_event().await {
+            DeviceEvent::Disconnected | DeviceEvent::Overcurrent => return,
+            _ => {}
+        }
+    }
+}
+
+async fn bridge_usb_to_tcp<I>(
+    bulk_in: &mut I,
+    session: u32,
+    generation: u32,
+    packet_size: usize,
+    initial: Option<CdcData>,
+) -> Error
+where
+    I: UsbPipe<pipe::Bulk, pipe::In>,
+{
+    if let Some(data) = initial {
+        USB_TO_BRIDGE.send(BridgeFrame { session, data }).await;
+    }
+
+    loop {
+        let mut data = CdcData::empty();
+        match bulk_in.request_in(&mut data.bytes[..packet_size]).await {
+            Ok(0) => {}
+            Ok(count) if count <= packet_size => {
+                data.len = count as u8;
+                if !record_rx_if_current(generation, Phase::CdcReady, count).await {
+                    return Error::NotReady;
+                }
+                USB_TO_BRIDGE.send(BridgeFrame { session, data }).await;
+            }
+            Ok(_) => {
+                return fail_current_session(
+                    generation,
+                    Phase::CdcReady,
+                    Phase::CdcError,
+                    Error::Transfer,
+                )
+                .await;
+            }
+            Err(PipeError::Disconnected) => return Error::NotReady,
+            Err(_) => {
+                return fail_current_session(
+                    generation,
+                    Phase::CdcReady,
+                    Phase::CdcError,
+                    Error::Transfer,
+                )
+                .await;
+            }
+        }
+    }
+}
+
+async fn bridge_tcp_to_usb<O>(bulk_out: &mut O, session: u32, generation: u32) -> BridgeOutputEnd
+where
+    O: UsbPipe<pipe::Bulk, pipe::Out>,
+{
+    loop {
+        match select(BRIDGE_TO_USB.receive(), HOST_COMMANDS.receive()).await {
+            Either::First(frame) => {
+                if frame.session != session {
+                    continue;
+                }
+                let count = frame.data.as_bytes().len();
+                match with_timeout(
+                    TRANSFER_TIMEOUT,
+                    bulk_out.request_out(frame.data.as_bytes(), false),
+                )
+                .await
+                {
+                    Ok(Ok(())) => {
+                        if !record_tx_if_current(generation, Phase::CdcReady, count).await {
+                            return BridgeOutputEnd::Failed;
+                        }
+                    }
+                    Ok(Err(PipeError::Disconnected)) => return BridgeOutputEnd::Failed,
+                    Ok(Err(_)) => {
+                        fail_current_session(
+                            generation,
+                            Phase::CdcReady,
+                            Phase::CdcError,
+                            Error::Transfer,
+                        )
+                        .await;
+                        return BridgeOutputEnd::Failed;
+                    }
+                    Err(_) => {
+                        fail_current_session(
+                            generation,
+                            Phase::CdcReady,
+                            Phase::CdcError,
+                            Error::Timeout,
+                        )
+                        .await;
+                        return BridgeOutputEnd::Failed;
+                    }
+                }
+            }
+            Either::Second(command) => {
+                if !command_is_current(&command).await {
+                    reject_command(command, Error::NotReady);
+                    continue;
+                }
+
+                match command.operation {
+                    Operation::BridgeClose {
+                        session: close_session,
+                    } if close_session == session => {
+                        send_reply(Reply {
+                            sequence: command.sequence,
+                            result: ReplyResult::BridgeClose(Ok(())),
+                        });
+                        return BridgeOutputEnd::Closed;
+                    }
+                    Operation::BridgeOpen | Operation::BridgeClose { .. } => {
+                        reject_command(command, Error::ResourceBusy);
+                    }
+                    operation if operation.is_cdc_data() => {
+                        reject_command(command, Error::ResourceBusy);
+                    }
+                    _ => reject_command(command, Error::NotReady),
+                }
+            }
+        }
+    }
+}
+
+async fn run_bridge<'d, H, C, I, O>(
+    controller: &mut BusController<'d, H>,
+    cdc: CdcAcmHost<C, I, O>,
+    buffered: &mut CdcRxBuffer,
+    session: u32,
+    generation: u32,
+) -> (CdcAcmHost<C, I, O>, BridgeRunOutcome)
+where
+    H: UsbHostController<'d>,
+    C: UsbPipe<pipe::Control, pipe::InOut>,
+    I: UsbPipe<pipe::Bulk, pipe::In>,
+    O: UsbPipe<pipe::Bulk, pipe::Out>,
+{
+    let packet_size = usize::from(cdc.function().bulk_in_endpoint.max_packet_size);
+    let initial = buffered.take();
+    let (function, control, mut bulk_in, mut bulk_out) = cdc.into_parts();
+
+    let outcome = match select3(
+        bridge_wait_for_disconnect(controller),
+        bridge_usb_to_tcp(&mut bulk_in, session, generation, packet_size, initial),
+        bridge_tcp_to_usb(&mut bulk_out, session, generation),
+    )
+    .await
+    {
+        Either3::First(()) => BridgeRunOutcome::Disconnected,
+        Either3::Second(_) => BridgeRunOutcome::Failed,
+        Either3::Third(BridgeOutputEnd::Closed) => BridgeRunOutcome::Closed,
+        Either3::Third(BridgeOutputEnd::Failed) => BridgeRunOutcome::Failed,
+    };
+
+    set_bridge_connected_if_current(generation, true, false).await;
+    if !matches!(outcome, BridgeRunOutcome::Closed) {
+        BRIDGE_EVENT.signal(BridgeEvent::Closed { session });
+    }
+
+    (
+        CdcAcmHost::new(function, control, bulk_in, bulk_out),
+        outcome,
+    )
 }
 
 async fn wait_for_removal<'d, C>(controller: &mut BusController<'d, C>)
@@ -684,6 +1034,7 @@ async fn run(hardware: Hardware) {
 
     let application = async move {
         let _vbus_enable = vbus_enable;
+        let mut next_bridge_session = 0_u32;
 
         loop {
             let speed = loop {
@@ -1194,6 +1545,7 @@ async fn run(hardware: Hardware) {
 
                     if controls_ready {
                         cdc.reset_data_toggles();
+                        let mut cdc_rx_buffer = CdcRxBuffer::empty();
                         if set_phase_if_current(
                             session_generation,
                             Phase::Enumerating,
@@ -1222,6 +1574,57 @@ async fn run(hardware: Hardware) {
                                     Either::Second(
                                         command @ Command {
                                             sequence,
+                                            operation: Operation::BridgeOpen,
+                                            ..
+                                        },
+                                    ) => {
+                                        if !command_is_current(&command).await {
+                                            reject_command(command, Error::NotReady);
+                                            continue;
+                                        }
+                                        if !set_bridge_connected_if_current(
+                                            session_generation,
+                                            false,
+                                            true,
+                                        )
+                                        .await
+                                        {
+                                            reject_command(command, Error::ResourceBusy);
+                                            continue;
+                                        }
+
+                                        next_bridge_session = next_bridge_session.wrapping_add(1);
+                                        let bridge_session = next_bridge_session;
+                                        send_reply(Reply {
+                                            sequence,
+                                            result: ReplyResult::BridgeOpen(Ok(bridge_session)),
+                                        });
+
+                                        let (restored_cdc, outcome) = run_bridge(
+                                            &mut controller,
+                                            cdc,
+                                            &mut cdc_rx_buffer,
+                                            bridge_session,
+                                            session_generation,
+                                        )
+                                        .await;
+                                        cdc = restored_cdc;
+
+                                        match outcome {
+                                            BridgeRunOutcome::Closed => {
+                                                info!("raw USB serial bridge released");
+                                            }
+                                            BridgeRunOutcome::Disconnected => break,
+                                            BridgeRunOutcome::Failed => {
+                                                warn!("raw USB serial bridge transfer failed");
+                                                wait_for_removal(&mut controller).await;
+                                                break;
+                                            }
+                                        }
+                                    }
+                                    Either::Second(
+                                        command @ Command {
+                                            sequence,
                                             operation: Operation::Read { length },
                                             ..
                                         },
@@ -1233,18 +1636,23 @@ async fn run(hardware: Hardware) {
                                         let mut data = CdcData::empty();
                                         let result = match with_timeout(
                                             TRANSFER_TIMEOUT,
-                                            cdc.read(&mut data.bytes[..usize::from(length)]),
+                                            managed_cdc_read(
+                                                &mut cdc,
+                                                &mut cdc_rx_buffer,
+                                                &mut data.bytes[..usize::from(length)],
+                                            ),
                                         )
                                         .await
                                         {
-                                            Ok(Ok(count)) => {
-                                                data.len = count as u8;
-                                                if record_rx_if_current(
-                                                    session_generation,
-                                                    Phase::CdcReady,
-                                                    count,
-                                                )
-                                                .await
+                                            Ok(Ok(read)) => {
+                                                data.len = read.copied as u8;
+                                                if read.received == 0
+                                                    || record_rx_if_current(
+                                                        session_generation,
+                                                        Phase::CdcReady,
+                                                        read.received,
+                                                    )
+                                                    .await
                                                 {
                                                     Ok(data)
                                                 } else {
@@ -1360,28 +1768,32 @@ async fn run(hardware: Hardware) {
                                                     let mut data = CdcData::empty();
                                                     match with_timeout(
                                                         EXCHANGE_FIRST_RESPONSE_TIMEOUT,
-                                                        cdc.read(
+                                                        managed_cdc_read(
+                                                            &mut cdc,
+                                                            &mut cdc_rx_buffer,
                                                             &mut data.bytes
                                                                 [..usize::from(read_length)],
                                                         ),
                                                     )
                                                     .await
                                                     {
-                                                        Ok(Ok(0)) => Err(fail_current_session(
-                                                            session_generation,
-                                                            Phase::CdcReady,
-                                                            Phase::CdcError,
-                                                            Error::Transfer,
-                                                        )
-                                                        .await),
-                                                        Ok(Ok(count)) => {
-                                                            data.len = count as u8;
-                                                            if !record_rx_if_current(
-                                                                session_generation,
-                                                                Phase::CdcReady,
-                                                                count,
-                                                            )
-                                                            .await
+                                                        Ok(Ok(read)) => {
+                                                            data.len = read.copied as u8;
+                                                            if read.copied == 0 {
+                                                                Err(fail_current_session(
+                                                                    session_generation,
+                                                                    Phase::CdcReady,
+                                                                    Phase::CdcError,
+                                                                    Error::Transfer,
+                                                                )
+                                                                .await)
+                                                            } else if read.received != 0
+                                                                && !record_rx_if_current(
+                                                                    session_generation,
+                                                                    Phase::CdcReady,
+                                                                    read.received,
+                                                                )
+                                                                .await
                                                             {
                                                                 Err(Error::NotReady)
                                                             } else {
@@ -1395,14 +1807,18 @@ async fn run(hardware: Hardware) {
                                                                         usize::from(read_length);
                                                                     match with_timeout(
                                                                         EXCHANGE_IDLE_TIMEOUT,
-                                                                        cdc.read(
+                                                                        managed_cdc_read(
+                                                                            &mut cdc,
+                                                                            &mut cdc_rx_buffer,
                                                                             &mut data.bytes
                                                                                 [start..end],
                                                                         ),
                                                                     )
                                                                     .await
                                                                     {
-                                                                        Ok(Ok(0)) => {
+                                                                        Ok(Ok(read))
+                                                                            if read.copied == 0 =>
+                                                                        {
                                                                             exchange_result = Err(
                                                                                 fail_current_session(
                                                                                     session_generation,
@@ -1414,18 +1830,20 @@ async fn run(hardware: Hardware) {
                                                                             );
                                                                             break;
                                                                         }
-                                                                        Ok(Ok(count)) => {
+                                                                        Ok(Ok(read)) => {
                                                                             debug_assert!(
-                                                                                count
+                                                                                read.copied
                                                                                     <= end - start
                                                                             );
-                                                                            data.len += count as u8;
-                                                                            if record_rx_if_current(
-                                                                                session_generation,
-                                                                                Phase::CdcReady,
-                                                                                count,
-                                                                            )
-                                                                            .await
+                                                                            data.len +=
+                                                                                read.copied as u8;
+                                                                            if read.received == 0
+                                                                                || record_rx_if_current(
+                                                                                    session_generation,
+                                                                                    Phase::CdcReady,
+                                                                                    read.received,
+                                                                                )
+                                                                                .await
                                                                             {
                                                                                 exchange_result =
                                                                                     Ok(data);
@@ -1554,6 +1972,20 @@ async fn run(hardware: Hardware) {
                         }
                     }
                 }
+                Err(CdcAcmCreateError::Configuration(
+                    ConfigurationError::MissingControlInterface,
+                )) => {
+                    if set_phase_if_current(
+                        session_generation,
+                        Phase::Enumerating,
+                        Phase::UnsupportedDevice,
+                    )
+                    .await
+                    {
+                        warn!("full-speed USB device has no CDC-ACM function");
+                        wait_for_removal(&mut controller).await;
+                    }
+                }
                 Err(_) => {
                     if set_error_phase_if_current(
                         session_generation,
@@ -1562,25 +1994,8 @@ async fn run(hardware: Hardware) {
                     )
                     .await
                     {
-                        warn!("PIO USB device has no usable CDC-ACM function");
-                        loop {
-                            match select(
-                                controller.wait_for_device_event(),
-                                HOST_COMMANDS.receive(),
-                            )
-                            .await
-                            {
-                                Either::First(
-                                    DeviceEvent::Disconnected | DeviceEvent::Overcurrent,
-                                ) => {
-                                    break;
-                                }
-                                Either::First(_) => {}
-                                Either::Second(command) => {
-                                    reject_command(command, Error::NotReady);
-                                }
-                            }
-                        }
+                        warn!("PIO USB CDC-ACM discovery or pipe allocation failed");
+                        wait_for_removal(&mut controller).await;
                     }
                 }
             }
@@ -1598,4 +2013,90 @@ async fn run(hardware: Hardware) {
 #[embassy_executor::task]
 pub(crate) async fn usb_host_task(hardware: Hardware) {
     run(hardware).await;
+}
+
+async fn tcp_to_bridge(reader: &mut TcpReader<'_>, session: u32) -> Result<(), ()> {
+    loop {
+        let mut data = CdcData::empty();
+        let count = reader.read(&mut data.bytes).await.map_err(|_| ())?;
+        if count == 0 {
+            return Ok(());
+        }
+        data.len = count as u8;
+        BRIDGE_TO_USB.send(BridgeFrame { session, data }).await;
+    }
+}
+
+async fn bridge_to_tcp(writer: &mut TcpWriter<'_>, session: u32) -> Result<(), ()> {
+    loop {
+        let frame = USB_TO_BRIDGE.receive().await;
+        if frame.session != session {
+            continue;
+        }
+
+        let mut bytes = frame.data.as_bytes();
+        while !bytes.is_empty() {
+            let count = writer.write(bytes).await.map_err(|_| ())?;
+            if count == 0 {
+                return Err(());
+            }
+            bytes = &bytes[count..];
+        }
+    }
+}
+
+async fn bridge_closed(session: u32) {
+    loop {
+        let BridgeEvent::Closed {
+            session: closed_session,
+        } = BRIDGE_EVENT.wait().await;
+        if closed_session == session {
+            return;
+        }
+    }
+}
+
+#[embassy_executor::task]
+pub(crate) async fn usb_serial_task(stack: Stack<'static>) {
+    let mut rx_buffer = [0; BRIDGE_SOCKET_BUFFER_SIZE];
+    let mut tx_buffer = [0; BRIDGE_SOCKET_BUFFER_SIZE];
+    let mut socket = TcpSocket::new(stack, &mut rx_buffer, &mut tx_buffer);
+
+    loop {
+        socket.set_timeout(None);
+        socket.set_keep_alive(Some(Duration::from_secs(10)));
+        socket.set_nagle_enabled(false);
+
+        if socket.accept(crate::USB_SERIAL_PORT).await.is_ok() {
+            BRIDGE_TO_USB.clear();
+            USB_TO_BRIDGE.clear();
+            BRIDGE_EVENT.reset();
+
+            match bridge_open().await {
+                Ok(session) => {
+                    info!("raw USB serial TCP client connected");
+                    {
+                        let (mut reader, mut writer) = socket.split();
+                        let _ = select3(
+                            tcp_to_bridge(&mut reader, session),
+                            bridge_to_tcp(&mut writer, session),
+                            bridge_closed(session),
+                        )
+                        .await;
+                    }
+                    let _ = bridge_close(session).await;
+                    info!("raw USB serial TCP client disconnected");
+                }
+                Err(_) => {
+                    warn!("raw USB serial TCP client rejected: CDC-ACM unavailable");
+                }
+            }
+        }
+
+        BRIDGE_TO_USB.clear();
+        USB_TO_BRIDGE.clear();
+        socket.abort();
+        let _ = socket.flush().await;
+        Timer::after(Duration::from_millis(20)).await;
+    }
 }

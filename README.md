@@ -21,7 +21,8 @@ RP2040 PIO blocks while the native USB controller remains the CDC-NCM device.
 - Stable locally administered MAC addresses derived from the Pico flash UID
 - Stable 16-character USB serial number derived from the full 64-bit flash UID
 - IPv6 link-local address derived from the device MAC
-- mDNS/DNS-SD advertisement for `_http._tcp` and `_scpi-raw._tcp`
+- mDNS/DNS-SD advertisement for `_http._tcp` and `_scpi-raw._tcp`, plus
+  `_usbserial._tcp` on the USB-host profile
 - Predictable board-specific hostnames with a flash-UID fallback on conflict
 - SCPI-RAW instrument server on TCP port 5025 using `microscpi`
 - Four-channel 12-bit ADC measurements on A0-A3, plus internal temperature
@@ -39,6 +40,7 @@ RP2040 PIO blocks while the native USB controller remains the CDC-NCM device.
 - CAN TX, RX broadcast to connected WebSocket clients, status, bitrate/mode config
 - Concurrent I2C status, scan, read, write, and write-read transactions
 - PIO USB host with full-speed CDC-ACM and low-speed Velleman P8055 HID support
+- Raw binary TCP bridge to a hosted CDC-ACM stream on port 7000
 - Compile-time profiles for four Adafruit RP2040 boards
 - Board status indication while the USB network is not ready, where available
 
@@ -408,6 +410,49 @@ python3 examples/scpi_usb_host_cdc.py
 python3 examples/scpi_usb_host_cdc.py ATI
 ```
 
+### Raw TCP USB-serial bridge
+
+The USB-host profile also exposes an enumerated CDC-ACM byte stream directly
+on TCP port 7000, advertised through DNS-SD as `_usbserial._tcp`. This is a raw
+binary TCP bridge: it adds no banner, framing, character encoding, or line
+ending, and it does not interpret `0xff` or any other byte. It is not a Telnet
+or RFC 2217 server, so clients must not send Telnet option negotiation.
+
+One TCP client at a time owns the CDC stream. The host manager remains the sole
+owner of the USB control and bulk pipes and applies bounded backpressure
+between TCP and USB. While a raw client holds the stream, the SCPI
+`CDC:WRITE:HEX`, `CDC:READ:HEX?`, and `CDC:EXCHANGE:HEX?` data commands report
+`-221,"Settings conflict"`; other SCPI commands, including the host-status
+query, remain available. Closing the TCP connection releases the stream, and
+detaching the USB device closes the active TCP connection. A new client can
+connect after the same CDC device is reattached without rebooting the bridge.
+
+CDC-ACM is currently the only USB-serial driver behind port 7000. The bridge
+opens it at a fixed 115200 baud, 8 data bits, no parity, and one stop bit, with
+DTR and RTS asserted. Vendor-specific serial adapters such as FTDI are not yet
+supported by this port.
+
+The standard-library-only Python client sends `AT` followed by CRLF by default,
+then waits for the first response and collects further bytes until the stream
+has briefly been idle:
+
+```sh
+python3 examples/usb_serial_tcp.py
+python3 examples/usb_serial_tcp.py ATI
+```
+
+For binary protocols, `--hex` sends exactly the supplied bytes and never
+appends a terminator:
+
+```sh
+python3 examples/usb_serial_tcp.py --hex "00 FF 0D 0A"
+```
+
+A native iOS or iPadOS app can use an ordinary TCP connection to port 7000 over
+the bridge's CDC-NCM network. This path does not use Apple's External Accessory
+framework or an MFi serial accessory; the app may still need iOS local-network
+permission.
+
 ### Velleman K8055/P8055 over SCPI
 
 The USB-host profile recognizes original Velleman boards with VID `0x10cf` and
@@ -770,6 +815,8 @@ Example:
   high-speed devices, or isochronous transfers. The integration exposes generic
   full-speed CDC-ACM and the original low-speed Velleman K8055/P8055 protocol;
   it is not yet a general-purpose HID instrument API.
+- The raw USB-serial TCP bridge accepts one client, supports CDC-ACM only, and
+  uses fixed line settings; it does not implement Telnet or RFC 2217 controls.
 - RP2040 ADC voltage and temperature results are nominal, not calibrated
   instrument-grade measurements.
 - The Embassy RP2040 I2C driver has no address-only probe operation. `i2c.scan`
