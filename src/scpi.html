@@ -117,6 +117,9 @@ td:first-child{width:38%;white-space:nowrap}td code{font-weight:650}
 <tr><td><code>SYST:ERR?</code></td><td>Read the oldest queued error</td></tr>
 <tr><td><code>SYST:ERR:COUN?</code></td><td>Number of queued errors</td></tr>
 <tr><td><code>SYST:CHAN:COUN?</code></td><td>Number of external ADC channels</td></tr>
+<tr><td><code>SYST:USB:HOST:STAT?</code></td><td>PIO USB host state and counters (USB-host profile)</td></tr>
+<tr><td><code>SYST:USB:HOST:CDC:WRITE:HEX "&lt;hex&gt;"</code></td><td>Write 1-64 CDC-ACM bytes (USB-host profile)</td></tr>
+<tr><td><code>SYST:USB:HOST:CDC:READ:HEX? &lt;1-64&gt;</code></td><td>Read CDC-ACM bytes as uppercase hex (USB-host profile)</td></tr>
 <tr><td><code>SYST:I2C:DEV:CAT?</code></td><td>Supported I2C device models</td></tr>
 <tr><td><code>SYST:I2C:DEV:ADD &lt;slot&gt;,"&lt;model&gt;",&lt;address&gt;</code></td><td>Verify, initialize and register a sensor</td></tr>
 <tr><td><code>SYST:I2C:DEV? &lt;slot&gt;</code></td><td>Read one configured device</td></tr>

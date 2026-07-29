@@ -7,7 +7,8 @@ use embassy_rp::i2c::{AbortReason, Async, Error as I2cError, I2c, Instance};
 use embassy_rp::peripherals::I2C0;
 #[cfg(any(
     feature = "board-adafruit-rp2040-can",
-    feature = "board-adafruit-feather-rp2040"
+    feature = "board-adafruit-feather-rp2040",
+    feature = "board-adafruit-rp2040-usb-host"
 ))]
 use embassy_rp::peripherals::I2C1;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
@@ -830,7 +831,8 @@ pub(crate) async fn i2c0_task(bus: I2c<'static, I2C0, Async>) {
 
 #[cfg(any(
     feature = "board-adafruit-rp2040-can",
-    feature = "board-adafruit-feather-rp2040"
+    feature = "board-adafruit-feather-rp2040",
+    feature = "board-adafruit-rp2040-usb-host"
 ))]
 #[embassy_executor::task]
 pub(crate) async fn i2c1_task(bus: I2c<'static, I2C1, Async>) {

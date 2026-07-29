@@ -39,6 +39,8 @@ mod pct2075;
 mod scpi;
 #[cfg(feature = "i2c")]
 mod seesaw_encoder;
+#[cfg(feature = "board-adafruit-rp2040-usb-host")]
+mod usb_host;
 #[cfg(any(feature = "can", feature = "i2c"))]
 mod websocket;
 
@@ -65,6 +67,7 @@ use {defmt_rtt as _, panic_probe as _};
 
 pub(crate) const MTU: usize = 1514;
 const USB_MAX_PACKET_SIZE: u16 = 64;
+pub(crate) const USB_HOST_CDC_MAX_TRANSFER: usize = 64;
 const FLASH_UID_BYTES: usize = 8;
 const USB_SERIAL_BYTES: usize = FLASH_UID_BYTES * 2;
 pub(crate) const HTTP_PORT: u16 = 80;
@@ -146,7 +149,7 @@ fn host_silence_recovery(attempt: u32) -> (Duration, &'static [u8]) {
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
-    let p = embassy_rp::init(Default::default());
+    let p = embassy_rp::init(board::rp_config());
     let board::Board {
         flash,
         usb,

@@ -10,7 +10,9 @@ pins, flash size, status indicator, and USB product name. The default Adafruit
 RP2040 CAN Bus Feather profile enables both its onboard CAN controller and
 STEMMA QT I2C bus. All profiles enable the four external ADC channels. The
 Adafruit Feather RP2040 and KB2040 profiles enable I2C and ADC without
-compiling CAN support or configuring CAN/SPI pins.
+compiling CAN support or configuring CAN/SPI pins. The Adafruit Feather RP2040
+USB Host profile additionally runs a directly connected USB host through the
+RP2040 PIO blocks while the native USB controller remains the CDC-NCM device.
 
 ## Current Features
 
@@ -36,7 +38,8 @@ compiling CAN support or configuring CAN/SPI pins.
 - MCP25625 CAN support via the `mcp25xx` crate
 - CAN TX, RX broadcast to connected WebSocket clients, status, bitrate/mode config
 - Concurrent I2C status, scan, read, write, and write-read transactions
-- Compile-time profiles for three Adafruit RP2040 boards
+- PIO USB host with generic full-speed CDC-ACM enumeration and SCPI byte-stream access
+- Compile-time profiles for four Adafruit RP2040 boards
 - Board status indication while the USB network is not ready, where available
 
 ## Hardware
@@ -47,12 +50,32 @@ Supported board profiles:
 | --- | --- | --- | --- |
 | `board-adafruit-rp2040-can` | CAN, I2C, ADC | I2C1, SDA GP2, SCL GP3 | `pico-io-can-feather.local` |
 | `board-adafruit-feather-rp2040` | I2C, ADC | I2C1, SDA GP2, SCL GP3 | `pico-io-feather.local` |
+| `board-adafruit-rp2040-usb-host` | PIO USB host, I2C, ADC | I2C1, SDA GP2, SCL GP3 | `pico-io-usb-host.local` |
 | `board-adafruit-kb2040` | I2C, ADC | I2C0, SDA GP12, SCL GP13 | `pico-io-kb2040.local` |
 
-The regular Feather RP2040 profile selects Embassy's generic `03h` second-stage
-flash bootloader. Adafruit boards of this model may contain either GD25Q64C or
-W25Q64JV flash, and the official Pico SDK board definition makes the same
-generic compatibility choice. The KB2040 uses the faster W25Q bootloader.
+The regular Feather RP2040 and Feather RP2040 USB Host profiles select
+Embassy's generic `03h` second-stage flash bootloader. Adafruit boards of these
+models may contain either GD25Q64C or W25Q64JV flash, and the official Pico SDK
+board definitions make the same generic compatibility choice. The KB2040 uses
+the faster W25Q bootloader.
+
+The PIO USB host profile has a fixed, compile-time resource contract:
+
+| Resource | PIO USB host use |
+| --- | --- |
+| `clk_sys` | Exactly 120 MHz |
+| PIO0 SM0 | USB transmit |
+| PIO1 SM0/SM1 | USB receive and edge/EOP detection |
+| DMA channel 0 | USB transmit DMA |
+| GP16 / GP17 | D+ / D- |
+| GP18 | Active-high enable for the board's current-limited 5 V VBUS switch |
+
+Both PIO blocks remain reserved for the host firmware's lifetime. GP16 and GP17
+are exact requirements of the pinned backend, not a configurable consecutive
+pin pair. GP18 only controls the board's protected load switch and does not
+source VBUS directly. The RP2040 native USB controller and `USBCTRL_IRQ` remain
+dedicated to CDC-NCM, so device-side networking and the PIO root port operate
+concurrently.
 
 The default Adafruit RP2040 CAN Bus Feather connects its onboard MCP25625 as
 follows:
@@ -71,12 +94,14 @@ uses I2C1, so both hardware blocks run concurrently without a pin conflict.
 All profiles expose the RP2040 ADC inputs A0-A3 on GP26-GP29 through SCPI.
 Pins for interfaces absent from the selected board profile are left untouched.
 
-The CAN Feather and regular Feather RP2040 use their red LED on GP13 as a
-startup indicator. The LED turns on after reset and turns off when DHCP has
-assigned the host an address and mDNS has established the advertised services.
-The KB2040 profile cannot use GP13 as an LED because it is the STEMMA QT clock
-pin. Its onboard NeoPixel is deliberately left untouched for now, so network
-readiness is reported through the UART log instead.
+The CAN Feather, regular Feather RP2040, and Feather RP2040 USB Host use their
+red LED on GP13 as a startup indicator. The existing `StatusIndicator` remains
+the pin's sole owner; the PIO host manager reports its state through shared
+state rather than taking the LED. The LED turns on after reset and turns off
+when DHCP has assigned the CDC-NCM host an address and mDNS has established the
+advertised services. The KB2040 profile cannot use GP13 as an LED because it is
+the STEMMA QT clock pin. Its onboard NeoPixel is deliberately left untouched
+for now, so network readiness is reported through the UART log instead.
 
 If the host remains silent during startup, the firmware briefly disconnects
 USB before retrying enumeration. The disconnect grows from 350 ms to 1, 3,
@@ -89,6 +114,9 @@ five seconds; a bus-powered device cannot remove VBUS from its own hub port.
 ## Build
 
 The project is configured for `thumbv6m-none-eabi` in `.cargo/config.toml`.
+The root release profile uses `opt-level = "s"`, fat LTO, and one codegen unit.
+These settings are intentionally repeated here because Cargo does not inherit a
+dependency crate's release profile.
 
 ```sh
 cargo build --release
@@ -125,8 +153,18 @@ For the Adafruit KB2040:
 cargo build --release --no-default-features --features board-adafruit-kb2040
 ```
 
-The two I2C/ADC profiles exclude the `mcp25xx` dependency, CAN task, CAN HTTP
-page and `/can` WebSocket endpoint from the resulting firmware.
+For the Adafruit Feather RP2040 USB Host:
+
+```sh
+cargo build --release --no-default-features --features board-adafruit-rp2040-usb-host
+```
+
+The three non-CAN profiles exclude the `mcp25xx` dependency, CAN task, CAN HTTP
+page and `/can` WebSocket endpoint from the resulting firmware. The USB-host
+profile adds
+[`embassy-rp-pio-usb-host`](https://github.com/ulso/embassy-rp-pio-usb-host)
+as an optional Git dependency pinned to commit
+`0e743e5a8a8a2cd09ecab46e68670c07fc3dcf2e`.
 
 ## Flash
 
@@ -201,11 +239,11 @@ http://pico-io-can-feather.local/scpi.html SCPI instrument information
 ```
 
 Only pages and WebSocket endpoints for interfaces in the selected board profile
-are available. The CAN Feather uses the CAN console at `/`; the two I2C-only
-profiles serve the I2C console there. The SCPI information page is available in
-every profile. `/api/status` reports instrument identity, SCPI-RAW connection
-metadata, the active interface names and the endpoint paths in its `pages` and
-`websockets` fields.
+are available. The CAN Feather uses the CAN console at `/`; the three non-CAN
+profiles serve the I2C console there. The SCPI information page is available
+in every profile. `/api/status` reports instrument identity, SCPI-RAW
+connection metadata, the active interface names and the endpoint paths in its
+`pages` and `websockets` fields.
 
 ## SCPI-RAW Instrument API
 
@@ -268,6 +306,9 @@ Initial command set:
 | `SYST:VERS?` | Supported SCPI standard version |
 | `SYST:ERR?`, `SYST:ERR:COUN?` | Read the error queue |
 | `SYST:CHAN:COUN?` | Number of external ADC channels (`4`) |
+| `SYST:USB:HOST:STAT?` | PIO USB host state and transfer counters; USB-host profile only |
+| `SYST:USB:HOST:CDC:WRITE:HEX "<hex>"` | Write 1-64 bytes to the enumerated CDC-ACM stream; USB-host profile only |
+| `SYST:USB:HOST:CDC:READ:HEX? <length>` | Read up to 1-64 CDC-ACM bytes and return uppercase hex; USB-host profile only |
 | `SYST:I2C:DEV:CAT?` | Supported I2C device models |
 | `SYST:I2C:DEV:ADD <slot>,"<model>",<address>` | Verify, initialize, and register a device |
 | `SYST:I2C:DEV? <slot>` | Device configuration as `slot,model,bus,address` |
@@ -308,6 +349,36 @@ Initial command set:
 SCPI channel 0 maps to A0/GP26, through channel 3 at A3/GP29. Voltage conversion
 assumes a nominal 3.3 V ADC reference and is not calibrated. Keep analog inputs
 between ground and 3.3 V; RP2040 GPIO pins are not 5 V tolerant.
+
+On the USB-host profile, `SYST:USB:HOST:STAT?` returns:
+
+```text
+phase,speed,address,vid,pid,rx_bytes,tx_bytes,error_count,max_transfer
+```
+
+For example, `CDC_READY,FULL,1,2458,1,12,4,0,64` reports a configured
+full-speed CDC-ACM function. The possible phases are `POWER_OFF`, `WAITING`,
+`RESETTING`, `ENUMERATING`, `CDC_READY`, `UNSUPPORTED_SPEED`,
+`ENUMERATION_ERROR`, and `CDC_ERROR`. Speed is `FULL`, `LOW`, or `NONE`.
+
+CDC transfers use owned 64-byte messages between SCPI and the host-manager task;
+the manager remains the sole owner of enumeration state and all control,
+bulk-IN, and bulk-OUT pipes. Hex input must contain an even number of
+hexadecimal digits. The manager asserts DTR when it opens a CDC-ACM function.
+For example, this writes `AT` followed by CRLF and then requests up to 64
+response bytes:
+
+```text
+SYST:USB:HOST:CDC:WRITE:HEX "41540D0A"
+SYST:USB:HOST:CDC:READ:HEX? 64
+```
+
+The write command returns the byte count. The read query returns uppercase hex
+without separators and can return fewer bytes than requested. Each transfer
+has a two-second deadline. Data commands report a settings conflict unless the
+phase is `CDC_READY`. A timed-out write has an indeterminate device-side byte
+count and must not be retried blindly, because the device may already have
+accepted part or all of it.
 
 Each measurement takes a fresh block of samples and returns their rounded
 arithmetic mean. `SENS:AVER:COUN` controls the block size globally for A0-A3
@@ -613,6 +684,10 @@ Example:
 - The WebSocket protocol is intentionally small and JSON-only at the moment.
 - The SCPI server currently supports one TCP client at a time and scalar channel
   numbers rather than SCPI channel-list expressions such as `(@1:4)`.
+- The PIO host supports one directly connected root device and no hubs or
+  isochronous transfers. This integration exposes generic CDC-ACM only.
+  Low-speed attachment is detected, but CDC-ACM requires bulk endpoints and is
+  therefore accepted only at full speed.
 - RP2040 ADC voltage and temperature results are nominal, not calibrated
   instrument-grade measurements.
 - The Embassy RP2040 I2C driver has no address-only probe operation. `i2c.scan`

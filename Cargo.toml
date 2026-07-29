@@ -11,6 +11,15 @@ resolver = "2"
 default = ["board-adafruit-rp2040-can"]
 board-adafruit-rp2040-can = ["mdns", "dhcp-server", "mcp25625", "i2c"]
 board-adafruit-feather-rp2040 = ["mdns", "dhcp-server", "i2c", "embassy-rp/boot2-generic-03h"]
+board-adafruit-rp2040-usb-host = [
+    "mdns",
+    "dhcp-server",
+    "i2c",
+    "dep:embassy-rp-pio-usb-host",
+    "embassy-rp-pio-usb-host/embassy-usb-host",
+    "dep:embassy-usb-host",
+    "embassy-rp/boot2-generic-03h",
+]
 board-adafruit-kb2040 = ["mdns", "dhcp-server", "i2c"]
 mdns = ["dep:embedded-alloc", "dep:hick-embassy", "dep:mdns-proto", "hick-embassy/no-atomic", "mdns-proto/no-atomic", "embassy-net/mdns"]
 dhcp-server = ["dep:leasehund", "leasehund/defmt", "embassy-net/dhcpv4"]
@@ -27,6 +36,13 @@ embassy-time = { version = "0.5.1", features = ["defmt", "defmt-timestamp-uptime
 embassy-rp = { version = "0.10.0", features = ["defmt", "unstable-pac", "time-driver", "critical-section-impl", "rp2040"] }
 embassy-futures = { version = "0.1.2"}
 embassy-usb = { version = "0.6.0", default-features = false, features = ["defmt", "max-interface-count-4"] }
+embassy-usb-host = { version = "=0.1.0", default-features = false, optional = true }
+embassy-rp-pio-usb-host = {
+    git = "https://github.com/ulso/embassy-rp-pio-usb-host",
+    rev = "0e743e5a8a8a2cd09ecab46e68670c07fc3dcf2e",
+    default-features = false,
+    optional = true,
+}
 usbd-hid = "0.10.0"
 embassy-net = { version = "0.9.1", features = ["defmt", "tcp", "udp", "medium-ethernet", "multicast", "proto-ipv4", "proto-ipv6", "auto-icmp-echo-reply"] }
 
@@ -64,6 +80,9 @@ vl53l4cd = { version = "0.4.0", default-features = false, optional = true }
 
 [profile.release]
 debug = true
+lto = "fat"
+opt-level = "s"
+codegen-units = 1
 
 # Below configs are here to mute the rust-analyzer error.
 # "Can't find crate for 'test'" as this is a no_std project

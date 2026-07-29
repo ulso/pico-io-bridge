@@ -3,6 +3,7 @@
 BOARD_HOSTS = (
     ("RP2040 CAN Bus Feather", "pico-io-can-feather.local"),
     ("Feather RP2040", "pico-io-feather.local"),
+    ("Feather RP2040 USB Host", "pico-io-usb-host.local"),
     ("KB2040", "pico-io-kb2040.local"),
 )
 SCPI_PORT = 5025

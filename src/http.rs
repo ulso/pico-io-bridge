@@ -24,13 +24,30 @@ enum WebSocketEndpoint {
     I2c,
 }
 
-#[cfg(all(feature = "can", feature = "i2c"))]
+#[cfg(feature = "board-adafruit-rp2040-usb-host")]
+const API_STATUS_CAPABILITIES: &str = r#","interfaces":["usb-host","i2c","scpi"],"websocket":"/i2c","websockets":["/i2c"],"pages":{"i2c":"/","scpi":"/scpi.html"}"#;
+#[cfg(all(
+    not(feature = "board-adafruit-rp2040-usb-host"),
+    feature = "can",
+    feature = "i2c"
+))]
 const API_STATUS_CAPABILITIES: &str = r#","interfaces":["can","i2c","scpi"],"websocket":"/can","websockets":["/can","/i2c"],"pages":{"can":"/","i2c":"/i2c.html","scpi":"/scpi.html"}"#;
-#[cfg(all(feature = "can", not(feature = "i2c")))]
+#[cfg(all(
+    not(feature = "board-adafruit-rp2040-usb-host"),
+    feature = "can",
+    not(feature = "i2c")
+))]
 const API_STATUS_CAPABILITIES: &str = r#","interfaces":["can","scpi"],"websocket":"/can","websockets":["/can"],"pages":{"can":"/","scpi":"/scpi.html"}"#;
-#[cfg(all(not(feature = "can"), feature = "i2c"))]
+#[cfg(all(
+    not(feature = "board-adafruit-rp2040-usb-host"),
+    not(feature = "can"),
+    feature = "i2c"
+))]
 const API_STATUS_CAPABILITIES: &str = r#","interfaces":["i2c","scpi"],"websocket":"/i2c","websockets":["/i2c"],"pages":{"i2c":"/","scpi":"/scpi.html"}"#;
-#[cfg(not(any(feature = "can", feature = "i2c")))]
+#[cfg(all(
+    not(feature = "board-adafruit-rp2040-usb-host"),
+    not(any(feature = "can", feature = "i2c"))
+))]
 const API_STATUS_CAPABILITIES: &str =
     r#","interfaces":["scpi"],"websockets":[],"pages":{"scpi":"/scpi.html"}"#;
 

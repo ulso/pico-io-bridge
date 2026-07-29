@@ -29,6 +29,20 @@ struct ImuVectorResponse(crate::bno08x::Vector3);
 struct ImuQuaternionResponse(crate::bno08x::Quaternion);
 struct ImuResponse(crate::bno08x::Measurement);
 struct ThermalFrameResponse([i16; crate::amg8833::PIXEL_COUNT]);
+struct UsbHostStatusResponse {
+    phase: &'static str,
+    speed: &'static str,
+    address: u8,
+    vendor_id: u16,
+    product_id: u16,
+    rx_bytes: u32,
+    tx_bytes: u32,
+    error_count: u32,
+}
+struct UsbHostDataResponse {
+    length: u8,
+    data: [u8; crate::USB_HOST_CDC_MAX_TRANSFER],
+}
 
 impl scpi::Response for DeviceListResponse {
     fn write_response(&self, output: &mut impl scpi::Write) -> Result<(), scpi::Error> {
@@ -62,6 +76,64 @@ impl scpi::Response for ThermalFrameResponse {
             (f32::from(*quarters) * 0.25).write_response(output)?;
         }
         Ok(())
+    }
+}
+
+impl scpi::Response for UsbHostStatusResponse {
+    fn write_response(&self, output: &mut impl scpi::Write) -> Result<(), scpi::Error> {
+        output.write_str(self.phase)?;
+        output.write_char(',')?;
+        output.write_str(self.speed)?;
+        output.write_fmt(format_args!(
+            ",{},{},{},{},{},{},{}",
+            self.address,
+            self.vendor_id,
+            self.product_id,
+            self.rx_bytes,
+            self.tx_bytes,
+            self.error_count,
+            crate::USB_HOST_CDC_MAX_TRANSFER
+        ))
+    }
+}
+
+impl UsbHostStatusResponse {
+    #[cfg(feature = "board-adafruit-rp2040-usb-host")]
+    fn from_status(status: crate::usb_host::Status) -> Self {
+        Self {
+            phase: status.phase.as_str(),
+            speed: match status.speed {
+                Some(speed) => speed.as_str(),
+                None => "NONE",
+            },
+            address: status.address,
+            vendor_id: status.vendor_id,
+            product_id: status.product_id,
+            rx_bytes: status.rx_bytes,
+            tx_bytes: status.tx_bytes,
+            error_count: status.error_count,
+        }
+    }
+}
+
+impl scpi::Response for UsbHostDataResponse {
+    fn write_response(&self, output: &mut impl scpi::Write) -> Result<(), scpi::Error> {
+        for byte in &self.data[..usize::from(self.length)] {
+            output.write_fmt(format_args!("{byte:02X}"))?;
+        }
+        Ok(())
+    }
+}
+
+impl UsbHostDataResponse {
+    #[cfg(feature = "board-adafruit-rp2040-usb-host")]
+    fn from_cdc(data: crate::usb_host::CdcData) -> Self {
+        let mut response = Self {
+            length: data.as_bytes().len() as u8,
+            data: [0; crate::USB_HOST_CDC_MAX_TRANSFER],
+        };
+        response.data[..data.as_bytes().len()].copy_from_slice(data.as_bytes());
+        response
     }
 }
 
@@ -157,6 +229,17 @@ fn imu_error(error: devices::DeviceError) -> scpi::Error {
         devices::DeviceError::Timeout => scpi::Error::Custom(-302, "BNO08x timeout"),
         devices::DeviceError::Bus => scpi::Error::Custom(-303, "BNO08x I2C error"),
         error => device_error(error),
+    }
+}
+
+#[cfg(feature = "board-adafruit-rp2040-usb-host")]
+fn usb_host_error(error: crate::usb_host::Error) -> scpi::Error {
+    match error {
+        crate::usb_host::Error::InvalidLength => scpi::Error::DataOutOfRange,
+        crate::usb_host::Error::InvalidHex => scpi::Error::InvalidStringData,
+        crate::usb_host::Error::NotReady => scpi::Error::SettingsConflict,
+        crate::usb_host::Error::Timeout => scpi::Error::Custom(-310, "USB host timeout"),
+        crate::usb_host::Error::Transfer => scpi::Error::Custom(-311, "USB host transfer error"),
     }
 }
 
@@ -350,6 +433,54 @@ impl ScpiInstrument {
     #[scpi(cmd = "SYSTem:CHANnel:COUNt?")]
     async fn channel_count(&mut self) -> Result<usize, scpi::Error> {
         Ok(CHANNEL_COUNT)
+    }
+
+    #[scpi(cmd = "SYSTem:USB:HOST:STATus?")]
+    async fn usb_host_status(&mut self) -> Result<UsbHostStatusResponse, scpi::Error> {
+        #[cfg(feature = "board-adafruit-rp2040-usb-host")]
+        {
+            Ok(UsbHostStatusResponse::from_status(
+                crate::usb_host::status().await,
+            ))
+        }
+        #[cfg(not(feature = "board-adafruit-rp2040-usb-host"))]
+        {
+            Err(scpi::Error::SettingsConflict)
+        }
+    }
+
+    #[scpi(cmd = "SYSTem:USB:HOST:CDC:WRITe:HEX")]
+    async fn usb_host_cdc_write_hex(&mut self, data: &str) -> Result<u8, scpi::Error> {
+        #[cfg(feature = "board-adafruit-rp2040-usb-host")]
+        {
+            crate::usb_host::cdc_write_hex(data)
+                .await
+                .map_err(usb_host_error)
+        }
+        #[cfg(not(feature = "board-adafruit-rp2040-usb-host"))]
+        {
+            let _ = data;
+            Err(scpi::Error::SettingsConflict)
+        }
+    }
+
+    #[scpi(cmd = "SYSTem:USB:HOST:CDC:READ:HEX?")]
+    async fn usb_host_cdc_read_hex(
+        &mut self,
+        length: u8,
+    ) -> Result<UsbHostDataResponse, scpi::Error> {
+        #[cfg(feature = "board-adafruit-rp2040-usb-host")]
+        {
+            crate::usb_host::cdc_read(length)
+                .await
+                .map(UsbHostDataResponse::from_cdc)
+                .map_err(usb_host_error)
+        }
+        #[cfg(not(feature = "board-adafruit-rp2040-usb-host"))]
+        {
+            let _ = length;
+            Err(scpi::Error::SettingsConflict)
+        }
     }
 
     #[scpi(cmd = "SYSTem:I2C:DEVice:CATalog?")]
