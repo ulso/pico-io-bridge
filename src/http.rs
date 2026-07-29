@@ -276,7 +276,10 @@ async fn write_usb_host_status_response(
         body,
         "{{\"phase\":\"{}\",\"ready\":{},\"speed\":{},\"address\":{},\"vendorId\":{},\"productId\":{},\"rxBytes\":{},\"txBytes\":{},\"errorCount\":{},\"maxTransfer\":{}}}",
         status.phase.as_str(),
-        status.phase == crate::usb_host::Phase::CdcReady,
+        matches!(
+            status.phase,
+            crate::usb_host::Phase::CdcReady | crate::usb_host::Phase::P8055Ready
+        ),
         speed,
         address,
         vendor_id,
@@ -284,7 +287,10 @@ async fn write_usb_host_status_response(
         status.rx_bytes,
         status.tx_bytes,
         status.error_count,
-        crate::USB_HOST_CDC_MAX_TRANSFER,
+        match status.speed {
+            Some(crate::usb_host::HostSpeed::Low) => crate::p8055::REPORT_LEN,
+            Some(crate::usb_host::HostSpeed::Full) | None => crate::USB_HOST_CDC_MAX_TRANSFER,
+        },
     )
     .unwrap();
     write_http_response(socket, "application/json", body.as_bytes()).await

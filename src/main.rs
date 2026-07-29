@@ -34,6 +34,8 @@ mod lc709203f;
 #[cfg(feature = "mdns")]
 mod mdns;
 mod network;
+#[cfg(feature = "board-adafruit-rp2040-usb-host")]
+mod p8055;
 #[cfg(feature = "i2c")]
 mod pct2075;
 mod scpi;

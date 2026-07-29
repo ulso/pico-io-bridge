@@ -126,15 +126,16 @@ function hex16(value){return Number(value||0).toString(16).toUpperCase().padStar
 function deviceName(info){
  if(info.vendorId===0x2dcf&&info.productId===0x6001)return "BleuIO bootloader";
  if(info.vendorId===0x2dcf&&info.productId===0x6002)return "BleuIO";
+ if(info.vendorId===0x10cf&&info.productId>=0x5500&&info.productId<=0x5503)return "Velleman K8055 / P8055";
  if(info.vendorId!==null||info.productId!==null)return "USB device";
- if(info.phase==="UNSUPPORTED_SPEED")return "Unsupported low-speed device";
+ if(info.phase==="UNSUPPORTED_SPEED")return "Unsupported-speed USB device";
  if(info.speed!==null)return "Enumerating USB device";
  return "No device";
 }
 function addEvent(text){events.unshift({time:new Date().toLocaleTimeString(),text});events=events.slice(0,12);eventsEl.textContent="";for(const item of events){const row=document.createElement("li");const time=document.createElement("time");const text=document.createElement("span");time.textContent=item.time;text.textContent=item.text;row.append(time,text);eventsEl.appendChild(row)}}
 function showPhase(phase){
  const label=phaseLabel(phase);phaseEl.textContent=label;phaseEl.className="";
- if(phase==="CDC_READY"){statusEl.className="status online";statusText.textContent="CDC-ACM ready";phaseEl.className="stateOk"}
+ if(phase==="CDC_READY"||phase==="P8055_READY"){statusEl.className="status online";statusText.textContent=phase==="P8055_READY"?"P8055 HID ready":"CDC-ACM ready";phaseEl.className="stateOk"}
  else if(phase==="WAITING"||phase==="POWER_OFF"){statusEl.className="status";statusText.textContent=phase==="WAITING"?"waiting for device":"host powered off";phaseEl.className="stateOff"}
  else if(phase==="RESETTING"||phase==="ENUMERATING"){statusEl.className="status";statusText.textContent=label.toLowerCase();phaseEl.className="stateWait"}
  else{statusEl.className="status offline";statusText.textContent=label.toLowerCase();phaseEl.className="stateBad"}
@@ -146,12 +147,12 @@ function updateHost(info){
  txBytesEl.textContent=Number(info.txBytes||0).toLocaleString();
  errorsEl.textContent=Number(info.errorCount||0).toLocaleString();
  errorsEl.className=Number(info.errorCount||0)>0?"stateBad":"";
- maxTransferEl.textContent=Number(info.maxTransfer||64)+" B";
+ maxTransferEl.textContent=Number(info.maxTransfer??64)+" B";
  deviceEl.textContent=deviceName(info);
  const hasIdentity=info.vendorId!==null||info.productId!==null;
  vidPidEl.textContent=hasIdentity?hex16(info.vendorId)+":"+hex16(info.productId):"----";
  addressEl.textContent=info.address===null?"-":String(info.address);
- classEl.textContent=info.ready?"CDC-ACM":info.phase==="CDC_ERROR"?"CDC-ACM (error)":"-";
+ classEl.textContent=info.phase==="P8055_READY"?"HID / P8055":info.phase==="P8055_ERROR"?"HID / P8055 (error)":info.phase==="CDC_READY"?"CDC-ACM":info.phase==="CDC_ERROR"?"CDC-ACM (error)":"-";
  vbusEl.textContent=info.phase==="POWER_OFF"?"Off":"Enabled (firmware output)";
  if(lastPhase!==info.phase){addEvent(lastPhase===null?"Host state: "+phaseLabel(info.phase):phaseLabel(lastPhase)+" → "+phaseLabel(info.phase));lastPhase=info.phase}
 }

@@ -38,10 +38,23 @@ struct UsbHostStatusResponse {
     rx_bytes: u32,
     tx_bytes: u32,
     error_count: u32,
+    max_transfer: usize,
 }
 struct UsbHostDataResponse {
     length: u8,
     data: [u8; crate::USB_HOST_CDC_MAX_TRANSFER],
+}
+struct P8055InputResponse {
+    digital_inputs: u8,
+    analog_input_1: u8,
+    analog_input_2: u8,
+    counter_1: u16,
+    counter_2: u16,
+}
+struct P8055OutputResponse {
+    digital_outputs: u8,
+    analog_output_1: u8,
+    analog_output_2: u8,
 }
 
 impl scpi::Response for DeviceListResponse {
@@ -92,7 +105,7 @@ impl scpi::Response for UsbHostStatusResponse {
             self.rx_bytes,
             self.tx_bytes,
             self.error_count,
-            crate::USB_HOST_CDC_MAX_TRANSFER
+            self.max_transfer
         ))
     }
 }
@@ -112,6 +125,10 @@ impl UsbHostStatusResponse {
             rx_bytes: status.rx_bytes,
             tx_bytes: status.tx_bytes,
             error_count: status.error_count,
+            max_transfer: match status.speed {
+                Some(crate::usb_host::HostSpeed::Low) => crate::p8055::REPORT_LEN,
+                Some(crate::usb_host::HostSpeed::Full) | None => crate::USB_HOST_CDC_MAX_TRANSFER,
+            },
         }
     }
 }
@@ -134,6 +151,52 @@ impl UsbHostDataResponse {
         };
         response.data[..data.as_bytes().len()].copy_from_slice(data.as_bytes());
         response
+    }
+}
+
+impl scpi::Response for P8055InputResponse {
+    fn write_response(&self, output: &mut impl scpi::Write) -> Result<(), scpi::Error> {
+        output.write_fmt(format_args!(
+            "{},{},{},{},{}",
+            self.digital_inputs,
+            self.analog_input_1,
+            self.analog_input_2,
+            self.counter_1,
+            self.counter_2
+        ))
+    }
+}
+
+impl P8055InputResponse {
+    #[cfg(feature = "board-adafruit-rp2040-usb-host")]
+    fn from_input(input: crate::p8055::InputReport) -> Self {
+        Self {
+            digital_inputs: input.digital_inputs(),
+            analog_input_1: input.analog_input_1(),
+            analog_input_2: input.analog_input_2(),
+            counter_1: input.counter_1(),
+            counter_2: input.counter_2(),
+        }
+    }
+}
+
+impl scpi::Response for P8055OutputResponse {
+    fn write_response(&self, output: &mut impl scpi::Write) -> Result<(), scpi::Error> {
+        output.write_fmt(format_args!(
+            "{},{},{}",
+            self.digital_outputs, self.analog_output_1, self.analog_output_2
+        ))
+    }
+}
+
+impl P8055OutputResponse {
+    #[cfg(feature = "board-adafruit-rp2040-usb-host")]
+    fn from_output(output: crate::p8055::OutputState) -> Self {
+        Self {
+            digital_outputs: output.digital_outputs,
+            analog_output_1: output.analog_output_1,
+            analog_output_2: output.analog_output_2,
+        }
     }
 }
 
@@ -237,9 +300,12 @@ fn usb_host_error(error: crate::usb_host::Error) -> scpi::Error {
     match error {
         crate::usb_host::Error::InvalidLength => scpi::Error::DataOutOfRange,
         crate::usb_host::Error::InvalidHex => scpi::Error::InvalidStringData,
+        crate::usb_host::Error::InvalidParameter => scpi::Error::DataOutOfRange,
+        crate::usb_host::Error::DataStale => scpi::Error::DataCorruptOrStale,
         crate::usb_host::Error::NotReady => scpi::Error::SettingsConflict,
         crate::usb_host::Error::Timeout => scpi::Error::Custom(-310, "USB host timeout"),
         crate::usb_host::Error::Transfer => scpi::Error::Custom(-311, "USB host transfer error"),
+        crate::usb_host::Error::Protocol => scpi::Error::Custom(-312, "P8055 protocol error"),
     }
 }
 
@@ -499,6 +565,114 @@ impl ScpiInstrument {
         #[cfg(not(feature = "board-adafruit-rp2040-usb-host"))]
         {
             let _ = (data, read_length);
+            Err(scpi::Error::SettingsConflict)
+        }
+    }
+
+    #[scpi(cmd = "SYSTem:USB:HOST:P8055:INPut?")]
+    async fn usb_host_p8055_input(&mut self) -> Result<P8055InputResponse, scpi::Error> {
+        #[cfg(feature = "board-adafruit-rp2040-usb-host")]
+        {
+            crate::usb_host::p8055_read_input()
+                .await
+                .map(P8055InputResponse::from_input)
+                .map_err(usb_host_error)
+        }
+        #[cfg(not(feature = "board-adafruit-rp2040-usb-host"))]
+        {
+            Err(scpi::Error::SettingsConflict)
+        }
+    }
+
+    #[scpi(cmd = "SYSTem:USB:HOST:P8055:OUTPut?")]
+    async fn usb_host_p8055_output(&mut self) -> Result<P8055OutputResponse, scpi::Error> {
+        #[cfg(feature = "board-adafruit-rp2040-usb-host")]
+        {
+            crate::usb_host::p8055_get_output()
+                .await
+                .map(P8055OutputResponse::from_output)
+                .map_err(usb_host_error)
+        }
+        #[cfg(not(feature = "board-adafruit-rp2040-usb-host"))]
+        {
+            Err(scpi::Error::SettingsConflict)
+        }
+    }
+
+    #[scpi(cmd = "SYSTem:USB:HOST:P8055:OUTPut")]
+    async fn usb_host_p8055_set_output(
+        &mut self,
+        digital_outputs: u16,
+        analog_output_1: u16,
+        analog_output_2: u16,
+    ) -> Result<(), scpi::Error> {
+        #[cfg(feature = "board-adafruit-rp2040-usb-host")]
+        {
+            let digital_outputs =
+                u8::try_from(digital_outputs).map_err(|_| scpi::Error::DataOutOfRange)?;
+            let analog_output_1 =
+                u8::try_from(analog_output_1).map_err(|_| scpi::Error::DataOutOfRange)?;
+            let analog_output_2 =
+                u8::try_from(analog_output_2).map_err(|_| scpi::Error::DataOutOfRange)?;
+            crate::usb_host::p8055_set_output(digital_outputs, analog_output_1, analog_output_2)
+                .await
+                .map_err(usb_host_error)
+        }
+        #[cfg(not(feature = "board-adafruit-rp2040-usb-host"))]
+        {
+            let _ = (digital_outputs, analog_output_1, analog_output_2);
+            Err(scpi::Error::SettingsConflict)
+        }
+    }
+
+    #[scpi(cmd = "SYSTem:USB:HOST:P8055:COUNter:RESet")]
+    async fn usb_host_p8055_reset_counter(&mut self, channel: u16) -> Result<(), scpi::Error> {
+        #[cfg(feature = "board-adafruit-rp2040-usb-host")]
+        {
+            let channel = u8::try_from(channel).map_err(|_| scpi::Error::DataOutOfRange)?;
+            crate::usb_host::p8055_reset_counter(channel)
+                .await
+                .map_err(usb_host_error)
+        }
+        #[cfg(not(feature = "board-adafruit-rp2040-usb-host"))]
+        {
+            let _ = channel;
+            Err(scpi::Error::SettingsConflict)
+        }
+    }
+
+    #[scpi(cmd = "SYSTem:USB:HOST:P8055:COUNter:DEBounce")]
+    async fn usb_host_p8055_set_debounce(
+        &mut self,
+        channel: u16,
+        microseconds: u32,
+    ) -> Result<(), scpi::Error> {
+        #[cfg(feature = "board-adafruit-rp2040-usb-host")]
+        {
+            let channel = u8::try_from(channel).map_err(|_| scpi::Error::DataOutOfRange)?;
+            crate::usb_host::p8055_set_debounce(channel, microseconds)
+                .await
+                .map_err(usb_host_error)
+        }
+        #[cfg(not(feature = "board-adafruit-rp2040-usb-host"))]
+        {
+            let _ = (channel, microseconds);
+            Err(scpi::Error::SettingsConflict)
+        }
+    }
+
+    #[scpi(cmd = "SYSTem:USB:HOST:P8055:COUNter:DEBounce?")]
+    async fn usb_host_p8055_debounce(&mut self, channel: u16) -> Result<u32, scpi::Error> {
+        #[cfg(feature = "board-adafruit-rp2040-usb-host")]
+        {
+            let channel = u8::try_from(channel).map_err(|_| scpi::Error::DataOutOfRange)?;
+            crate::usb_host::p8055_get_debounce(channel)
+                .await
+                .map_err(usb_host_error)
+        }
+        #[cfg(not(feature = "board-adafruit-rp2040-usb-host"))]
+        {
+            let _ = channel;
             Err(scpi::Error::SettingsConflict)
         }
     }

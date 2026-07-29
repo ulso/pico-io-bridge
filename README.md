@@ -38,7 +38,7 @@ RP2040 PIO blocks while the native USB controller remains the CDC-NCM device.
 - MCP25625 CAN support via the `mcp25xx` crate
 - CAN TX, RX broadcast to connected WebSocket clients, status, bitrate/mode config
 - Concurrent I2C status, scan, read, write, and write-read transactions
-- PIO USB host with generic full-speed CDC-ACM enumeration and SCPI byte-stream access
+- PIO USB host with full-speed CDC-ACM and low-speed Velleman P8055 HID support
 - Compile-time profiles for four Adafruit RP2040 boards
 - Board status indication while the USB network is not ready, where available
 
@@ -315,6 +315,12 @@ Initial command set:
 | `SYST:USB:HOST:CDC:WRITE:HEX "<hex>"` | Write 1-64 bytes to the enumerated CDC-ACM stream; USB-host profile only |
 | `SYST:USB:HOST:CDC:READ:HEX? <length>` | Read up to 1-64 CDC-ACM bytes and return uppercase hex; USB-host profile only |
 | `SYST:USB:HOST:CDC:EXCH:HEX? "<hex>",<max-length>` | Atomically write and collect a 1-64 byte CDC-ACM response; USB-host profile only |
+| `SYST:USB:HOST:P8055:INP?` | Fresh P8055 digital, analog, and counter input snapshot |
+| `SYST:USB:HOST:P8055:OUTP <digital>,<a1>,<a2>` | Atomically set the P8055 output shadow |
+| `SYST:USB:HOST:P8055:OUTP?` | Read the confirmed P8055 output shadow |
+| `SYST:USB:HOST:P8055:COUN:RES <channel>` | Reset P8055 counter 1 or 2 |
+| `SYST:USB:HOST:P8055:COUN:DEB <channel>,<microseconds>` | Set P8055 counter debounce |
+| `SYST:USB:HOST:P8055:COUN:DEB? <channel>` | Read the quantized debounce setting |
 | `SYST:I2C:DEV:CAT?` | Supported I2C device models |
 | `SYST:I2C:DEV:ADD <slot>,"<model>",<address>` | Verify, initialize, and register a device |
 | `SYST:I2C:DEV? <slot>` | Device configuration as `slot,model,bus,address` |
@@ -363,9 +369,12 @@ phase,speed,address,vid,pid,rx_bytes,tx_bytes,error_count,max_transfer
 ```
 
 For example, `CDC_READY,FULL,1,2458,1,12,4,0,64` reports a configured
-full-speed CDC-ACM function. The possible phases are `POWER_OFF`, `WAITING`,
-`RESETTING`, `ENUMERATING`, `CDC_READY`, `UNSUPPORTED_SPEED`,
-`ENUMERATION_ERROR`, and `CDC_ERROR`. Speed is `FULL`, `LOW`, or `NONE`.
+full-speed CDC-ACM function, while
+`P8055_READY,LOW,1,4303,21760,8,8,0,8` reports an original P8055. The possible
+phases are `POWER_OFF`, `WAITING`, `RESETTING`, `ENUMERATING`, `CDC_READY`,
+`P8055_READY`, `UNSUPPORTED_SPEED`, `UNSUPPORTED_DEVICE`,
+`ENUMERATION_ERROR`, `CDC_ERROR`, and `P8055_ERROR`. Speed is `FULL`, `LOW`, or
+`NONE`.
 
 CDC transfers use owned 64-byte messages between SCPI and the host-manager task;
 the manager remains the sole owner of enumeration state and all control,
@@ -399,11 +408,65 @@ python3 examples/scpi_usb_host_cdc.py
 python3 examples/scpi_usb_host_cdc.py ATI
 ```
 
-Each measurement takes a fresh block of samples and returns their rounded
-arithmetic mean. `SENS:AVER:COUN` controls the block size globally for A0-A3
-and the internal temperature sensor. The default is 16 samples; `*RST` restores
-that default. Larger values reduce uncorrelated noise but increase measurement
-latency proportionally.
+### Velleman K8055/P8055 over SCPI
+
+The USB-host profile recognizes original Velleman boards with VID `0x10cf` and
+PID `0x5500` through `0x5503`. They use low-speed HID interrupt transfers with
+fixed eight-byte reports, rather than the CDC bulk stream. The host manager
+reads the HID report descriptor, sends the documented all-off reset report,
+validates one input report, and then enters `P8055_READY`.
+
+`SYST:USB:HOST:P8055:INP?` performs a fresh interrupt-IN transfer and returns:
+
+```text
+digital_inputs,analog_input_1,analog_input_2,counter_1,counter_2
+```
+
+Digital inputs I1-I5 occupy bits 0-4. The response preserves the original
+board's electrical convention: an open input is `1` and a grounded input is
+`0`. Analog inputs are unsigned 8-bit samples and the two counters are unsigned
+16-bit values.
+
+`OUTP` applies all eight digital outputs and both 8-bit analog/PWM outputs in
+one report. Counter reset and debounce reports include the confirmed output
+shadow so they do not disturb other outputs. Debounce accepts channel 1 or 2
+and `0` through `7477875` microseconds. The board represents it as the nearest
+`115 * raw^2` microseconds; the query returns that actual quantized setting and
+fails with `-230,"Data corrupt or stale"` until the setting has explicitly been
+written after the current attachment. As with other failed SCPI queries, no
+result line is emitted; retrieve the queued error with `SYST:ERR?`.
+
+The Python and Octave examples are read-only by default:
+
+```sh
+python3 examples/scpi_usb_host_p8055.py
+
+octave --quiet --eval \
+  'addpath("examples"); scpi_usb_host_p8055'
+```
+
+Both print input snapshots and the confirmed output shadow. A digital output
+pulse is deliberately opt-in; it preserves both analog outputs and every other
+digital output, then restores and verifies the original shadow:
+
+```sh
+python3 examples/scpi_usb_host_p8055.py --pulse-output 1
+
+octave --quiet --eval \
+  'addpath("examples"); scpi_usb_host_p8055("pico-io-usb-host.local",5,1,0.5)'
+```
+
+The Octave example requires the `instrument-control` package. Never retry a
+timed-out output command blindly: the physical state may have changed even
+though its acknowledgement was lost. The manager enters `P8055_ERROR` after an
+output timeout; physically replug the P8055 before issuing another output
+command.
+
+Each RP2040 ADC measurement takes a fresh block of samples and returns its
+rounded arithmetic mean. `SENS:AVER:COUN` controls the block size globally for
+A0-A3 and the internal temperature sensor; it does not affect P8055 inputs. The
+default is 16 samples; `*RST` restores that default. Larger values reduce
+uncorrelated noise but increase measurement latency proportionally.
 
 ### Known I2C Devices
 
@@ -703,10 +766,10 @@ Example:
 - The WebSocket protocol is intentionally small and JSON-only at the moment.
 - The SCPI server currently supports one TCP client at a time and scalar channel
   numbers rather than SCPI channel-list expressions such as `(@1:4)`.
-- The PIO host supports one directly connected root device and no hubs or
-  isochronous transfers. This integration exposes generic CDC-ACM only.
-  Low-speed attachment is detected, but CDC-ACM requires bulk endpoints and is
-  therefore accepted only at full speed.
+- The PIO host supports one directly connected root device and no hubs,
+  high-speed devices, or isochronous transfers. The integration exposes generic
+  full-speed CDC-ACM and the original low-speed Velleman K8055/P8055 protocol;
+  it is not yet a general-purpose HID instrument API.
 - RP2040 ADC voltage and temperature results are nominal, not calibrated
   instrument-grade measurements.
 - The Embassy RP2040 I2C driver has no address-only probe operation. `i2c.scan`
