@@ -25,7 +25,7 @@ enum WebSocketEndpoint {
 }
 
 #[cfg(feature = "board-adafruit-rp2040-usb-host")]
-const API_STATUS_CAPABILITIES: &str = r#","interfaces":["usb-host","i2c","scpi"],"websocket":"/i2c","websockets":["/i2c"],"pages":{"i2c":"/","scpi":"/scpi.html"}"#;
+const API_STATUS_CAPABILITIES: &str = r#","interfaces":["usb-host","i2c","scpi"],"websocket":"/i2c","websockets":["/i2c"],"pages":{"i2c":"/","usb":"/usb-host.html","scpi":"/scpi.html"}"#;
 #[cfg(all(
     not(feature = "board-adafruit-rp2040-usb-host"),
     feature = "can",
@@ -246,6 +246,50 @@ async fn write_api_status_response(
     write_http_response(socket, "application/json", body.as_bytes()).await
 }
 
+#[cfg(feature = "board-adafruit-rp2040-usb-host")]
+async fn write_usb_host_status_response(
+    socket: &mut TcpSocket<'_>,
+) -> Result<(), embassy_net::tcp::Error> {
+    let status = crate::usb_host::status().await;
+    let speed = status.speed.map_or("null", |speed| match speed {
+        crate::usb_host::HostSpeed::Low => "\"LOW\"",
+        crate::usb_host::HostSpeed::Full => "\"FULL\"",
+    });
+    let mut address = String::<4>::new();
+    let mut vendor_id = String::<5>::new();
+    let mut product_id = String::<5>::new();
+    if status.address == 0 {
+        address.push_str("null").unwrap();
+    } else {
+        write!(address, "{}", status.address).unwrap();
+    }
+    if status.vendor_id == 0 && status.product_id == 0 {
+        vendor_id.push_str("null").unwrap();
+        product_id.push_str("null").unwrap();
+    } else {
+        write!(vendor_id, "{}", status.vendor_id).unwrap();
+        write!(product_id, "{}", status.product_id).unwrap();
+    }
+
+    let mut body = String::<384>::new();
+    write!(
+        body,
+        "{{\"phase\":\"{}\",\"ready\":{},\"speed\":{},\"address\":{},\"vendorId\":{},\"productId\":{},\"rxBytes\":{},\"txBytes\":{},\"errorCount\":{},\"maxTransfer\":{}}}",
+        status.phase.as_str(),
+        status.phase == crate::usb_host::Phase::CdcReady,
+        speed,
+        address,
+        vendor_id,
+        product_id,
+        status.rx_bytes,
+        status.tx_bytes,
+        status.error_count,
+        crate::USB_HOST_CDC_MAX_TRANSFER,
+    )
+    .unwrap();
+    write_http_response(socket, "application/json", body.as_bytes()).await
+}
+
 async fn write_empty_response(
     socket: &mut TcpSocket<'_>,
     status: &str,
@@ -341,6 +385,15 @@ async fn serve_http_connection(
         return Ok(());
     }
 
+    #[cfg(feature = "board-adafruit-rp2040-usb-host")]
+    {
+        if request.starts_with("GET /usb-host.html ") {
+            const BODY: &[u8] = include_bytes!("usb_host.html");
+            write_http_response(socket, "text/html", BODY).await?;
+            return Ok(());
+        }
+    }
+
     let websocket_endpoint = websocket_endpoint(request);
 
     if let Some(endpoint) = websocket_endpoint {
@@ -364,6 +417,15 @@ async fn serve_http_connection(
         }
     } else if request.starts_with("GET /api/status ") {
         write_api_status_response(socket, serial).await?;
+    } else if request.starts_with("GET /api/usb-host/status ") {
+        #[cfg(feature = "board-adafruit-rp2040-usb-host")]
+        {
+            write_usb_host_status_response(socket).await?;
+        }
+        #[cfg(not(feature = "board-adafruit-rp2040-usb-host"))]
+        {
+            write_not_found(socket).await?;
+        }
     } else if request.starts_with("GET /favicon.ico ") {
         write_all(
             socket,

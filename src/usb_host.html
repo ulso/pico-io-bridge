@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Pico I/O Bridge - USB Host</title>
+<link rel="icon" href="data:,">
+<style>
+:root{color-scheme:light dark;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+*{box-sizing:border-box}
+body{margin:0;background:#f3f5f7;color:#17202a}
+main{max-width:1040px;margin:0 auto;padding:20px}
+header{display:flex;align-items:flex-start;justify-content:space-between;gap:20px;margin-bottom:16px}
+h1{font-size:24px;line-height:1.2;margin:0 0 4px;font-weight:700}
+.model{margin:0;color:#52606d;font-size:14px}
+.status{display:inline-flex;align-items:center;gap:8px;font-size:14px;font-weight:650;white-space:nowrap}
+.dot{width:10px;height:10px;border-radius:50%;background:#d99a22}.online .dot{background:#1f9d55}.offline .dot{background:#d64545}
+.tabs{display:flex;flex-wrap:wrap;gap:4px;margin-bottom:16px}
+.tabs a{border:1px solid #9aa7b2;background:#fff;color:#17202a;border-radius:6px;padding:7px 12px;text-decoration:none;font-weight:650}
+.tabs a.active{background:#17202a;color:#fff;border-color:#17202a}
+.toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:16px}
+button{border:1px solid #9aa7b2;background:#fff;color:#17202a;border-radius:6px;padding:8px 12px;font:inherit;font-weight:650;min-height:38px}
+.hint{color:#65717d;font-size:12px}
+.metrics{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:8px;margin-bottom:16px}
+.metric{border:1px solid #d7dee6;border-radius:6px;padding:10px;background:#f9fafb;min-width:0}
+.metric span{display:block;font-size:11px;color:#65717d;margin-bottom:4px}.metric strong{display:block;font-size:17px;overflow-wrap:anywhere}
+.stateOk{color:#1f7a4d}.stateWait{color:#b7791f}.stateBad{color:#b42318}.stateOff{color:#65717d}
+.layout{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:16px;align-items:start}
+.panel{border:1px solid #c7d0da;background:#fff;border-radius:8px;padding:14px}
+.wide{grid-column:1/-1}
+h2{font-size:15px;margin:0 0 12px;font-weight:700}
+.facts{display:grid;grid-template-columns:145px minmax(0,1fr);margin:0}
+.facts dt,.facts dd{padding:8px 0;border-bottom:1px solid #edf0f3}
+.facts dt{color:#52606d;font-size:12px;font-weight:700}.facts dd{margin:0;font-size:13px;overflow-wrap:anywhere}
+.facts dt:last-of-type,.facts dd:last-of-type{border-bottom:0}
+code{font:12px ui-monospace,SFMono-Regular,Menlo,monospace;color:#173f73}
+.events{list-style:none;margin:0;padding:0}
+.events li{display:grid;grid-template-columns:85px minmax(0,1fr);gap:10px;padding:8px 0;border-bottom:1px solid #edf0f3;font-size:13px}
+.events li:last-child{border-bottom:0}.events time{color:#65717d;font:12px ui-monospace,SFMono-Regular,Menlo,monospace}
+@media(max-width:820px){.metrics{grid-template-columns:repeat(3,minmax(0,1fr))}}
+@media(max-width:680px){main{padding:14px}header,.toolbar{align-items:flex-start;flex-direction:column}.layout{grid-template-columns:1fr}.wide{grid-column:auto}.metrics{grid-template-columns:repeat(2,minmax(0,1fr))}.facts{grid-template-columns:110px minmax(0,1fr)}}
+@media(max-width:420px){.tabs a{flex:1;text-align:center}.metrics{grid-template-columns:1fr 1fr}}
+@media(prefers-color-scheme:dark){body{background:#111820;color:#edf2f7}.model,.hint,.metric span,.facts dt,.events time{color:#b9c3cf}.panel,.metric,.tabs a,button{background:#17212b;color:#edf2f7;border-color:#3b4b5c}.tabs a.active{background:#edf2f7;color:#111820}.facts dt,.facts dd,.events li{border-color:#273544}code{color:#8ab8ee}}
+</style>
+</head>
+<body>
+<main>
+<header>
+<div>
+<h1 id="pageTitle">Pico I/O Bridge</h1>
+<p class="model">PIO USB Host</p>
+</div>
+<div id="status" class="status"><span class="dot"></span><span id="statusText">reading host state</span></div>
+</header>
+
+<nav id="interfaceNav" class="tabs"><a class="active" href="/usb-host.html">USB</a></nav>
+
+<div class="toolbar">
+<button id="refresh">Refresh</button>
+<span class="hint">Read-only status updates every 2 seconds</span>
+</div>
+
+<section class="metrics" aria-label="USB host metrics">
+<div class="metric"><span>State</span><strong id="phase">-</strong></div>
+<div class="metric"><span>Speed</span><strong id="speed">-</strong></div>
+<div class="metric"><span>RX bytes</span><strong id="rxBytes">0</strong></div>
+<div class="metric"><span>TX bytes</span><strong id="txBytes">0</strong></div>
+<div class="metric"><span>Errors</span><strong id="errors">0</strong></div>
+<div class="metric"><span>Max transfer</span><strong id="maxTransfer">64 B</strong></div>
+</section>
+
+<div class="layout">
+<section class="panel">
+<h2>Attached Device</h2>
+<dl class="facts">
+<dt>Device</dt><dd id="device">-</dd>
+<dt>VID:PID</dt><dd><code id="vidPid">----</code></dd>
+<dt>USB address</dt><dd id="address">-</dd>
+<dt>Class</dt><dd id="deviceClass">-</dd>
+<dt>VBUS</dt><dd id="vbus">-</dd>
+</dl>
+</section>
+
+<section class="panel">
+<h2>Host Resources</h2>
+<dl class="facts">
+<dt>Controller</dt><dd>RP2040 PIO USB host</dd>
+<dt>Data pins</dt><dd><code>D+ GP16 / D− GP17</code></dd>
+<dt>VBUS enable</dt><dd><code>GP18</code></dd>
+<dt>PIO blocks</dt><dd><code>PIO0 + PIO1</code></dd>
+<dt>DMA</dt><dd><code>DMA_CH0</code></dd>
+<dt>System clock</dt><dd><code>120 MHz</code></dd>
+</dl>
+</section>
+
+<section class="panel wide">
+<h2>Page-session State Changes</h2>
+<ul id="events" class="events"><li><time>—</time><span>Waiting for host status</span></li></ul>
+</section>
+</div>
+</main>
+
+<script>
+const nav=document.getElementById("interfaceNav");
+const pageTitle=document.getElementById("pageTitle");
+const statusEl=document.getElementById("status");
+const statusText=document.getElementById("statusText");
+const refreshBtn=document.getElementById("refresh");
+const phaseEl=document.getElementById("phase");
+const speedEl=document.getElementById("speed");
+const rxBytesEl=document.getElementById("rxBytes");
+const txBytesEl=document.getElementById("txBytes");
+const errorsEl=document.getElementById("errors");
+const maxTransferEl=document.getElementById("maxTransfer");
+const deviceEl=document.getElementById("device");
+const vidPidEl=document.getElementById("vidPid");
+const addressEl=document.getElementById("address");
+const classEl=document.getElementById("deviceClass");
+const vbusEl=document.getElementById("vbus");
+const eventsEl=document.getElementById("events");
+let lastPhase=null;
+let refreshing=false;
+let events=[];
+function phaseLabel(value){return String(value||"-").toLowerCase().split("_").map(word=>word.charAt(0).toUpperCase()+word.slice(1)).join(" ")}
+function hex16(value){return Number(value||0).toString(16).toUpperCase().padStart(4,"0")}
+function deviceName(info){
+ if(info.vendorId===0x2dcf&&info.productId===0x6001)return "BleuIO bootloader";
+ if(info.vendorId===0x2dcf&&info.productId===0x6002)return "BleuIO";
+ if(info.vendorId!==null||info.productId!==null)return "USB device";
+ if(info.phase==="UNSUPPORTED_SPEED")return "Unsupported low-speed device";
+ if(info.speed!==null)return "Enumerating USB device";
+ return "No device";
+}
+function addEvent(text){events.unshift({time:new Date().toLocaleTimeString(),text});events=events.slice(0,12);eventsEl.textContent="";for(const item of events){const row=document.createElement("li");const time=document.createElement("time");const text=document.createElement("span");time.textContent=item.time;text.textContent=item.text;row.append(time,text);eventsEl.appendChild(row)}}
+function showPhase(phase){
+ const label=phaseLabel(phase);phaseEl.textContent=label;phaseEl.className="";
+ if(phase==="CDC_READY"){statusEl.className="status online";statusText.textContent="CDC-ACM ready";phaseEl.className="stateOk"}
+ else if(phase==="WAITING"||phase==="POWER_OFF"){statusEl.className="status";statusText.textContent=phase==="WAITING"?"waiting for device":"host powered off";phaseEl.className="stateOff"}
+ else if(phase==="RESETTING"||phase==="ENUMERATING"){statusEl.className="status";statusText.textContent=label.toLowerCase();phaseEl.className="stateWait"}
+ else{statusEl.className="status offline";statusText.textContent=label.toLowerCase();phaseEl.className="stateBad"}
+}
+function updateHost(info){
+ showPhase(info.phase);
+ speedEl.textContent=info.speed==="FULL"?"Full speed":info.speed==="LOW"?"Low speed":"-";
+ rxBytesEl.textContent=Number(info.rxBytes||0).toLocaleString();
+ txBytesEl.textContent=Number(info.txBytes||0).toLocaleString();
+ errorsEl.textContent=Number(info.errorCount||0).toLocaleString();
+ errorsEl.className=Number(info.errorCount||0)>0?"stateBad":"";
+ maxTransferEl.textContent=Number(info.maxTransfer||64)+" B";
+ deviceEl.textContent=deviceName(info);
+ const hasIdentity=info.vendorId!==null||info.productId!==null;
+ vidPidEl.textContent=hasIdentity?hex16(info.vendorId)+":"+hex16(info.productId):"----";
+ addressEl.textContent=info.address===null?"-":String(info.address);
+ classEl.textContent=info.ready?"CDC-ACM":info.phase==="CDC_ERROR"?"CDC-ACM (error)":"-";
+ vbusEl.textContent=info.phase==="POWER_OFF"?"Off":"Enabled (firmware output)";
+ if(lastPhase!==info.phase){addEvent(lastPhase===null?"Host state: "+phaseLabel(info.phase):phaseLabel(lastPhase)+" → "+phaseLabel(info.phase));lastPhase=info.phase}
+}
+async function refresh(){
+ if(refreshing)return;refreshing=true;refreshBtn.disabled=true;
+ try{const response=await fetch("/api/usb-host/status",{cache:"no-store"});if(!response.ok)throw new Error("HTTP "+response.status);updateHost(await response.json())}
+ catch(error){statusEl.className="status offline";statusText.textContent="status unavailable";addEvent("Status request failed: "+error.message)}
+ finally{refreshing=false;refreshBtn.disabled=false}
+}
+refreshBtn.onclick=refresh;
+fetch("/api/status",{cache:"no-store"}).then(response=>response.json()).then(info=>{
+ if(info.board){const title="Pico I/O Bridge - "+info.board;pageTitle.textContent=title;document.title=title+" - USB Host"}
+ nav.textContent="";
+ for(const [name,path] of Object.entries(info.pages||{})){const link=document.createElement("a");link.href=path;link.textContent=name.toUpperCase();if(name==="usb")link.className="active";nav.appendChild(link)}
+}).catch(()=>{});
+refresh();
+setInterval(refresh,2000);
+</script>
+</body>
+</html>

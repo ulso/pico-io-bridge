@@ -236,14 +236,19 @@ The built-in web UI is available at:
 http://pico-io-can-feather.local/          CAN console
 http://pico-io-can-feather.local/i2c.html I2C console
 http://pico-io-can-feather.local/scpi.html SCPI instrument information
+http://pico-io-usb-host.local/usb-host.html USB host status
 ```
 
 Only pages and WebSocket endpoints for interfaces in the selected board profile
 are available. The CAN Feather uses the CAN console at `/`; the three non-CAN
 profiles serve the I2C console there. The SCPI information page is available
-in every profile. `/api/status` reports instrument identity, SCPI-RAW
-connection metadata, the active interface names and the endpoint paths in its
-`pages` and `websockets` fields.
+in every profile. The read-only USB host page is available only in the
+`board-adafruit-rp2040-usb-host` profile. It reports the PIO host phase, attached
+device identity, speed, address, transfer counters, cumulative errors and fixed
+hardware resources. Its live data comes from `/api/usb-host/status`.
+`/api/status` reports instrument identity, SCPI-RAW connection metadata, the
+active interface names and the endpoint paths in its `pages` and `websockets`
+fields.
 
 ## SCPI-RAW Instrument API
 
