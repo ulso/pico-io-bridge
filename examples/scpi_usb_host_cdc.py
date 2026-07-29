@@ -10,6 +10,7 @@ Examples:
 
 import argparse
 import socket
+import time
 
 from scpi_common import SCPI_PORT
 
@@ -29,24 +30,36 @@ def scpi_exchange(
     port: int,
     command: str,
     timeout: float,
+    *,
+    line_terminated: bool = True,
 ) -> str:
     """Execute one SCPI command using a short-lived TCP connection."""
     with socket.create_connection((host, port), timeout=timeout) as connection:
         connection.settimeout(timeout)
         connection.sendall(command.encode("ascii") + b"\n")
-        connection.shutdown(socket.SHUT_WR)
 
         response = bytearray()
         while True:
             try:
                 chunk = connection.recv(256)
-            except socket.timeout:
+            except (ConnectionResetError, socket.timeout):
                 break
             if not chunk:
                 break
             response.extend(chunk)
+            if line_terminated and b"\n" in response:
+                break
+            if not line_terminated:
+                connection.settimeout(0.1)
 
     return response.decode("ascii").strip()
+
+
+def scpi_command(host: str, port: int, command: str, timeout: float) -> None:
+    """Send a SCPI command that has no response."""
+    with socket.create_connection((host, port), timeout=timeout) as connection:
+        connection.settimeout(timeout)
+        connection.sendall(command.encode("ascii") + b"\n")
 
 
 def scpi_error(host: str, port: int, timeout: float) -> str:
@@ -87,7 +100,8 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    _ = scpi_exchange(args.host, args.port, "*CLS", args.timeout)
+    scpi_command(args.host, args.port, "*CLS", args.timeout)
+    time.sleep(0.05)
 
     status = scpi_exchange(
         args.host,
@@ -106,6 +120,7 @@ def main() -> None:
         args.port,
         f'SYST:USB:HOST:CDC:WRITE:HEX "{payload_hex}"',
         args.timeout,
+        line_terminated=False,
     )
     if not written:
         raise SystemExit(f"CDC write failed: {scpi_error(args.host, args.port, args.timeout)}")
