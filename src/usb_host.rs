@@ -17,6 +17,7 @@ use embassy_rp_pio_usb_host::cdc_acm::{CdcAcmError, allocate_from_enumeration};
 use embassy_rp_pio_usb_host::host::{DeviceEvent, PipeError, Speed};
 use embassy_rp_pio_usb_host::pio_host::PioHostState;
 use embassy_rp_pio_usb_host::pio_host::rp2040::Rp2040PioEngine;
+use embassy_rp_pio_usb_host::usb::CdcLineCoding;
 use embassy_rp_pio_usb_host::{AttachDetector, BusEvent, DeviceSpeed};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
@@ -475,14 +476,14 @@ async fn run(hardware: Hardware) {
                 &enumeration,
             ) {
                 Ok(mut cdc) => {
-                    cdc.reset_data_toggles();
                     let controls_ready = if cdc.function().supports_line_requests() {
                         match with_timeout(CLASS_CONTROL_TIMEOUT, async {
-                            let coding = cdc.get_line_coding().await?;
-                            cdc.set_line_coding(coding).await?;
-                            // Most CDC-ACM serial devices use DTR as the signal
-                            // that the host has opened the byte stream.
-                            cdc.set_control_line_state(true, false).await?;
+                            // Mirror the sequence verified by the pinned
+                            // backend's BleuIO host example: open both modem
+                            // control lines before selecting 115200 8-N-1.
+                            cdc.set_control_line_state(true, true).await?;
+                            cdc.set_line_coding(CdcLineCoding::eight_n_one(115_200))
+                                .await?;
                             Ok::<(), CdcAcmError>(())
                         })
                         .await
@@ -495,6 +496,7 @@ async fn run(hardware: Hardware) {
                     };
 
                     if controls_ready {
+                        cdc.reset_data_toggles();
                         HOST_STATE.lock().await.phase = Phase::CdcReady;
                         info!(
                             "PIO USB CDC-ACM ready at address {}, VID={=u16:04x} PID={=u16:04x}",

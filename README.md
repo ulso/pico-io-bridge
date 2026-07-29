@@ -364,9 +364,10 @@ full-speed CDC-ACM function. The possible phases are `POWER_OFF`, `WAITING`,
 CDC transfers use owned 64-byte messages between SCPI and the host-manager task;
 the manager remains the sole owner of enumeration state and all control,
 bulk-IN, and bulk-OUT pipes. Hex input must contain an even number of
-hexadecimal digits. The manager asserts DTR when it opens a CDC-ACM function.
-For example, this writes `AT` followed by CRLF and then requests up to 64
-response bytes:
+hexadecimal digits. The manager asserts DTR and RTS, then selects 115200 baud,
+8 data bits, no parity, and one stop bit when it opens a CDC-ACM function. For
+example, this writes `AT` followed by CRLF and then requests up to 64 response
+bytes:
 
 ```text
 SYST:USB:HOST:CDC:WRITE:HEX "41540D0A"
