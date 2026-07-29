@@ -381,6 +381,14 @@ phase is `CDC_READY`. A timed-out write has an indeterminate device-side byte
 count and must not be retried blindly, because the device may already have
 accepted part or all of it.
 
+A standard-library-only Python example performs the status, write, read, error,
+hex-decoding, and text-decoding steps:
+
+```sh
+python3 examples/scpi_usb_host_cdc.py
+python3 examples/scpi_usb_host_cdc.py ATI
+```
+
 Each measurement takes a fresh block of samples and returns their rounded
 arithmetic mean. `SENS:AVER:COUN` controls the block size globally for A0-A3
 and the internal temperature sensor. The default is 16 samples; `*RST` restores
