@@ -20,6 +20,10 @@ use embassy_rp_pio_usb_host::cdc_acm::{
     CdcAcmCreateError, CdcAcmError, CdcAcmHost,
     allocate_from_enumeration as allocate_cdc_from_enumeration,
 };
+use embassy_rp_pio_usb_host::ftdi::{
+    FTDI_VENDOR_ID, FtdiError, FtdiHost,
+    allocate_from_enumeration as allocate_ftdi_from_enumeration,
+};
 use embassy_rp_pio_usb_host::hid::{
     HidError, allocate_from_enumeration as allocate_hid_from_enumeration,
 };
@@ -100,11 +104,13 @@ pub(crate) enum Phase {
     Resetting,
     Enumerating,
     CdcReady,
+    FtdiReady,
     P8055Ready,
     UnsupportedSpeed,
     UnsupportedDevice,
     EnumerationError,
     CdcError,
+    FtdiError,
     P8055Error,
 }
 
@@ -116,13 +122,19 @@ impl Phase {
             Self::Resetting => "RESETTING",
             Self::Enumerating => "ENUMERATING",
             Self::CdcReady => "CDC_READY",
+            Self::FtdiReady => "FTDI_READY",
             Self::P8055Ready => "P8055_READY",
             Self::UnsupportedSpeed => "UNSUPPORTED_SPEED",
             Self::UnsupportedDevice => "UNSUPPORTED_DEVICE",
             Self::EnumerationError => "ENUMERATION_ERROR",
             Self::CdcError => "CDC_ERROR",
+            Self::FtdiError => "FTDI_ERROR",
             Self::P8055Error => "P8055_ERROR",
         }
+    }
+
+    const fn is_serial_ready(self) -> bool {
+        matches!(self, Self::CdcReady | Self::FtdiReady)
     }
 }
 
@@ -540,6 +552,18 @@ impl Operation {
         )
     }
 
+    const fn is_serial_operation(self) -> bool {
+        self.is_cdc_data() || matches!(self, Self::BridgeOpen | Self::BridgeClose { .. })
+    }
+
+    fn is_ready_in(self, phase: Phase) -> bool {
+        if self.is_serial_operation() {
+            phase.is_serial_ready()
+        } else {
+            phase == self.ready_phase()
+        }
+    }
+
     const fn reply_timeout(self) -> Duration {
         match self {
             Self::Exchange { .. } => EXCHANGE_COMMAND_TIMEOUT,
@@ -678,7 +702,7 @@ async fn send_command(operation: Operation) -> Result<ReplyResult, Error> {
 
     let _guard = HOST_COMMAND_LOCK.lock().await;
     let state = status().await;
-    if state.phase != operation.ready_phase() {
+    if !operation.is_ready_in(state.phase) {
         return Err(Error::NotReady);
     }
     if state.bridge_connected && operation.is_cdc_data() {
@@ -949,10 +973,15 @@ async fn set_error_phase_if_current(generation: u32, expected: Phase, phase: Pha
     true
 }
 
-async fn set_bridge_connected_if_current(generation: u32, expected: bool, connected: bool) -> bool {
+async fn set_bridge_connected_if_current(
+    generation: u32,
+    ready_phase: Phase,
+    expected: bool,
+    connected: bool,
+) -> bool {
     let mut state = HOST_STATE.lock().await;
     if state.generation != generation
-        || state.phase != Phase::CdcReady
+        || state.phase != ready_phase
         || state.bridge_connected != expected
     {
         return false;
@@ -1018,9 +1047,9 @@ async fn record_tx_if_current(generation: u32, expected: Phase, count: usize) ->
     true
 }
 
-async fn record_bridge_tx_if_current(generation: u32, count: usize) -> bool {
+async fn record_bridge_tx_if_current(generation: u32, ready_phase: Phase, count: usize) -> bool {
     let mut state = HOST_STATE.lock().await;
-    if state.generation != generation || state.phase != Phase::CdcReady {
+    if state.generation != generation || state.phase != ready_phase {
         return false;
     }
     state.tx_bytes = state.tx_bytes.wrapping_add(count as u32);
@@ -1029,9 +1058,9 @@ async fn record_bridge_tx_if_current(generation: u32, count: usize) -> bool {
     true
 }
 
-async fn record_bridge_in_start_if_current(generation: u32) -> bool {
+async fn record_bridge_in_start_if_current(generation: u32, ready_phase: Phase) -> bool {
     let mut state = HOST_STATE.lock().await;
-    if state.generation != generation || state.phase != Phase::CdcReady || !state.bridge_connected {
+    if state.generation != generation || state.phase != ready_phase || !state.bridge_connected {
         return false;
     }
     state.bridge_in_starts = state.bridge_in_starts.wrapping_add(1);
@@ -1040,12 +1069,13 @@ async fn record_bridge_in_start_if_current(generation: u32) -> bool {
 
 async fn record_bridge_in_cycle_if_current(
     generation: u32,
+    ready_phase: Phase,
     received: usize,
     forwarded: bool,
     start_next: bool,
 ) -> bool {
     let mut state = HOST_STATE.lock().await;
-    if state.generation != generation || state.phase != Phase::CdcReady || !state.bridge_connected {
+    if state.generation != generation || state.phase != ready_phase || !state.bridge_connected {
         return false;
     }
     state.bridge_in_completions = state.bridge_in_completions.wrapping_add(1);
@@ -1059,9 +1089,9 @@ async fn record_bridge_in_cycle_if_current(
     true
 }
 
-async fn record_bridge_outcome_if_current(generation: u32, outcome: u8) {
+async fn record_bridge_outcome_if_current(generation: u32, ready_phase: Phase, outcome: u8) {
     let mut state = HOST_STATE.lock().await;
-    if state.generation == generation && state.phase == Phase::CdcReady {
+    if state.generation == generation && state.phase == ready_phase {
         let pending = state
             .bridge_in_starts
             .saturating_sub(state.bridge_in_completions);
@@ -1072,7 +1102,7 @@ async fn record_bridge_outcome_if_current(generation: u32, outcome: u8) {
 
 async fn record_bridge_tcp_end_if_connected(outcome: u8) {
     let mut state = HOST_STATE.lock().await;
-    if state.phase == Phase::CdcReady && state.bridge_connected {
+    if state.phase.is_serial_ready() && state.bridge_connected {
         state.bridge_tcp_end = outcome;
     }
 }
@@ -1104,7 +1134,8 @@ fn reject_command(command: Command, error: Error) {
 }
 
 async fn command_is_current(command: &Command) -> bool {
-    session_is_current(command.generation, command.operation.ready_phase()).await
+    let state = status().await;
+    state.generation == command.generation && command.operation.is_ready_in(state.phase)
 }
 
 async fn session_is_current(generation: u32, expected: Phase) -> bool {
@@ -1121,6 +1152,12 @@ enum BridgeRunOutcome {
     Closed { sequence: u32 },
     Disconnected,
     Failed,
+}
+
+#[derive(Clone, Copy)]
+enum SerialWireFormat {
+    Cdc,
+    Ftdi,
 }
 
 async fn managed_cdc_read<C, I, O>(
@@ -1167,6 +1204,8 @@ where
 async fn bridge_write_frame<O>(
     bulk_out: &mut O,
     generation: u32,
+    ready_phase: Phase,
+    error_phase: Phase,
     frame: BridgeFrame,
 ) -> Result<(), BridgeIoEnd>
 where
@@ -1180,7 +1219,7 @@ where
     .await
     {
         Ok(Ok(())) => {
-            if record_bridge_tx_if_current(generation, count).await {
+            if record_bridge_tx_if_current(generation, ready_phase, count).await {
                 Ok(())
             } else {
                 Err(BridgeIoEnd::Failed)
@@ -1188,18 +1227,11 @@ where
         }
         Ok(Err(PipeError::Disconnected)) => Err(BridgeIoEnd::Failed),
         Ok(Err(_)) => {
-            fail_current_session(
-                generation,
-                Phase::CdcReady,
-                Phase::CdcError,
-                Error::Transfer,
-            )
-            .await;
+            fail_current_session(generation, ready_phase, error_phase, Error::Transfer).await;
             Err(BridgeIoEnd::Failed)
         }
         Err(_) => {
-            fail_current_session(generation, Phase::CdcReady, Phase::CdcError, Error::Timeout)
-                .await;
+            fail_current_session(generation, ready_phase, error_phase, Error::Timeout).await;
             Err(BridgeIoEnd::Failed)
         }
     }
@@ -1237,11 +1269,14 @@ async fn bridge_usb_in<I>(
     session: u32,
     generation: u32,
     packet_size: usize,
+    ready_phase: Phase,
+    error_phase: Phase,
+    wire_format: SerialWireFormat,
 ) -> BridgeIoEnd
 where
     I: UsbPipe<pipe::Bulk, pipe::In>,
 {
-    if !record_bridge_in_start_if_current(generation).await {
+    if !record_bridge_in_start_if_current(generation, ready_phase).await {
         return BridgeIoEnd::Failed;
     }
 
@@ -1258,39 +1293,42 @@ where
                 with_timeout(EXCHANGE_IDLE_TIMEOUT, request).await
             };
 
-            let count = match result {
+            let received = match result {
                 Err(_) => break,
                 Ok(Ok(count)) if count <= packet_size => count,
                 Ok(Ok(_)) => {
-                    let _ = record_bridge_in_cycle_if_current(generation, 0, false, false).await;
-                    fail_current_session(
-                        generation,
-                        Phase::CdcReady,
-                        Phase::CdcError,
-                        Error::Transfer,
-                    )
-                    .await;
+                    let _ =
+                        record_bridge_in_cycle_if_current(generation, ready_phase, 0, false, false)
+                            .await;
+                    fail_current_session(generation, ready_phase, error_phase, Error::Transfer)
+                        .await;
                     return BridgeIoEnd::Failed;
                 }
                 Ok(Err(PipeError::Disconnected)) => {
-                    let _ = record_bridge_in_cycle_if_current(generation, 0, false, false).await;
+                    let _ =
+                        record_bridge_in_cycle_if_current(generation, ready_phase, 0, false, false)
+                            .await;
                     return BridgeIoEnd::Failed;
                 }
                 Ok(Err(_)) => {
-                    let _ = record_bridge_in_cycle_if_current(generation, 0, false, false).await;
-                    fail_current_session(
-                        generation,
-                        Phase::CdcReady,
-                        Phase::CdcError,
-                        Error::Transfer,
-                    )
-                    .await;
+                    let _ =
+                        record_bridge_in_cycle_if_current(generation, ready_phase, 0, false, false)
+                            .await;
+                    fail_current_session(generation, ready_phase, error_phase, Error::Transfer)
+                        .await;
                     return BridgeIoEnd::Failed;
                 }
             };
 
+            let (payload_start, count) = match wire_format {
+                SerialWireFormat::Cdc => (0, received),
+                SerialWireFormat::Ftdi if received >= 2 => (2, received - 2),
+                SerialWireFormat::Ftdi => (received, 0),
+            };
             first = false;
-            if !record_bridge_in_cycle_if_current(generation, count, count != 0, true).await {
+            if !record_bridge_in_cycle_if_current(generation, ready_phase, count, count != 0, true)
+                .await
+            {
                 return BridgeIoEnd::Failed;
             }
             if count == 0 {
@@ -1310,7 +1348,8 @@ where
             }
 
             let start = usize::from(output.len);
-            output.bytes[start..start + count].copy_from_slice(&packet[..count]);
+            output.bytes[start..start + count]
+                .copy_from_slice(&packet[payload_start..payload_start + count]);
             output.len += count as u8;
             if usize::from(output.len) == output.bytes.len() {
                 break;
@@ -1329,7 +1368,13 @@ where
     }
 }
 
-async fn bridge_usb_out<O>(bulk_out: &mut O, session: u32, generation: u32) -> BridgeIoEnd
+async fn bridge_usb_out<O>(
+    bulk_out: &mut O,
+    session: u32,
+    generation: u32,
+    ready_phase: Phase,
+    error_phase: Phase,
+) -> BridgeIoEnd
 where
     O: UsbPipe<pipe::Bulk, pipe::Out>,
 {
@@ -1338,7 +1383,9 @@ where
         if frame.session != session {
             continue;
         }
-        if let Err(end) = bridge_write_frame(bulk_out, generation, frame).await {
+        if let Err(end) =
+            bridge_write_frame(bulk_out, generation, ready_phase, error_phase, frame).await
+        {
             return end;
         }
     }
@@ -1359,6 +1406,9 @@ async fn bridge_usb_io<I, O>(
     generation: u32,
     packet_size: usize,
     initial: Option<CdcData>,
+    ready_phase: Phase,
+    error_phase: Phase,
+    wire_format: SerialWireFormat,
 ) -> BridgeIoEnd
 where
     I: UsbPipe<pipe::Bulk, pipe::In>,
@@ -1374,7 +1424,9 @@ where
     loop {
         match select(BRIDGE_TO_USB.receive(), HOST_COMMANDS.receive()).await {
             Either::First(frame) if frame.session == session => {
-                if let Err(end) = bridge_write_frame(bulk_out, generation, frame).await {
+                if let Err(end) =
+                    bridge_write_frame(bulk_out, generation, ready_phase, error_phase, frame).await
+                {
                     return end;
                 }
                 break;
@@ -1392,9 +1444,17 @@ where
     // loops wait concurrently. The shared host engine serializes their actual
     // wire transactions without repeatedly cancelling the dormant IN retry.
     match select3(
-        bridge_usb_out(bulk_out, session, generation),
+        bridge_usb_out(bulk_out, session, generation, ready_phase, error_phase),
         bridge_commands(session),
-        bridge_usb_in(bulk_in, session, generation, packet_size),
+        bridge_usb_in(
+            bulk_in,
+            session,
+            generation,
+            packet_size,
+            ready_phase,
+            error_phase,
+            wire_format,
+        ),
     )
     .await
     {
@@ -1428,6 +1488,9 @@ where
             generation,
             packet_size,
             initial,
+            Phase::CdcReady,
+            Phase::CdcError,
+            SerialWireFormat::Cdc,
         ),
     )
     .await
@@ -1442,8 +1505,8 @@ where
         BridgeRunOutcome::Disconnected => 2,
         BridgeRunOutcome::Failed => 3,
     };
-    record_bridge_outcome_if_current(generation, outcome_code).await;
-    let released = set_bridge_connected_if_current(generation, true, false).await;
+    record_bridge_outcome_if_current(generation, Phase::CdcReady, outcome_code).await;
+    let released = set_bridge_connected_if_current(generation, Phase::CdcReady, true, false).await;
     if let BridgeRunOutcome::Closed { sequence } = outcome {
         send_reply(Reply {
             sequence,
@@ -1459,6 +1522,67 @@ where
 
     (
         CdcAcmHost::new(function, control, bulk_in, bulk_out),
+        outcome,
+    )
+}
+
+async fn run_ftdi_bridge<'d, H, C, I, O>(
+    controller: &mut BusController<'d, H>,
+    ftdi: FtdiHost<C, I, O>,
+    session: u32,
+    generation: u32,
+) -> (FtdiHost<C, I, O>, BridgeRunOutcome)
+where
+    H: UsbHostController<'d>,
+    C: UsbPipe<pipe::Control, pipe::InOut>,
+    I: UsbPipe<pipe::Bulk, pipe::In>,
+    O: UsbPipe<pipe::Bulk, pipe::Out>,
+{
+    let packet_size = usize::from(ftdi.interface().bulk_in_endpoint.max_packet_size);
+    let (device, interface, control, mut bulk_in, mut bulk_out) = ftdi.into_parts();
+    let outcome = match select(
+        bridge_wait_for_disconnect(controller),
+        bridge_usb_io(
+            &mut bulk_in,
+            &mut bulk_out,
+            session,
+            generation,
+            packet_size,
+            None,
+            Phase::FtdiReady,
+            Phase::FtdiError,
+            SerialWireFormat::Ftdi,
+        ),
+    )
+    .await
+    {
+        Either::First(()) => BridgeRunOutcome::Disconnected,
+        Either::Second(BridgeIoEnd::Closed { sequence }) => BridgeRunOutcome::Closed { sequence },
+        Either::Second(BridgeIoEnd::Failed) => BridgeRunOutcome::Failed,
+    };
+
+    let outcome_code = match &outcome {
+        BridgeRunOutcome::Closed { .. } => 1,
+        BridgeRunOutcome::Disconnected => 2,
+        BridgeRunOutcome::Failed => 3,
+    };
+    record_bridge_outcome_if_current(generation, Phase::FtdiReady, outcome_code).await;
+    let released = set_bridge_connected_if_current(generation, Phase::FtdiReady, true, false).await;
+    if let BridgeRunOutcome::Closed { sequence } = outcome {
+        send_reply(Reply {
+            sequence,
+            result: ReplyResult::BridgeClose(if released {
+                Ok(())
+            } else {
+                Err(Error::NotReady)
+            }),
+        });
+    } else {
+        BRIDGE_EVENT.signal(BridgeEvent::Closed { session });
+    }
+
+    (
+        FtdiHost::new(device, interface, control, bulk_in, bulk_out),
         outcome,
     )
 }
@@ -2105,6 +2229,139 @@ async fn run(hardware: Hardware) {
                 continue;
             }
 
+            if enumeration.device_desc.vendor_id == FTDI_VENDOR_ID {
+                match allocate_ftdi_from_enumeration(
+                    &bus_handle,
+                    &configuration[..configuration_len],
+                    &enumeration,
+                ) {
+                    Ok(mut ftdi) => {
+                        let controls_ready = matches!(
+                            with_timeout(CLASS_CONTROL_TIMEOUT, async {
+                                ftdi.configure_8n1(115_200).await?;
+                                ftdi.set_dtr_rts(true, true).await?;
+                                Ok::<(), FtdiError>(())
+                            })
+                            .await,
+                            Ok(Ok(()))
+                        );
+
+                        if controls_ready {
+                            ftdi.reset_data_toggles();
+                            if set_phase_if_current(
+                                session_generation,
+                                Phase::Enumerating,
+                                Phase::FtdiReady,
+                            )
+                            .await
+                            {
+                                info!(
+                                    "PIO USB FTDI UART ready at address {}, PID={=u16:04x}, baud={}",
+                                    address,
+                                    enumeration.device_desc.product_id,
+                                    ftdi.baud_rate()
+                                );
+
+                                loop {
+                                    match select(
+                                        controller.wait_for_device_event(),
+                                        HOST_COMMANDS.receive(),
+                                    )
+                                    .await
+                                    {
+                                        Either::First(
+                                            DeviceEvent::Disconnected | DeviceEvent::Overcurrent,
+                                        ) => break,
+                                        Either::First(_) => {}
+                                        Either::Second(
+                                            command @ Command {
+                                                sequence,
+                                                operation: Operation::BridgeOpen,
+                                                ..
+                                            },
+                                        ) => {
+                                            if !command_is_current(&command).await {
+                                                reject_command(command, Error::NotReady);
+                                                continue;
+                                            }
+                                            if !set_bridge_connected_if_current(
+                                                session_generation,
+                                                Phase::FtdiReady,
+                                                false,
+                                                true,
+                                            )
+                                            .await
+                                            {
+                                                reject_command(command, Error::ResourceBusy);
+                                                continue;
+                                            }
+
+                                            next_bridge_session =
+                                                next_bridge_session.wrapping_add(1);
+                                            let bridge_session = next_bridge_session;
+                                            send_reply(Reply {
+                                                sequence,
+                                                result: ReplyResult::BridgeOpen(Ok(bridge_session)),
+                                            });
+
+                                            let (restored_ftdi, outcome) = run_ftdi_bridge(
+                                                &mut controller,
+                                                ftdi,
+                                                bridge_session,
+                                                session_generation,
+                                            )
+                                            .await;
+                                            ftdi = restored_ftdi;
+
+                                            match outcome {
+                                                BridgeRunOutcome::Closed { .. } => {
+                                                    info!("raw FTDI serial bridge released");
+                                                }
+                                                BridgeRunOutcome::Disconnected => break,
+                                                BridgeRunOutcome::Failed => {
+                                                    warn!("raw FTDI serial bridge transfer failed");
+                                                    wait_for_removal(&mut controller).await;
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                        Either::Second(command) => {
+                                            reject_command(command, Error::NotReady);
+                                        }
+                                    }
+                                }
+                            }
+                        } else if set_error_phase_if_current(
+                            session_generation,
+                            Phase::Enumerating,
+                            Phase::FtdiError,
+                        )
+                        .await
+                        {
+                            warn!("PIO USB FTDI UART initialization failed");
+                            wait_for_removal(&mut controller).await;
+                        }
+                    }
+                    Err(_) => {
+                        if set_error_phase_if_current(
+                            session_generation,
+                            Phase::Enumerating,
+                            Phase::FtdiError,
+                        )
+                        .await
+                        {
+                            warn!("PIO USB FTDI discovery or pipe allocation failed");
+                            wait_for_removal(&mut controller).await;
+                        }
+                    }
+                }
+
+                bus_handle.free_address(address);
+                set_waiting_if_current(session_generation).await;
+                info!("PIO USB root address {} released", address);
+                continue;
+            }
+
             match allocate_cdc_from_enumeration(
                 &bus_handle,
                 &configuration[..configuration_len],
@@ -2171,6 +2428,7 @@ async fn run(hardware: Hardware) {
                                         }
                                         if !set_bridge_connected_if_current(
                                             session_generation,
+                                            Phase::CdcReady,
                                             false,
                                             true,
                                         )

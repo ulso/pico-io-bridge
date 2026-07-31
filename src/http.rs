@@ -278,7 +278,9 @@ async fn write_usb_host_status_response(
         status.phase.as_str(),
         matches!(
             status.phase,
-            crate::usb_host::Phase::CdcReady | crate::usb_host::Phase::P8055Ready
+            crate::usb_host::Phase::CdcReady
+                | crate::usb_host::Phase::FtdiReady
+                | crate::usb_host::Phase::P8055Ready
         ),
         speed,
         address,
@@ -293,7 +295,10 @@ async fn write_usb_host_status_response(
         },
         crate::network::reset_cause_label(),
         crate::USB_SERIAL_PORT,
-        status.phase == crate::usb_host::Phase::CdcReady,
+        matches!(
+            status.phase,
+            crate::usb_host::Phase::CdcReady | crate::usb_host::Phase::FtdiReady
+        ),
         status.bridge_connected,
     )
     .unwrap();

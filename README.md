@@ -437,25 +437,39 @@ python3 examples/scpi_usb_host_cdc.py ATI
 
 ### Raw TCP USB-serial bridge
 
-The USB-host profile also exposes an enumerated CDC-ACM byte stream directly
-on TCP port 7000, advertised through DNS-SD as `_usbserial._tcp`. This is a raw
-binary TCP bridge: it adds no banner, framing, character encoding, or line
-ending, and it does not interpret `0xff` or any other byte. It is not a Telnet
-or RFC 2217 server, so clients must not send Telnet option negotiation.
+The USB-host profile also exposes an enumerated CDC-ACM or FTDI UART byte
+stream directly on TCP port 7000, advertised through DNS-SD as
+`_usbserial._tcp`. This is a raw binary TCP bridge: it adds no banner,
+framing, character encoding, or line ending, and it does not interpret `0xff`
+or any other byte. It is not a Telnet or RFC 2217 server, so clients must not
+send Telnet option negotiation.
 
-One TCP client at a time owns the CDC stream. The host manager remains the sole
+One TCP client at a time owns the serial stream. The host manager remains the sole
 owner of the USB control and bulk pipes and applies bounded backpressure
 between TCP and USB. While a raw client holds the stream, the SCPI
 `CDC:WRITE:HEX`, `CDC:READ:HEX?`, and `CDC:EXCHANGE:HEX?` data commands report
 `-221,"Settings conflict"`; other SCPI commands, including the host-status
 query, remain available. Closing the TCP connection releases the stream, and
 detaching the USB device closes the active TCP connection. A new client can
-connect after the same CDC device is reattached without rebooting the bridge.
+connect after the same USB serial device is reattached without rebooting the
+bridge.
 
-CDC-ACM is currently the only USB-serial driver behind port 7000. The bridge
-opens it at a fixed 115200 baud, 8 data bits, no parity, and one stop bit, with
-DTR and RTS asserted. Vendor-specific serial adapters such as FTDI are not yet
-supported by this port.
+CDC-ACM and FTDI's vendor-specific UART protocol are supported behind port
+7000. Both are opened at a fixed 115200 baud, 8 data bits, no parity, and one
+stop bit, with DTR and RTS asserted. The first FTDI hardware target is
+FT232R/FT245R (`0403:6001`); the reusable class also recognizes FT2232,
+FT4232H, FT232H, and FT230X default product IDs.
+
+For the first FTDI acceptance test, connect TXD directly to RXD on the TTL
+breakout and run:
+
+```sh
+python3 examples/ftdi_loopback_tcp.py
+```
+
+The default test keeps one TCP session open for 100 exchanges of 257
+pseudorandom bytes. This crosses both the FTDI 62-byte serial-payload boundary
+and the bridge's TCP/USB framing repeatedly, and compares every returned byte.
 
 The standard-library-only Python client sends `AT` followed by CR by default,
 matching BleuIO's command terminator. Use `--terminator crlf` for serial
