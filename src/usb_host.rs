@@ -2408,16 +2408,44 @@ async fn run(hardware: Hardware) {
                         usbtmc.set_control_timeout(
                             embassy_rp_pio_usb_host::host::TimeoutConfig::default(),
                         );
-                        let capabilities = with_timeout(CLASS_CONTROL_TIMEOUT, async {
-                            let capabilities = usbtmc.get_capabilities().await?;
-                            if capabilities.supports_remote_enable() {
-                                usbtmc.remote_enable(true).await?;
+                        let capabilities = loop {
+                            let attempt = with_timeout(CLASS_CONTROL_TIMEOUT, async {
+                                let capabilities = usbtmc.get_capabilities().await?;
+                                if capabilities.supports_remote_enable() {
+                                    usbtmc.remote_enable(true).await?;
+                                }
+                                Ok::<_, UsbtmcError>(capabilities)
+                            })
+                            .await;
+                            if let Ok(Ok(capabilities)) = attempt {
+                                break Some(capabilities);
                             }
-                            Ok::<_, UsbtmcError>(capabilities)
-                        })
-                        .await;
+
+                            if !set_error_phase_if_current(
+                                session_generation,
+                                Phase::Enumerating,
+                                Phase::UsbtmcError,
+                            )
+                            .await
+                            {
+                                break None;
+                            }
+                            warn!("PIO USBTMC class setup failed; retry backoff");
+                            if !wait_for_enumeration_retry(&mut controller).await {
+                                break None;
+                            }
+                            if !set_phase_if_current(
+                                session_generation,
+                                Phase::UsbtmcError,
+                                Phase::Enumerating,
+                            )
+                            .await
+                            {
+                                break None;
+                            }
+                        };
                         match capabilities {
-                            Ok(Ok(capabilities)) => {
+                            Some(capabilities) => {
                                 usbtmc.reset_data_toggles();
                                 if set_usbtmc_ready_if_current(
                                     session_generation,
@@ -2602,18 +2630,7 @@ async fn run(hardware: Hardware) {
                                     }
                                 }
                             }
-                            Ok(Err(_)) | Err(_) => {
-                                if set_error_phase_if_current(
-                                    session_generation,
-                                    Phase::Enumerating,
-                                    Phase::UsbtmcError,
-                                )
-                                .await
-                                {
-                                    warn!("PIO USBTMC class setup failed");
-                                    wait_for_removal(&mut controller).await;
-                                }
-                            }
+                            None => {}
                         }
                     }
                     Err(_) => {
