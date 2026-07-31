@@ -14,6 +14,36 @@ compiling CAN support or configuring CAN/SPI pins. The Adafruit Feather RP2040
 USB Host profile additionally runs a directly connected USB host through the
 RP2040 PIO blocks while the native USB controller remains the CDC-NCM device.
 
+## Why Pico I/O Bridge?
+
+Pico I/O Bridge turns inexpensive RP2040 hardware into a compact, open network
+gateway for instruments, sensors, and laboratory I/O. It provides several
+capabilities that would otherwise require a PC, vendor software, or a collection
+of separate adapters:
+
+- **Put USB-only instruments on the network.** USBTMC/USB488 instruments become
+  accessible through a simple SCPI TCP connection, without a Linux gateway or
+  a VISA installation.
+- **Use USB serial devices from any TCP-capable client.** CDC-ACM and FTDI-based
+  devices are exposed as a raw bidirectional TCP stream, while supported HID
+  devices such as the Velleman P8055 receive a higher-level SCPI interface.
+- **Connect a growing range of STEMMA QT and Qwiic peripherals.** Known sensor
+  drivers expose measurements such as distance, temperature, humidity,
+  pressure, gas resistance, orientation, and battery state directly through
+  SCPI, without requiring clients to understand each device's I2C protocol.
+- **Measure analogue signals without extra hardware.** Every board profile
+  exposes the four external RP2040 ADC channels (A0-A3) and the internal
+  temperature sensor.
+- **Choose the interface that fits the application.** SCPI-RAW, raw TCP, HTTP,
+  WebSocket, and mDNS/DNS-SD discovery make the same small bridge useful from
+  scripts, test systems, browsers, mobile devices, and interactive tools.
+- **Keep timing-critical USB work isolated.** On the USB Host profile, the PIO
+  host stack runs on RP2040 core 1 while core 0 handles the native USB network
+  interface and application services.
+- **Extend an open Rust platform.** The Embassy-based firmware and public PIO
+  USB host library make it practical to add more boards, USB classes, I2C
+  sensors, and SCPI abstractions as new use cases arise.
+
 ## Current Features
 
 - USB CDC-NCM Ethernet interface
