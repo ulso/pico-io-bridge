@@ -78,6 +78,7 @@ code{font:12px ui-monospace,SFMono-Regular,Menlo,monospace;color:#173f73}
 <dt>USB address</dt><dd id="address">-</dd>
 <dt>Class</dt><dd id="deviceClass">-</dd>
 <dt>Driver</dt><dd id="deviceDriver">-</dd>
+<dt>Baud rate</dt><dd id="baudRate">-</dd>
 <dt>VBUS</dt><dd id="vbus">-</dd>
 </dl>
 </section>
@@ -122,6 +123,7 @@ const vidPidEl=document.getElementById("vidPid");
 const addressEl=document.getElementById("address");
 const classEl=document.getElementById("deviceClass");
 const driverEl=document.getElementById("deviceDriver");
+const baudRateEl=document.getElementById("baudRate");
 const vbusEl=document.getElementById("vbus");
 const resetCauseEl=document.getElementById("resetCause");
 const serialBridgeEl=document.getElementById("serialBridge");
@@ -189,6 +191,7 @@ function updateHost(info){
  addressEl.textContent=info.address===null?"-":String(info.address);
  classEl.textContent=deviceClass(info);
  driverEl.textContent=driverName(info);
+ baudRateEl.textContent=isFtdi(info)&&Number(info.ftdiBaudRate)>0?Number(info.ftdiBaudRate).toLocaleString()+" baud":"-";
  vbusEl.textContent=info.phase==="POWER_OFF"?"Off":"Enabled (firmware output)";
  resetCauseEl.textContent=resetCauseLabel(info.resetCause);
  resetCauseEl.className=info.resetCause==="POWER_ON_OR_BROWNOUT"?"stateWait":"";

@@ -323,6 +323,8 @@ Initial command set:
 | `SYST:RES:CAUS?` | Reset cause captured at boot |
 | `SYST:USB:HOST:STAT?` | PIO USB host state and transfer counters; USB-host profile only |
 | `SYST:USB:HOST:ENUM:DIAG?` | Enumeration attempts and most recent failure details; USB-host profile only |
+| `SYST:USB:HOST:FTDI:BAUD <300-3000000>` | Set the active FTDI UART baud rate; rejected while TCP port 7000 is in use |
+| `SYST:USB:HOST:FTDI:BAUD?` | Read the active FTDI UART baud rate |
 | `SYST:USB:HOST:CDC:WRITE:HEX "<hex>"` | Write 1-64 bytes to the enumerated CDC-ACM stream; USB-host profile only |
 | `SYST:USB:HOST:CDC:READ:HEX? <length>` | Read up to 1-64 CDC-ACM bytes and return uppercase hex; USB-host profile only |
 | `SYST:USB:HOST:CDC:EXCH:HEX? "<hex>",<max-length>` | Atomically write and collect a 1-64 byte CDC-ACM response; USB-host profile only |
@@ -397,6 +399,28 @@ phases are `POWER_OFF`, `WAITING`, `RESETTING`, `ENUMERATING`, `CDC_READY`,
 ```text
 attempts,failures,origin,error,site,handshake,setup_attempts,bmRequestType,bRequest,wValueLo,wValueHi,wIndexLo,wIndexHi,wLengthLo,wLengthHi
 ```
+
+FTDI devices start at 115200 baud. The rate can be changed while the device is
+ready and TCP port 7000 is idle. The selected rate is reused across FTDI
+disconnects until the bridge firmware restarts. For example, the DLP-IOR4
+requires 9600 baud:
+
+```text
+SYST:USB:HOST:FTDI:BAUD 9600
+SYST:USB:HOST:FTDI:BAUD?
+```
+
+The DLP-IOR4 example configures 9600 baud over SCPI before using the raw TCP
+bridge:
+
+```sh
+python3 examples/dlp_ior4_tcp.py ping
+python3 examples/dlp_ior4_tcp.py set 1 A
+python3 examples/dlp_ior4_tcp.py cycle 1 --delay 2
+```
+
+The relay contacts can switch hazardous voltages. Develop and test with
+disconnected contacts or a safe low-voltage continuity circuit.
 
 The diagnostic survives a successful automatic retry, making intermittent
 enumeration failures visible after the device reaches a ready phase. Fields

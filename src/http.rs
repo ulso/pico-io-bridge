@@ -274,7 +274,7 @@ async fn write_usb_host_status_response(
     let mut body = String::<640>::new();
     write!(
         body,
-        "{{\"phase\":\"{}\",\"ready\":{},\"speed\":{},\"address\":{},\"vendorId\":{},\"productId\":{},\"rxBytes\":{},\"txBytes\":{},\"errorCount\":{},\"maxTransfer\":{},\"resetCause\":\"{}\",\"serialBridge\":{{\"port\":{},\"service\":\"_usbserial._tcp\",\"available\":{},\"clientConnected\":{}}}}}",
+        "{{\"phase\":\"{}\",\"ready\":{},\"speed\":{},\"address\":{},\"vendorId\":{},\"productId\":{},\"rxBytes\":{},\"txBytes\":{},\"errorCount\":{},\"maxTransfer\":{},\"ftdiBaudRate\":{},\"resetCause\":\"{}\",\"serialBridge\":{{\"port\":{},\"service\":\"_usbserial._tcp\",\"available\":{},\"clientConnected\":{}}}}}",
         status.phase.as_str(),
         matches!(
             status.phase,
@@ -293,6 +293,7 @@ async fn write_usb_host_status_response(
             Some(crate::usb_host::HostSpeed::Low) => crate::p8055::REPORT_LEN,
             Some(crate::usb_host::HostSpeed::Full) | None => crate::USB_HOST_CDC_MAX_TRANSFER,
         },
+        status.ftdi_baud_rate,
         crate::network::reset_cause_label(),
         crate::USB_SERIAL_PORT,
         matches!(

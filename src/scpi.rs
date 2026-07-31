@@ -637,6 +637,36 @@ impl ScpiInstrument {
         }
     }
 
+    #[scpi(cmd = "SYSTem:USB:HOST:FTDI:BAUDrate")]
+    async fn usb_host_ftdi_set_baud_rate(&mut self, baud_rate: u32) -> Result<(), scpi::Error> {
+        #[cfg(feature = "board-adafruit-rp2040-usb-host")]
+        {
+            crate::usb_host::ftdi_set_baud_rate(baud_rate)
+                .await
+                .map(|_| ())
+                .map_err(usb_host_error)
+        }
+        #[cfg(not(feature = "board-adafruit-rp2040-usb-host"))]
+        {
+            let _ = baud_rate;
+            Err(scpi::Error::SettingsConflict)
+        }
+    }
+
+    #[scpi(cmd = "SYSTem:USB:HOST:FTDI:BAUDrate?")]
+    async fn usb_host_ftdi_baud_rate(&mut self) -> Result<u32, scpi::Error> {
+        #[cfg(feature = "board-adafruit-rp2040-usb-host")]
+        {
+            crate::usb_host::ftdi_baud_rate()
+                .await
+                .map_err(usb_host_error)
+        }
+        #[cfg(not(feature = "board-adafruit-rp2040-usb-host"))]
+        {
+            Err(scpi::Error::SettingsConflict)
+        }
+    }
+
     #[scpi(cmd = "SYSTem:USB:HOST:CDC:READ:HEX?")]
     async fn usb_host_cdc_read_hex(
         &mut self,
@@ -1186,6 +1216,16 @@ mod tests {
         call.node.query.expect("registered query")
     }
 
+    fn command_id(input: &[u8]) -> scpi::CommandId {
+        let (remaining, call) =
+            scpi::parser::parse(&SCPI_NODE_0, &SCPI_NODE_0, input).expect("valid SCPI command");
+        assert!(remaining.is_empty());
+        let call = call.expect("command call");
+        assert!(!call.query);
+        assert!(call.terminated);
+        call.node.command.expect("registered command")
+    }
+
     #[test]
     fn usb_host_enumeration_diagnostic_response_is_stable_csv() {
         let response = UsbHostEnumerationDiagnosticResponse {
@@ -1231,5 +1271,16 @@ mod tests {
         let long = query_id(b"SYSTEM:USB:HOST:ENUMERATION:DIAGNOSTIC?\n");
 
         assert_eq!(short, long);
+    }
+
+    #[test]
+    fn usb_host_ftdi_baud_accepts_short_and_long_headers() {
+        let short_query = query_id(b"SYST:USB:HOST:FTDI:BAUD?\n");
+        let long_query = query_id(b"SYSTEM:USB:HOST:FTDI:BAUDRATE?\n");
+        let short_command = command_id(b"SYST:USB:HOST:FTDI:BAUD 9600\n");
+        let long_command = command_id(b"SYSTEM:USB:HOST:FTDI:BAUDRATE 9600\n");
+
+        assert_eq!(short_query, long_query);
+        assert_eq!(short_command, long_command);
     }
 }

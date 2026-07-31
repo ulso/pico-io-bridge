@@ -42,6 +42,7 @@ use embassy_sync::mutex::Mutex;
 use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Instant, Ticker, Timer, with_timeout};
 use embassy_usb_host::{BusController, BusRoute, BusState, EnumerationError};
+use portable_atomic::{AtomicU32, Ordering};
 
 use crate::p8055;
 
@@ -51,6 +52,7 @@ const REPORT_DESCRIPTOR_CAPACITY: usize = 256;
 const COMMAND_CAPACITY: usize = 4;
 const BRIDGE_CHANNEL_CAPACITY: usize = 4;
 const BRIDGE_SOCKET_BUFFER_SIZE: usize = 1024;
+const BRIDGE_TCP_EOF_DRAIN_TIMEOUT: Duration = Duration::from_millis(250);
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(4);
 const EXCHANGE_COMMAND_TIMEOUT: Duration = Duration::from_secs(18);
 const CLASS_CONTROL_TIMEOUT: Duration = Duration::from_secs(2);
@@ -60,6 +62,9 @@ const EXCHANGE_IDLE_TIMEOUT: Duration = Duration::from_millis(50);
 const DIAGNOSTIC_SNAPSHOT_INTERVAL: Duration = Duration::from_millis(100);
 const DIAGNOSTIC_PAYLOAD_PREFIX_CAPACITY: usize = 8;
 const ENUMERATION_RESET_RETRIES: u8 = 2;
+const DEFAULT_FTDI_BAUD_RATE: u32 = 115_200;
+pub(crate) const MIN_FTDI_BAUD_RATE: u32 = 300;
+pub(crate) const MAX_FTDI_BAUD_RATE: u32 = 3_000_000;
 pub(crate) const CDC_MAX_TRANSFER: usize = crate::USB_HOST_CDC_MAX_TRANSFER;
 
 bind_interrupts!(struct PioUsbHostIrqs {
@@ -343,6 +348,7 @@ pub(crate) struct Status {
     pub(crate) rx_bytes: u32,
     pub(crate) tx_bytes: u32,
     pub(crate) error_count: u32,
+    pub(crate) ftdi_baud_rate: u32,
     pub(crate) bridge_connected: bool,
     pub(crate) unexpected_toggle_count: u32,
     pub(crate) accepted_zlp_count: u32,
@@ -384,6 +390,7 @@ impl Status {
             rx_bytes: 0,
             tx_bytes: 0,
             error_count: 0,
+            ftdi_baud_rate: 0,
             bridge_connected: false,
             unexpected_toggle_count: 0,
             accepted_zlp_count: 0,
@@ -424,6 +431,7 @@ impl Status {
         self.address = 0;
         self.vendor_id = 0;
         self.product_id = 0;
+        self.ftdi_baud_rate = 0;
         self.bridge_connected = false;
     }
 }
@@ -527,6 +535,7 @@ enum Operation {
     P8055ResetCounter { channel: u8 },
     P8055SetDebounce { channel: u8, microseconds: u32 },
     P8055GetDebounce { channel: u8 },
+    FtdiSetBaud { baud_rate: u32 },
     BridgeOpen,
     BridgeClose { session: u32 },
 }
@@ -541,6 +550,7 @@ impl Operation {
             | Self::P8055ResetCounter { .. }
             | Self::P8055SetDebounce { .. }
             | Self::P8055GetDebounce { .. } => Phase::P8055Ready,
+            Self::FtdiSetBaud { .. } => Phase::FtdiReady,
             Self::BridgeOpen | Self::BridgeClose { .. } => Phase::CdcReady,
         }
     }
@@ -575,6 +585,7 @@ impl Operation {
             | Self::P8055ResetCounter { .. }
             | Self::P8055SetDebounce { .. }
             | Self::P8055GetDebounce { .. }
+            | Self::FtdiSetBaud { .. }
             | Self::BridgeOpen
             | Self::BridgeClose { .. } => COMMAND_TIMEOUT,
         }
@@ -597,6 +608,7 @@ enum ReplyResult {
     P8055Output(Result<p8055::OutputState, Error>),
     P8055Unit(Result<(), Error>),
     P8055Debounce(Result<u32, Error>),
+    FtdiBaud(Result<u32, Error>),
     BridgeOpen(Result<u32, Error>),
     BridgeClose(Result<(), Error>),
 }
@@ -623,11 +635,13 @@ static HOST_COMMANDS: Channel<CriticalSectionRawMutex, Command, COMMAND_CAPACITY
 static HOST_REPLIES: Channel<CriticalSectionRawMutex, Reply, COMMAND_CAPACITY> = Channel::new();
 static HOST_COMMAND_LOCK: Mutex<CriticalSectionRawMutex, ()> = Mutex::new(());
 static HOST_COMMAND_SEQUENCE: Mutex<CriticalSectionRawMutex, u32> = Mutex::new(0);
+static FTDI_BAUD_RATE: AtomicU32 = AtomicU32::new(DEFAULT_FTDI_BAUD_RATE);
 static BRIDGE_TO_USB: Channel<CriticalSectionRawMutex, BridgeFrame, BRIDGE_CHANNEL_CAPACITY> =
     Channel::new();
 static USB_TO_BRIDGE: Channel<CriticalSectionRawMutex, BridgeFrame, BRIDGE_CHANNEL_CAPACITY> =
     Channel::new();
 static BRIDGE_EVENT: Signal<CriticalSectionRawMutex, BridgeEvent> = Signal::new();
+static BRIDGE_OUT_ACK: Signal<CriticalSectionRawMutex, u32> = Signal::new();
 
 pub(crate) async fn status() -> Status {
     let progress = snapshot_in_pipe_progress_diagnostics();
@@ -705,7 +719,9 @@ async fn send_command(operation: Operation) -> Result<ReplyResult, Error> {
     if !operation.is_ready_in(state.phase) {
         return Err(Error::NotReady);
     }
-    if state.bridge_connected && operation.is_cdc_data() {
+    if state.bridge_connected
+        && (operation.is_cdc_data() || matches!(operation, Operation::FtdiSetBaud { .. }))
+    {
         return Err(Error::ResourceBusy);
     }
     let sequence = {
@@ -833,6 +849,25 @@ pub(crate) async fn p8055_get_debounce(channel: u8) -> Result<u32, Error> {
     }
 }
 
+pub(crate) async fn ftdi_set_baud_rate(baud_rate: u32) -> Result<u32, Error> {
+    if !(MIN_FTDI_BAUD_RATE..=MAX_FTDI_BAUD_RATE).contains(&baud_rate) {
+        return Err(Error::InvalidParameter);
+    }
+    match send_command(Operation::FtdiSetBaud { baud_rate }).await? {
+        ReplyResult::FtdiBaud(result) => result,
+        _ => Err(Error::Transfer),
+    }
+}
+
+pub(crate) async fn ftdi_baud_rate() -> Result<u32, Error> {
+    let state = status().await;
+    if state.phase == Phase::FtdiReady {
+        Ok(state.ftdi_baud_rate)
+    } else {
+        Err(Error::NotReady)
+    }
+}
+
 async fn bridge_open() -> Result<u32, Error> {
     match send_command(Operation::BridgeOpen).await? {
         ReplyResult::BridgeOpen(result) => result,
@@ -869,6 +904,7 @@ async fn set_resetting(speed: HostSpeed) {
     state.rx_bytes = 0;
     state.tx_bytes = 0;
     state.error_count = 0;
+    state.ftdi_baud_rate = 0;
     state.bridge_connected = false;
     state.unexpected_toggle_count = 0;
     state.accepted_zlp_count = 0;
@@ -929,6 +965,25 @@ async fn set_phase_if_current(generation: u32, expected: Phase, phase: Phase) ->
         return false;
     }
     state.phase = phase;
+    true
+}
+
+async fn set_ftdi_ready_if_current(generation: u32, baud_rate: u32) -> bool {
+    let mut state = HOST_STATE.lock().await;
+    if state.generation != generation || state.phase != Phase::Enumerating {
+        return false;
+    }
+    state.phase = Phase::FtdiReady;
+    state.ftdi_baud_rate = baud_rate;
+    true
+}
+
+async fn set_ftdi_baud_if_current(generation: u32, baud_rate: u32) -> bool {
+    let mut state = HOST_STATE.lock().await;
+    if state.generation != generation || state.phase != Phase::FtdiReady {
+        return false;
+    }
+    state.ftdi_baud_rate = baud_rate;
     true
 }
 
@@ -1124,6 +1179,7 @@ fn reject_command(command: Command, error: Error) {
         | Operation::P8055ResetCounter { .. }
         | Operation::P8055SetDebounce { .. } => ReplyResult::P8055Unit(Err(error)),
         Operation::P8055GetDebounce { .. } => ReplyResult::P8055Debounce(Err(error)),
+        Operation::FtdiSetBaud { .. } => ReplyResult::FtdiBaud(Err(error)),
         Operation::BridgeOpen => ReplyResult::BridgeOpen(Err(error)),
         Operation::BridgeClose { .. } => ReplyResult::BridgeClose(Err(error)),
     };
@@ -1388,6 +1444,7 @@ where
         {
             return end;
         }
+        BRIDGE_OUT_ACK.signal(session);
     }
 }
 
@@ -1429,6 +1486,7 @@ where
                 {
                     return end;
                 }
+                BRIDGE_OUT_ACK.signal(session);
                 break;
             }
             Either::First(_) => {}
@@ -2236,9 +2294,10 @@ async fn run(hardware: Hardware) {
                     &enumeration,
                 ) {
                     Ok(mut ftdi) => {
+                        let requested_baud = FTDI_BAUD_RATE.load(Ordering::Relaxed);
                         let controls_ready = matches!(
                             with_timeout(CLASS_CONTROL_TIMEOUT, async {
-                                ftdi.configure_8n1(115_200).await?;
+                                ftdi.configure_8n1(requested_baud).await?;
                                 ftdi.set_dtr_rts(true, true).await?;
                                 Ok::<(), FtdiError>(())
                             })
@@ -2248,17 +2307,12 @@ async fn run(hardware: Hardware) {
 
                         if controls_ready {
                             ftdi.reset_data_toggles();
-                            if set_phase_if_current(
-                                session_generation,
-                                Phase::Enumerating,
-                                Phase::FtdiReady,
-                            )
-                            .await
-                            {
+                            if set_ftdi_ready_if_current(session_generation, requested_baud).await {
                                 info!(
-                                    "PIO USB FTDI UART ready at address {}, PID={=u16:04x}, baud={}",
+                                    "PIO USB FTDI UART ready at address {}, PID={=u16:04x}, requested baud={}, actual baud={}",
                                     address,
                                     enumeration.device_desc.product_id,
+                                    requested_baud,
                                     ftdi.baud_rate()
                                 );
 
@@ -2273,6 +2327,65 @@ async fn run(hardware: Hardware) {
                                             DeviceEvent::Disconnected | DeviceEvent::Overcurrent,
                                         ) => break,
                                         Either::First(_) => {}
+                                        Either::Second(
+                                            command @ Command {
+                                                sequence,
+                                                operation: Operation::FtdiSetBaud { baud_rate },
+                                                ..
+                                            },
+                                        ) => {
+                                            if !command_is_current(&command).await {
+                                                reject_command(command, Error::NotReady);
+                                                continue;
+                                            }
+                                            let result = match with_timeout(
+                                                CLASS_CONTROL_TIMEOUT,
+                                                ftdi.configure_8n1(baud_rate),
+                                            )
+                                            .await
+                                            {
+                                                Ok(Ok(actual)) => {
+                                                    FTDI_BAUD_RATE
+                                                        .store(baud_rate, Ordering::Relaxed);
+                                                    if set_ftdi_baud_if_current(
+                                                        session_generation,
+                                                        baud_rate,
+                                                    )
+                                                    .await
+                                                    {
+                                                        info!(
+                                                            "PIO USB FTDI UART requested baud changed to {}, actual baud={}",
+                                                            baud_rate, actual
+                                                        );
+                                                        Ok(baud_rate)
+                                                    } else {
+                                                        Err(Error::NotReady)
+                                                    }
+                                                }
+                                                Ok(Err(
+                                                    FtdiError::InvalidBaudRate
+                                                    | FtdiError::UnsupportedBaudRate { .. },
+                                                )) => Err(Error::InvalidParameter),
+                                                Ok(Err(_)) => Err(fail_current_session(
+                                                    session_generation,
+                                                    Phase::FtdiReady,
+                                                    Phase::FtdiError,
+                                                    Error::Transfer,
+                                                )
+                                                .await),
+                                                Err(_) => Err(fail_current_session(
+                                                    session_generation,
+                                                    Phase::FtdiReady,
+                                                    Phase::FtdiError,
+                                                    Error::Timeout,
+                                                )
+                                                .await),
+                                            };
+                                            send_reply(Reply {
+                                                sequence,
+                                                result: ReplyResult::FtdiBaud(result),
+                                            });
+                                        }
                                         Either::Second(
                                             command @ Command {
                                                 sequence,
@@ -2869,6 +2982,11 @@ async fn tcp_to_bridge(reader: &mut TcpReader<'_>, session: u32) -> Result<(), (
         }
         data.len = count as u8;
         BRIDGE_TO_USB.send(BridgeFrame { session, data }).await;
+        loop {
+            if BRIDGE_OUT_ACK.wait().await == session {
+                break;
+            }
+        }
     }
 }
 
@@ -2925,6 +3043,7 @@ pub(crate) async fn usb_serial_task(stack: Stack<'static>) {
             BRIDGE_TO_USB.clear();
             USB_TO_BRIDGE.clear();
             BRIDGE_EVENT.reset();
+            BRIDGE_OUT_ACK.reset();
 
             match bridge_open().await {
                 Ok(session) => {
@@ -2937,6 +3056,7 @@ pub(crate) async fn usb_serial_task(stack: Stack<'static>) {
                             bridge_closed(session),
                         )
                         .await;
+                        let orderly_eof = matches!(&end, Either3::First(Ok(())));
                         let end_code = match end {
                             Either3::First(Ok(())) => 1,
                             Either3::First(Err(())) => 2,
@@ -2945,10 +3065,22 @@ pub(crate) async fn usb_serial_task(stack: Stack<'static>) {
                             Either3::Third(()) => 5,
                         };
                         record_bridge_tcp_end_if_connected(end_code).await;
+                        if orderly_eof {
+                            // A piped client such as `printf ... | nc` closes
+                            // only its sending half after the final byte. Keep
+                            // USB-IN and TCP output alive briefly so a prompt
+                            // device response can still reach that client.
+                            let _ = select3(
+                                bridge_to_tcp(&mut writer, session),
+                                bridge_closed(session),
+                                Timer::after(BRIDGE_TCP_EOF_DRAIN_TIMEOUT),
+                            )
+                            .await;
+                        }
                     }
-                    // Frames not yet started belong to the TCP peer that just
-                    // closed. Dropping them here also bounds BridgeClose to
-                    // at most the one bulk-OUT transaction already in flight.
+                    // tcp_to_bridge waits for the matching USB completion
+                    // before reading more TCP data. An orderly TCP EOF
+                    // therefore cannot leave an unstarted final OUT frame.
                     BRIDGE_TO_USB.clear();
                     // Keep draining frames after the TCP peer has gone away.
                     // This lets the host-side bulk-IN loop finish forwarding
