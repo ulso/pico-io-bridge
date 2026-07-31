@@ -271,16 +271,43 @@ async fn write_usb_host_status_response(
         write!(product_id, "{}", status.product_id).unwrap();
     }
 
-    let mut body = String::<640>::new();
+    let mut wispy = String::<512>::new();
+    if crate::wispy::is_original(status.vendor_id, status.product_id) {
+        write!(
+            wispy,
+            "{{\"available\":{},\"startMHz\":{},\"stepMHz\":{},\"offsetMdBm\":{},\"resolutionMdBm\":{},\"sweepCount\":{},\"samples\":[",
+            status.phase == crate::usb_host::Phase::WispyReady,
+            crate::wispy::START_MHZ,
+            crate::wispy::STEP_MHZ,
+            crate::wispy::OFFSET_MDBM,
+            crate::wispy::RESOLUTION_MDBM,
+            status.wispy_sweep_count,
+        )
+        .unwrap();
+        if status.wispy_sweep_count != 0 {
+            for (index, sample) in status.wispy_samples.iter().enumerate() {
+                if index != 0 {
+                    wispy.push(',').unwrap();
+                }
+                write!(wispy, "{}", sample).unwrap();
+            }
+        }
+        wispy.push_str("]}").unwrap();
+    } else {
+        wispy.push_str("null").unwrap();
+    }
+
+    let mut body = String::<1280>::new();
     write!(
         body,
-        "{{\"phase\":\"{}\",\"ready\":{},\"speed\":{},\"address\":{},\"vendorId\":{},\"productId\":{},\"rxBytes\":{},\"txBytes\":{},\"errorCount\":{},\"maxTransfer\":{},\"ftdiBaudRate\":{},\"usb488\":{},\"resetCause\":\"{}\",\"serialBridge\":{{\"port\":{},\"service\":\"_usbserial._tcp\",\"available\":{},\"clientConnected\":{}}},\"usbtmcBridge\":{{\"port\":{},\"service\":\"_usbtmc._tcp\",\"available\":{},\"clientConnected\":{}}}}}",
+        "{{\"phase\":\"{}\",\"ready\":{},\"speed\":{},\"address\":{},\"vendorId\":{},\"productId\":{},\"rxBytes\":{},\"txBytes\":{},\"errorCount\":{},\"maxTransfer\":{},\"ftdiBaudRate\":{},\"usb488\":{},\"resetCause\":\"{}\",\"serialBridge\":{{\"port\":{},\"service\":\"_usbserial._tcp\",\"available\":{},\"clientConnected\":{}}},\"usbtmcBridge\":{{\"port\":{},\"service\":\"_usbtmc._tcp\",\"available\":{},\"clientConnected\":{}}},\"wispySpectrum\":{}}}",
         status.phase.as_str(),
         matches!(
             status.phase,
             crate::usb_host::Phase::CdcReady
                 | crate::usb_host::Phase::FtdiReady
                 | crate::usb_host::Phase::P8055Ready
+                | crate::usb_host::Phase::WispyReady
                 | crate::usb_host::Phase::UsbtmcReady
         ),
         speed,
@@ -311,6 +338,7 @@ async fn write_usb_host_status_response(
         crate::USBTMC_PORT,
         status.phase == crate::usb_host::Phase::UsbtmcReady,
         status.usbtmc_connected,
+        wispy,
     )
     .unwrap();
     write_http_response(socket, "application/json", body.as_bytes()).await

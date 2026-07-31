@@ -1,9 +1,9 @@
 //! PIO USB root-port manager for the Feather RP2040 USB Host profile.
 //!
 //! This task is the sole owner of enumeration, device addresses, CDC-ACM
-//! pipes, and P8055 HID pipes. SCPI exchanges owned fixed-size messages with
-//! it; GP13 remains exclusively owned by the board's existing
-//! `StatusIndicator`.
+//! pipes, and product-specific HID pipes. SCPI exchanges and completed Wi-Spy
+//! sweeps cross to core 0 through bounded state or messages; GP13 remains
+//! exclusively owned by the board's existing `StatusIndicator`.
 
 use defmt::{info, warn};
 use embassy_futures::join::join;
@@ -25,7 +25,7 @@ use embassy_rp_pio_usb_host::ftdi::{
     allocate_from_enumeration as allocate_ftdi_from_enumeration,
 };
 use embassy_rp_pio_usb_host::hid::{
-    HidError, allocate_from_enumeration as allocate_hid_from_enumeration,
+    HidError, HidReportType, allocate_from_enumeration as allocate_hid_from_enumeration,
 };
 use embassy_rp_pio_usb_host::host::{
     DeviceEvent, PipeError, Speed, UsbHostController, UsbPipe, pipe,
@@ -47,7 +47,7 @@ use embassy_time::{Duration, Instant, Ticker, Timer, with_timeout};
 use embassy_usb_host::{BusController, BusRoute, BusState, EnumerationError};
 use portable_atomic::{AtomicU32, Ordering};
 
-use crate::p8055;
+use crate::{p8055, wispy};
 
 const ATTACH_DEBOUNCE_SAMPLES: u16 = 100;
 const CONFIG_DESCRIPTOR_CAPACITY: usize = 512;
@@ -118,6 +118,7 @@ pub(crate) enum Phase {
     CdcReady,
     FtdiReady,
     P8055Ready,
+    WispyReady,
     UsbtmcReady,
     UnsupportedSpeed,
     UnsupportedDevice,
@@ -125,6 +126,7 @@ pub(crate) enum Phase {
     CdcError,
     FtdiError,
     P8055Error,
+    WispyError,
     UsbtmcError,
 }
 
@@ -138,6 +140,7 @@ impl Phase {
             Self::CdcReady => "CDC_READY",
             Self::FtdiReady => "FTDI_READY",
             Self::P8055Ready => "P8055_READY",
+            Self::WispyReady => "WISPY_READY",
             Self::UsbtmcReady => "USBTMC_READY",
             Self::UnsupportedSpeed => "UNSUPPORTED_SPEED",
             Self::UnsupportedDevice => "UNSUPPORTED_DEVICE",
@@ -145,6 +148,7 @@ impl Phase {
             Self::CdcError => "CDC_ERROR",
             Self::FtdiError => "FTDI_ERROR",
             Self::P8055Error => "P8055_ERROR",
+            Self::WispyError => "WISPY_ERROR",
             Self::UsbtmcError => "USBTMC_ERROR",
         }
     }
@@ -363,6 +367,8 @@ pub(crate) struct Status {
     pub(crate) bridge_connected: bool,
     pub(crate) usbtmc_connected: bool,
     pub(crate) usbtmc_usb488: bool,
+    pub(crate) wispy_sweep_count: u32,
+    pub(crate) wispy_samples: [u8; wispy::SAMPLE_COUNT],
     pub(crate) unexpected_toggle_count: u32,
     pub(crate) accepted_zlp_count: u32,
     pub(crate) latest_expected_pid: Option<u8>,
@@ -407,6 +413,8 @@ impl Status {
             bridge_connected: false,
             usbtmc_connected: false,
             usbtmc_usb488: false,
+            wispy_sweep_count: 0,
+            wispy_samples: [0; wispy::SAMPLE_COUNT],
             unexpected_toggle_count: 0,
             accepted_zlp_count: 0,
             latest_expected_pid: None,
@@ -450,6 +458,8 @@ impl Status {
         self.bridge_connected = false;
         self.usbtmc_connected = false;
         self.usbtmc_usb488 = false;
+        self.wispy_sweep_count = 0;
+        self.wispy_samples = [0; wispy::SAMPLE_COUNT];
     }
 }
 
@@ -978,6 +988,8 @@ async fn set_resetting(speed: HostSpeed) {
     state.bridge_connected = false;
     state.usbtmc_connected = false;
     state.usbtmc_usb488 = false;
+    state.wispy_sweep_count = 0;
+    state.wispy_samples = [0; wispy::SAMPLE_COUNT];
     state.unexpected_toggle_count = 0;
     state.accepted_zlp_count = 0;
     state.latest_expected_pid = None;
@@ -1066,6 +1078,29 @@ async fn set_usbtmc_ready_if_current(generation: u32, usb488: bool) -> bool {
     }
     state.phase = Phase::UsbtmcReady;
     state.usbtmc_usb488 = usb488;
+    true
+}
+
+async fn publish_wispy_sweep_if_current(
+    generation: u32,
+    samples: &[u8; wispy::SAMPLE_COUNT],
+) -> bool {
+    let mut state = HOST_STATE.lock().await;
+    if state.generation != generation || state.phase != Phase::WispyReady {
+        return false;
+    }
+    state.wispy_samples.copy_from_slice(samples);
+    state.wispy_sweep_count = state.wispy_sweep_count.wrapping_add(1);
+    state.rx_bytes = state.rx_bytes.wrapping_add(wispy::REPORT_LEN as u32);
+    true
+}
+
+async fn record_wispy_report_if_current(generation: u32) -> bool {
+    let mut state = HOST_STATE.lock().await;
+    if state.generation != generation || state.phase != Phase::WispyReady {
+        return false;
+    }
+    state.rx_bytes = state.rx_bytes.wrapping_add(wispy::REPORT_LEN as u32);
     true
 }
 
@@ -1989,6 +2024,159 @@ async fn run(hardware: Hardware) {
             .await
             {
                 bus_handle.free_address(address);
+                continue;
+            }
+
+            if speed == Speed::Low
+                && wispy::is_original(
+                    enumeration.device_desc.vendor_id,
+                    enumeration.device_desc.product_id,
+                )
+            {
+                match allocate_hid_from_enumeration(
+                    &bus_handle,
+                    &configuration[..configuration_len],
+                    &enumeration,
+                ) {
+                    Err(_) => {
+                        if set_error_phase_if_current(
+                            session_generation,
+                            Phase::Enumerating,
+                            Phase::WispyError,
+                        )
+                        .await
+                        {
+                            warn!("Wi-Spy HID pipe allocation failed");
+                            wait_for_removal(&mut controller).await;
+                        }
+                    }
+                    Ok(mut hid) => {
+                        hid.reset_data_toggles();
+                        let mut report_descriptor = [0_u8; REPORT_DESCRIPTOR_CAPACITY];
+                        let descriptor_ready = match with_timeout(
+                            CLASS_CONTROL_TIMEOUT,
+                            hid.get_report_descriptor(&mut report_descriptor),
+                        )
+                        .await
+                        {
+                            Ok(Ok(descriptor)) => descriptor.len() == wispy::REPORT_DESCRIPTOR_LEN,
+                            _ => false,
+                        };
+
+                        if !descriptor_ready {
+                            if set_error_phase_if_current(
+                                session_generation,
+                                Phase::Enumerating,
+                                Phase::WispyError,
+                            )
+                            .await
+                            {
+                                warn!("Wi-Spy HID report descriptor request failed");
+                                wait_for_removal(&mut controller).await;
+                            }
+                        } else if set_phase_if_current(
+                            session_generation,
+                            Phase::Enumerating,
+                            Phase::WispyReady,
+                        )
+                        .await
+                        {
+                            info!("PIO USB Wi-Spy Original ready at address {}", address);
+                            let mut sweep = wispy::SweepAssembler::new();
+
+                            'wispy: loop {
+                                let mut report = [0_u8; wispy::REPORT_LEN];
+                                let transfer = async {
+                                    Timer::after(Duration::from_millis(7)).await;
+                                    with_timeout(
+                                        CLASS_CONTROL_TIMEOUT,
+                                        hid.get_report(HidReportType::Feature, 0, &mut report),
+                                    )
+                                    .await
+                                };
+
+                                match select3(
+                                    controller.wait_for_device_event(),
+                                    HOST_COMMANDS.receive(),
+                                    transfer,
+                                )
+                                .await
+                                {
+                                    Either3::First(
+                                        DeviceEvent::Disconnected | DeviceEvent::Overcurrent,
+                                    ) => break 'wispy,
+                                    Either3::First(_) => {}
+                                    Either3::Second(command) => {
+                                        reject_command(command, Error::NotReady);
+                                    }
+                                    Either3::Third(Ok(Ok(count))) if count == wispy::REPORT_LEN => {
+                                        match sweep.push(&report) {
+                                            Ok(wispy::SweepProgress::Complete) => {
+                                                if !publish_wispy_sweep_if_current(
+                                                    session_generation,
+                                                    sweep.samples(),
+                                                )
+                                                .await
+                                                {
+                                                    break 'wispy;
+                                                }
+                                            }
+                                            Ok(_) => {
+                                                if !record_wispy_report_if_current(
+                                                    session_generation,
+                                                )
+                                                .await
+                                                {
+                                                    break 'wispy;
+                                                }
+                                            }
+                                            Err(()) => {
+                                                if set_error_phase_if_current(
+                                                    session_generation,
+                                                    Phase::WispyReady,
+                                                    Phase::WispyError,
+                                                )
+                                                .await
+                                                {
+                                                    warn!("Wi-Spy returned an invalid sweep bin");
+                                                    wait_for_removal(&mut controller).await;
+                                                }
+                                                break 'wispy;
+                                            }
+                                        }
+                                    }
+                                    Either3::Third(Ok(Err(HidError::Transfer(
+                                        PipeError::Disconnected,
+                                    )))) => break 'wispy,
+                                    Either3::Third(Err(_)) => {
+                                        record_error_if_current(
+                                            session_generation,
+                                            Phase::WispyReady,
+                                        )
+                                        .await;
+                                    }
+                                    Either3::Third(_) => {
+                                        if set_error_phase_if_current(
+                                            session_generation,
+                                            Phase::WispyReady,
+                                            Phase::WispyError,
+                                        )
+                                        .await
+                                        {
+                                            warn!("Wi-Spy HID feature report failed");
+                                            wait_for_removal(&mut controller).await;
+                                        }
+                                        break 'wispy;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                bus_handle.free_address(address);
+                set_waiting_if_current(session_generation).await;
+                info!("PIO USB root address {} released", address);
                 continue;
             }
 

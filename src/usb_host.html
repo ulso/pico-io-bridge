@@ -28,6 +28,9 @@ button{border:1px solid #9aa7b2;background:#fff;color:#17202a;border-radius:6px;
 .layout{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:16px;align-items:start}
 .panel{border:1px solid #c7d0da;background:#fff;border-radius:8px;padding:14px}
 .wide{grid-column:1/-1}
+.hidden{display:none}
+.spectrumMeta{display:flex;flex-wrap:wrap;justify-content:space-between;gap:8px;color:#65717d;font-size:12px;margin:-4px 0 10px}
+#spectrumCanvas{display:block;width:100%;height:280px;border:1px solid #d7dee6;border-radius:6px;background:#f9fafb}
 h2{font-size:15px;margin:0 0 12px;font-weight:700}
 .facts{display:grid;grid-template-columns:145px minmax(0,1fr);margin:0}
 .facts dt,.facts dd{padding:8px 0;border-bottom:1px solid #edf0f3}
@@ -40,7 +43,7 @@ code{font:12px ui-monospace,SFMono-Regular,Menlo,monospace;color:#173f73}
 @media(max-width:820px){.metrics{grid-template-columns:repeat(3,minmax(0,1fr))}}
 @media(max-width:680px){main{padding:14px}header,.toolbar{align-items:flex-start;flex-direction:column}.layout{grid-template-columns:1fr}.wide{grid-column:auto}.metrics{grid-template-columns:repeat(2,minmax(0,1fr))}.facts{grid-template-columns:110px minmax(0,1fr)}}
 @media(max-width:420px){.tabs a{flex:1;text-align:center}.metrics{grid-template-columns:1fr 1fr}}
-@media(prefers-color-scheme:dark){body{background:#111820;color:#edf2f7}.model,.hint,.metric span,.facts dt,.events time{color:#b9c3cf}.panel,.metric,.tabs a,button{background:#17212b;color:#edf2f7;border-color:#3b4b5c}.tabs a.active{background:#edf2f7;color:#111820}.facts dt,.facts dd,.events li{border-color:#273544}code{color:#8ab8ee}}
+@media(prefers-color-scheme:dark){body{background:#111820;color:#edf2f7}.model,.hint,.metric span,.facts dt,.events time,.spectrumMeta{color:#b9c3cf}.panel,.metric,.tabs a,button{background:#17212b;color:#edf2f7;border-color:#3b4b5c}.tabs a.active{background:#edf2f7;color:#111820}.facts dt,.facts dd,.events li{border-color:#273544}code{color:#8ab8ee}#spectrumCanvas{background:#111820;border-color:#3b4b5c}}
 </style>
 </head>
 <body>
@@ -102,6 +105,12 @@ code{font:12px ui-monospace,SFMono-Regular,Menlo,monospace;color:#173f73}
 </dl>
 </section>
 
+<section id="spectrumPanel" class="panel wide hidden">
+<h2>Wi-Spy 2.4 GHz Spectrum</h2>
+<div class="spectrumMeta"><span id="spectrumRange">2400–2482 MHz · 1 MHz/bin</span><span id="spectrumSweeps">Waiting for a complete sweep</span></div>
+<canvas id="spectrumCanvas" role="img" aria-label="Wi-Spy spectrum power by frequency"></canvas>
+</section>
+
 <section class="panel wide">
 <h2>Page-session State Changes</h2>
 <ul id="events" class="events"><li><time>—</time><span>Waiting for host status</span></li></ul>
@@ -135,6 +144,10 @@ const serialClientEl=document.getElementById("serialClient");
 const usbtmcBridgeEl=document.getElementById("usbtmcBridge");
 const usbtmcServiceEl=document.getElementById("usbtmcService");
 const usbtmcClientEl=document.getElementById("usbtmcClient");
+const spectrumPanel=document.getElementById("spectrumPanel");
+const spectrumCanvas=document.getElementById("spectrumCanvas");
+const spectrumRange=document.getElementById("spectrumRange");
+const spectrumSweeps=document.getElementById("spectrumSweeps");
 const eventsEl=document.getElementById("events");
 let lastPhase=null;
 let refreshing=false;
@@ -146,11 +159,13 @@ function resetCauseLabel(value){
 }
 function hex16(value){return Number(value||0).toString(16).toUpperCase().padStart(4,"0")}
 function isFtdi(info){return info.vendorId===0x0403&&[0x6001,0x6010,0x6011,0x6014,0x6015].includes(info.productId)}
+function isWispy(info){return (info.vendorId===0x1781&&info.productId===0x083e)||(info.vendorId===0x04b4&&info.productId===0x0bad)}
 function deviceName(info){
  if(info.vendorId===0x2dcf&&info.productId===0x6001)return "BleuIO bootloader";
  if(info.vendorId===0x2dcf&&info.productId===0x6002)return "BleuIO";
  if(info.vendorId===0x10cf&&info.productId>=0x5500&&info.productId<=0x5503)return "Velleman K8055 / P8055";
  if(info.vendorId===0x2a8d&&info.productId===0xb318)return "Keysight 34450A";
+ if(isWispy(info))return "MetaGeek Wi-Spy Original";
  if(isFtdi(info))return info.productId===0x6001?"FTDI FT232 / FT245":"FTDI USB serial";
  if(info.vendorId!==null||info.productId!==null)return "USB device";
  if(info.phase==="UNSUPPORTED_SPEED")return "Unsupported-speed USB device";
@@ -160,6 +175,7 @@ function deviceName(info){
 function deviceClass(info){
  if(isFtdi(info))return "Vendor-specific USB serial";
  if(info.phase==="P8055_READY"||info.phase==="P8055_ERROR")return "HID / P8055";
+ if(info.phase==="WISPY_READY"||info.phase==="WISPY_ERROR")return "HID / spectrum analyzer";
  if(info.phase==="FTDI_READY"||info.phase==="FTDI_ERROR")return "FTDI UART";
  if(info.phase==="CDC_READY"||info.phase==="CDC_ERROR")return "CDC-ACM";
  if(info.phase==="USBTMC_READY"||info.phase==="USBTMC_ERROR")return info.usb488?"USBTMC-USB488":"USBTMC";
@@ -170,6 +186,8 @@ function driverName(info){
  if(info.phase==="FTDI_ERROR")return "FTDI UART (error)";
  if(info.phase==="P8055_READY")return "P8055 HID";
  if(info.phase==="P8055_ERROR")return "P8055 HID (error)";
+ if(info.phase==="WISPY_READY")return "Wi-Spy Gen1";
+ if(info.phase==="WISPY_ERROR")return "Wi-Spy Gen1 (error)";
  if(info.phase==="CDC_READY")return "CDC-ACM";
  if(info.phase==="CDC_ERROR")return "CDC-ACM (error)";
  if(info.phase==="USBTMC_READY")return "USBTMC";
@@ -178,9 +196,32 @@ function driverName(info){
  return "-";
 }
 function addEvent(text){events.unshift({time:new Date().toLocaleTimeString(),text});events=events.slice(0,12);eventsEl.textContent="";for(const item of events){const row=document.createElement("li");const time=document.createElement("time");const text=document.createElement("span");time.textContent=item.time;text.textContent=item.text;row.append(time,text);eventsEl.appendChild(row)}}
+function drawSpectrum(spectrum){
+ if(!spectrum){spectrumPanel.classList.add("hidden");return}
+ spectrumPanel.classList.remove("hidden");
+ const samples=Array.isArray(spectrum.samples)?spectrum.samples:[];
+ const start=Number(spectrum.startMHz||2400),step=Number(spectrum.stepMHz||1);
+ spectrumRange.textContent=start+"–"+(start+step*82)+" MHz · "+step+" MHz/bin";
+ spectrumSweeps.textContent=Number(spectrum.sweepCount||0)>0?Number(spectrum.sweepCount).toLocaleString()+" complete sweep"+(spectrum.sweepCount===1?"":"s"):"Waiting for a complete sweep";
+ const rect=spectrumCanvas.getBoundingClientRect(),ratio=window.devicePixelRatio||1;
+ const width=Math.max(320,Math.round(rect.width*ratio)),height=Math.round(280*ratio);
+ if(spectrumCanvas.width!==width||spectrumCanvas.height!==height){spectrumCanvas.width=width;spectrumCanvas.height=height}
+ const ctx=spectrumCanvas.getContext("2d"),dark=matchMedia("(prefers-color-scheme: dark)").matches;
+ const pad={left:48*ratio,right:14*ratio,top:14*ratio,bottom:32*ratio};
+ const plotW=width-pad.left-pad.right,plotH=height-pad.top-pad.bottom;
+ ctx.clearRect(0,0,width,height);ctx.fillStyle=dark?"#111820":"#f9fafb";ctx.fillRect(0,0,width,height);
+ ctx.font=11*ratio+"px ui-monospace, SFMono-Regular, Menlo, monospace";ctx.lineWidth=ratio;
+ for(let dbm=-100;dbm<=-40;dbm+=10){const y=pad.top+(-40-dbm)/60*plotH;ctx.strokeStyle=dark?"#273544":"#dfe5eb";ctx.beginPath();ctx.moveTo(pad.left,y);ctx.lineTo(width-pad.right,y);ctx.stroke();ctx.fillStyle=dark?"#b9c3cf":"#65717d";ctx.textAlign="right";ctx.textBaseline="middle";ctx.fillText(dbm+"",pad.left-7*ratio,y)}
+ for(let mhz=2400;mhz<=2480;mhz+=20){const x=pad.left+(mhz-start)/(step*82)*plotW;ctx.strokeStyle=dark?"#273544":"#dfe5eb";ctx.beginPath();ctx.moveTo(x,pad.top);ctx.lineTo(x,height-pad.bottom);ctx.stroke();ctx.fillStyle=dark?"#b9c3cf":"#65717d";ctx.textAlign="center";ctx.textBaseline="top";ctx.fillText(mhz+"",x,height-pad.bottom+7*ratio)}
+ if(samples.length!==83)return;
+ const dbm=samples.map(value=>Number(spectrum.offsetMdBm||-97000)/1000+Number(spectrum.resolutionMdBm||1500)/1000*Number(value));
+ ctx.beginPath();for(let i=0;i<dbm.length;i++){const x=pad.left+i/(dbm.length-1)*plotW,y=pad.top+(-40-Math.max(-100,Math.min(-40,dbm[i])))/60*plotH;if(i===0)ctx.moveTo(x,y);else ctx.lineTo(x,y)}
+ ctx.lineTo(width-pad.right,height-pad.bottom);ctx.lineTo(pad.left,height-pad.bottom);ctx.closePath();ctx.fillStyle=dark?"rgba(64,170,255,.20)":"rgba(31,122,77,.18)";ctx.fill();
+ ctx.beginPath();for(let i=0;i<dbm.length;i++){const x=pad.left+i/(dbm.length-1)*plotW,y=pad.top+(-40-Math.max(-100,Math.min(-40,dbm[i])))/60*plotH;if(i===0)ctx.moveTo(x,y);else ctx.lineTo(x,y)}ctx.strokeStyle=dark?"#40aaff":"#1f7a4d";ctx.lineWidth=2*ratio;ctx.stroke();
+}
 function showPhase(phase){
  const label=phaseLabel(phase);phaseEl.textContent=label;phaseEl.className="";
- if(phase==="CDC_READY"||phase==="FTDI_READY"||phase==="P8055_READY"||phase==="USBTMC_READY"){statusEl.className="status online";statusText.textContent=phase==="P8055_READY"?"P8055 HID ready":phase==="FTDI_READY"?"FTDI UART ready":phase==="USBTMC_READY"?"USBTMC instrument ready":"CDC-ACM ready";phaseEl.className="stateOk"}
+ if(phase==="CDC_READY"||phase==="FTDI_READY"||phase==="P8055_READY"||phase==="WISPY_READY"||phase==="USBTMC_READY"){statusEl.className="status online";statusText.textContent=phase==="P8055_READY"?"P8055 HID ready":phase==="WISPY_READY"?"Wi-Spy spectrum analyzer ready":phase==="FTDI_READY"?"FTDI UART ready":phase==="USBTMC_READY"?"USBTMC instrument ready":"CDC-ACM ready";phaseEl.className="stateOk"}
  else if(phase==="WAITING"||phase==="POWER_OFF"){statusEl.className="status";statusText.textContent=phase==="WAITING"?"waiting for device":"host powered off";phaseEl.className="stateOff"}
  else if(phase==="RESETTING"||phase==="ENUMERATING"){statusEl.className="status";statusText.textContent=label.toLowerCase();phaseEl.className="stateWait"}
  else if(phase==="UNSUPPORTED_DEVICE"){statusEl.className="status warning";statusText.textContent="unsupported device";phaseEl.className="stateWait"}
@@ -193,7 +234,7 @@ function updateHost(info){
  txBytesEl.textContent=Number(info.txBytes||0).toLocaleString();
  errorsEl.textContent=Number(info.errorCount||0).toLocaleString();
  errorsEl.className=Number(info.errorCount||0)>0?"stateBad":"";
- const transferReady=info.phase==="CDC_READY"||info.phase==="FTDI_READY"||info.phase==="P8055_READY"||info.phase==="USBTMC_READY";
+ const transferReady=info.phase==="CDC_READY"||info.phase==="FTDI_READY"||info.phase==="P8055_READY"||info.phase==="WISPY_READY"||info.phase==="USBTMC_READY";
  maxTransferEl.textContent=transferReady?Number(info.maxTransfer??64)+" B":"—";
  deviceEl.textContent=deviceName(info);
  const hasIdentity=info.vendorId!==null||info.productId!==null;
@@ -219,6 +260,7 @@ function updateHost(info){
  usbtmcServiceEl.textContent=typeof tmc.service==="string"&&tmc.service?tmc.service:"-";
  usbtmcClientEl.textContent=tmc.clientConnected?"Connected":tmc.available?"Not connected":"Unavailable";
  usbtmcClientEl.className=tmc.clientConnected?"stateOk":tmc.available?"stateOff":"stateWait";
+ drawSpectrum(info.wispySpectrum);
  if(lastPhase!==info.phase){addEvent(lastPhase===null?"Host state: "+phaseLabel(info.phase):phaseLabel(lastPhase)+" → "+phaseLabel(info.phase));lastPhase=info.phase}
 }
 async function refresh(){

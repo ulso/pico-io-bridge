@@ -45,6 +45,8 @@ mod seesaw_encoder;
 mod usb_host;
 #[cfg(any(feature = "can", feature = "i2c"))]
 mod websocket;
+#[cfg(feature = "board-adafruit-rp2040-usb-host")]
+mod wispy;
 
 use defmt::*;
 use embassy_executor::Spawner;

@@ -26,7 +26,8 @@ of separate adapters:
   a VISA installation.
 - **Use USB serial devices from any TCP-capable client.** CDC-ACM and FTDI-based
   devices are exposed as a raw bidirectional TCP stream, while supported HID
-  devices such as the Velleman P8055 receive a higher-level SCPI interface.
+  devices receive application-specific interfaces: the Velleman P8055 through
+  SCPI and the original MetaGeek Wi-Spy through a live browser spectrum view.
 - **Connect a growing range of STEMMA QT and Qwiic peripherals.** Known sensor
   drivers expose measurements such as distance, temperature, humidity,
   pressure, gas resistance, orientation, and battery state directly through
@@ -69,7 +70,8 @@ of separate adapters:
 - MCP25625 CAN support via the `mcp25xx` crate
 - CAN TX, RX broadcast to connected WebSocket clients, status, bitrate/mode config
 - Concurrent I2C status, scan, read, write, and write-read transactions
-- PIO USB host with full-speed CDC-ACM and low-speed Velleman P8055 HID support
+- PIO USB host with CDC-ACM, FTDI UART, USBTMC/USB488, low-speed Velleman P8055
+  HID, and MetaGeek Wi-Spy Original spectrum-analyzer support
 - Raw binary TCP bridge to a hosted CDC-ACM stream on port 7000
 - SCPI-RAW bridge to a hosted USBTMC/USB488 instrument on port 5026
 - Compile-time profiles for four Adafruit RP2040 boards
@@ -285,7 +287,12 @@ profiles serve the I2C console there. The SCPI information page is available
 in every profile. The read-only USB host page is available only in the
 `board-adafruit-rp2040-usb-host` profile. It reports the PIO host phase, attached
 device identity, speed, address, transfer counters, cumulative errors and fixed
-hardware resources. Its live data comes from `/api/usb-host/status`.
+hardware resources. When a MetaGeek Wi-Spy Original (`1781:083E`, or the legacy
+`04B4:0BAD` identity) is attached, the page adds a live 83-bin spectrum plot
+covering 2400-2482 MHz at 1 MHz spacing. The displayed dBm estimate uses the
+Gen1 conversion `-97 + 1.5 * raw_sample`. Only complete, bin-zero-synchronized
+sweeps are published to the browser. Its live data comes from
+`/api/usb-host/status`.
 `/api/status` reports instrument identity, SCPI-RAW connection metadata, the
 active interface names and the endpoint paths in its `pages` and `websockets`
 fields.
@@ -421,9 +428,10 @@ toggle was unexpected. PIDs and the retained payload prefix are uppercase hex;
 the prefix is at most eight bytes, `EMPTY` for a zero-length packet, and all
 four latest-packet fields are `NONE` until one has been observed. The possible
 phases are `POWER_OFF`, `WAITING`, `RESETTING`, `ENUMERATING`, `CDC_READY`,
-`P8055_READY`, `UNSUPPORTED_SPEED`, `UNSUPPORTED_DEVICE`,
-`ENUMERATION_ERROR`, `CDC_ERROR`, and `P8055_ERROR`. Speed is `FULL`, `LOW`, or
-`NONE`.
+`FTDI_READY`, `P8055_READY`, `WISPY_READY`, `USBTMC_READY`,
+`UNSUPPORTED_SPEED`, `UNSUPPORTED_DEVICE`, `ENUMERATION_ERROR`, `CDC_ERROR`,
+`FTDI_ERROR`, `P8055_ERROR`, `WISPY_ERROR`, and `USBTMC_ERROR`. Speed is
+`FULL`, `LOW`, or `NONE`.
 
 `SYST:USB:HOST:ENUM:DIAG?` returns:
 
@@ -928,8 +936,9 @@ Example:
   numbers rather than SCPI channel-list expressions such as `(@1:4)`.
 - The PIO host supports one directly connected root device and no hubs,
   high-speed devices, or isochronous transfers. The integration exposes generic
-  full-speed CDC-ACM and the original low-speed Velleman K8055/P8055 protocol;
-  it is not yet a general-purpose HID instrument API.
+  full-speed CDC-ACM, FTDI UART and USBTMC transports plus the original
+  low-speed Velleman K8055/P8055 and MetaGeek Wi-Spy protocols; it is not yet a
+  general-purpose HID instrument API.
 - A tested Keysight MSO-X 3054A running firmware `02.66.2024012316`
   intermittently times out on the first complete device-descriptor request
   after `SET_ADDRESS`. Automatic enumeration retries have recovered to
