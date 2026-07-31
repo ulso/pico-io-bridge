@@ -204,7 +204,7 @@ page and `/can` WebSocket endpoint from the resulting firmware. The USB-host
 profile adds
 [`embassy-rp-pio-usb-host`](https://github.com/ulso/embassy-rp-pio-usb-host)
 as an optional Git dependency pinned to commit
-`daabda700964f3499d99c37ec9559df7a4c5aff5`.
+`74aa9b0e1b1827027fe6b2d905b487afd7600755`.
 
 ## Flash
 
@@ -930,6 +930,12 @@ Example:
   high-speed devices, or isochronous transfers. The integration exposes generic
   full-speed CDC-ACM and the original low-speed Velleman K8055/P8055 protocol;
   it is not yet a general-purpose HID instrument API.
+- A tested Keysight MSO-X 3054A running firmware `02.66.2024012316`
+  intermittently times out on the first complete device-descriptor request
+  after `SET_ADDRESS`. Automatic enumeration retries have recovered to
+  `USBTMC_READY` without user intervention, and USBTMC commands are stable once
+  ready. The latest failure is available through `SYST:USB:HOST:ENUM:DIAG?`;
+  the underlying EP0/reset interaction remains under investigation.
 - The raw USB-serial TCP bridge accepts one client, supports CDC-ACM only, and
   uses fixed line settings; it does not implement Telnet or RFC 2217 controls.
 - RP2040 ADC voltage and temperature results are nominal, not calibrated
