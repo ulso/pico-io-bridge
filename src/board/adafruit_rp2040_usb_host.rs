@@ -22,6 +22,7 @@ pub(crate) const INTERFACE_STARTUP_LOG: &[u8] =
     b"I2C task starting, I2C1 SCL GP3 SDA GP2 at 400 kHz\r\n\
 PIO USB host starting, D+ GP16 D- GP17 VBUS enable GP18\r\n\
 Raw USB serial bridge starting, TCP port 7000\r\n\
+USBTMC SCPI bridge starting, TCP port 5026\r\n\
 SCPI server starting, ADC A0-A3 on GP26-GP29, TCP port 5025\r\n";
 
 bind_interrupts!(struct I2cIrqs {
@@ -74,6 +75,7 @@ impl Interfaces {
 
         spawner.spawn(i2c::i2c1_task(i2c).unwrap());
         spawner.spawn(usb_host::usb_serial_task(stack).unwrap());
+        spawner.spawn(usb_host::usbtmc_task(stack).unwrap());
         scpi.spawn(spawner, stack, serial);
     }
 }

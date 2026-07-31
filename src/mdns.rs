@@ -13,7 +13,7 @@ use static_cell::StaticCell;
 
 pub(crate) const UID_SUFFIX_BYTES: usize = 6;
 #[cfg(feature = "board-adafruit-rp2040-usb-host")]
-pub(crate) const SERVICE_COUNT: usize = 3;
+pub(crate) const SERVICE_COUNT: usize = 4;
 #[cfg(not(feature = "board-adafruit-rp2040-usb-host"))]
 pub(crate) const SERVICE_COUNT: usize = 2;
 const DNS_LABEL_BYTES: usize = 63;
@@ -22,6 +22,8 @@ const HTTP_SERVICE_TYPE: &str = "_http._tcp.local.";
 const SCPI_SERVICE_TYPE: &str = "_scpi-raw._tcp.local.";
 #[cfg(feature = "board-adafruit-rp2040-usb-host")]
 const USB_SERIAL_SERVICE_TYPE: &str = "_usbserial._tcp.local.";
+#[cfg(feature = "board-adafruit-rp2040-usb-host")]
+const USBTMC_SERVICE_TYPE: &str = "_usbtmc._tcp.local.";
 
 pub(crate) struct MdnsRng(u64);
 
@@ -30,6 +32,8 @@ pub(crate) struct Registration {
     scpi_handle: ServiceHandle,
     #[cfg(feature = "board-adafruit-rp2040-usb-host")]
     usb_serial_handle: ServiceHandle,
+    #[cfg(feature = "board-adafruit-rp2040-usb-host")]
+    usbtmc_handle: ServiceHandle,
     pub(crate) hostname: String<DNS_LABEL_BYTES>,
 }
 
@@ -48,6 +52,7 @@ impl Registration {
             (b"HTTP service", self.http_handle),
             (b"SCPI service", self.scpi_handle),
             (b"USB serial service", self.usb_serial_handle),
+            (b"USBTMC SCPI service", self.usbtmc_handle),
         ]
     }
 
@@ -56,6 +61,8 @@ impl Registration {
         state.unregister_service(self.scpi_handle);
         #[cfg(feature = "board-adafruit-rp2040-usb-host")]
         state.unregister_service(self.usb_serial_handle);
+        #[cfg(feature = "board-adafruit-rp2040-usb-host")]
+        state.unregister_service(self.usbtmc_handle);
     }
 }
 
@@ -218,11 +225,36 @@ pub(crate) fn register_services(
         }
     };
 
+    #[cfg(feature = "board-adafruit-rp2040-usb-host")]
+    let usbtmc_handle = {
+        let mut records = build_mdns_records(
+            ipv4,
+            ipv6,
+            &hostname,
+            uid_suffix,
+            USBTMC_SERVICE_TYPE,
+            crate::USBTMC_PORT,
+        );
+        records.add_txt_segment(txt("txtvers", "1"));
+        records.add_txt_segment(txt("transport", "USBTMC"));
+        match state.register_service(ServiceSpec::new(records)) {
+            Ok(handle) => handle,
+            Err(error) => {
+                state.unregister_service(http_handle);
+                state.unregister_service(scpi_handle);
+                state.unregister_service(usb_serial_handle);
+                return Err(error);
+            }
+        }
+    };
+
     Ok(Registration {
         http_handle,
         scpi_handle,
         #[cfg(feature = "board-adafruit-rp2040-usb-host")]
         usb_serial_handle,
+        #[cfg(feature = "board-adafruit-rp2040-usb-host")]
+        usbtmc_handle,
         hostname,
     })
 }

@@ -77,6 +77,8 @@ pub(crate) const HTTP_SOCKETS: usize = 4;
 pub(crate) const SCPI_PORT: u16 = 5025;
 #[cfg(feature = "board-adafruit-rp2040-usb-host")]
 pub(crate) const USB_SERIAL_PORT: u16 = 7000;
+#[cfg(feature = "board-adafruit-rp2040-usb-host")]
+pub(crate) const USBTMC_PORT: u16 = 5026;
 pub(crate) const MANUFACTURER: &str = "Pico I/O Bridge Project";
 pub(crate) const FIRMWARE_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub(crate) const WS_TIMEOUT: Duration = Duration::from_secs(20);
@@ -261,7 +263,10 @@ async fn main(spawner: Spawner) {
         dns_servers: Default::default(),
     });
 
-    static NET_RESOURCES: StaticCell<StackResources<10>> = StaticCell::new();
+    // Four HTTP listeners, local SCPI, USB serial, USBTMC, DHCP and dual-stack
+    // mDNS consume ten sockets on the USB-host profile. Keep two spare slots
+    // so task startup and link recovery never run at the allocator limit.
+    static NET_RESOURCES: StaticCell<StackResources<12>> = StaticCell::new();
     let (stack, net_runner) = embassy_net::new(
         network::CountingDevice { inner: ncm_device },
         net_config,

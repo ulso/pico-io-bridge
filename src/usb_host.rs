@@ -35,6 +35,9 @@ use embassy_rp_pio_usb_host::pio_host::rp2040::{
 };
 use embassy_rp_pio_usb_host::pio_host::{PioHostState, snapshot_in_pipe_progress_diagnostics};
 use embassy_rp_pio_usb_host::usb::{CdcLineCoding, ConfigurationError};
+use embassy_rp_pio_usb_host::usbtmc::{
+    UsbtmcError, UsbtmcInterface, allocate_from_enumeration as allocate_usbtmc_from_enumeration,
+};
 use embassy_rp_pio_usb_host::{AttachDetector, BusEvent, DeviceSpeed};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
@@ -63,6 +66,9 @@ const DIAGNOSTIC_SNAPSHOT_INTERVAL: Duration = Duration::from_millis(100);
 const DIAGNOSTIC_PAYLOAD_PREFIX_CAPACITY: usize = 8;
 const ENUMERATION_RESET_RETRIES: u8 = 2;
 const DEFAULT_FTDI_BAUD_RATE: u32 = 115_200;
+const USBTMC_COMMAND_TIMEOUT: Duration = Duration::from_secs(15);
+const USBTMC_SOCKET_BUFFER_SIZE: usize = 1024;
+pub(crate) const USBTMC_MAX_TRANSFER: usize = 512;
 pub(crate) const MIN_FTDI_BAUD_RATE: u32 = 300;
 pub(crate) const MAX_FTDI_BAUD_RATE: u32 = 3_000_000;
 pub(crate) const CDC_MAX_TRANSFER: usize = crate::USB_HOST_CDC_MAX_TRANSFER;
@@ -111,12 +117,14 @@ pub(crate) enum Phase {
     CdcReady,
     FtdiReady,
     P8055Ready,
+    UsbtmcReady,
     UnsupportedSpeed,
     UnsupportedDevice,
     EnumerationError,
     CdcError,
     FtdiError,
     P8055Error,
+    UsbtmcError,
 }
 
 impl Phase {
@@ -129,12 +137,14 @@ impl Phase {
             Self::CdcReady => "CDC_READY",
             Self::FtdiReady => "FTDI_READY",
             Self::P8055Ready => "P8055_READY",
+            Self::UsbtmcReady => "USBTMC_READY",
             Self::UnsupportedSpeed => "UNSUPPORTED_SPEED",
             Self::UnsupportedDevice => "UNSUPPORTED_DEVICE",
             Self::EnumerationError => "ENUMERATION_ERROR",
             Self::CdcError => "CDC_ERROR",
             Self::FtdiError => "FTDI_ERROR",
             Self::P8055Error => "P8055_ERROR",
+            Self::UsbtmcError => "USBTMC_ERROR",
         }
     }
 
@@ -350,6 +360,8 @@ pub(crate) struct Status {
     pub(crate) error_count: u32,
     pub(crate) ftdi_baud_rate: u32,
     pub(crate) bridge_connected: bool,
+    pub(crate) usbtmc_connected: bool,
+    pub(crate) usbtmc_usb488: bool,
     pub(crate) unexpected_toggle_count: u32,
     pub(crate) accepted_zlp_count: u32,
     pub(crate) latest_expected_pid: Option<u8>,
@@ -392,6 +404,8 @@ impl Status {
             error_count: 0,
             ftdi_baud_rate: 0,
             bridge_connected: false,
+            usbtmc_connected: false,
+            usbtmc_usb488: false,
             unexpected_toggle_count: 0,
             accepted_zlp_count: 0,
             latest_expected_pid: None,
@@ -433,6 +447,8 @@ impl Status {
         self.product_id = 0;
         self.ftdi_baud_rate = 0;
         self.bridge_connected = false;
+        self.usbtmc_connected = false;
+        self.usbtmc_usb488 = false;
     }
 }
 
@@ -440,6 +456,35 @@ impl Status {
 pub(crate) struct CdcData {
     len: u8,
     bytes: [u8; CDC_MAX_TRANSFER],
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct UsbtmcData {
+    len: u16,
+    bytes: [u8; USBTMC_MAX_TRANSFER],
+}
+
+impl UsbtmcData {
+    const fn empty() -> Self {
+        Self {
+            len: 0,
+            bytes: [0; USBTMC_MAX_TRANSFER],
+        }
+    }
+
+    fn from_slice(bytes: &[u8]) -> Result<Self, Error> {
+        if bytes.is_empty() || bytes.len() > USBTMC_MAX_TRANSFER {
+            return Err(Error::InvalidLength);
+        }
+        let mut data = Self::empty();
+        data.bytes[..bytes.len()].copy_from_slice(bytes);
+        data.len = bytes.len() as u16;
+        Ok(data)
+    }
+
+    pub(crate) fn as_bytes(&self) -> &[u8] {
+        &self.bytes[..usize::from(self.len)]
+    }
 }
 
 impl CdcData {
@@ -536,6 +581,8 @@ enum Operation {
     P8055SetDebounce { channel: u8, microseconds: u32 },
     P8055GetDebounce { channel: u8 },
     FtdiSetBaud { baud_rate: u32 },
+    UsbtmcWrite(UsbtmcData),
+    UsbtmcExchange(UsbtmcData),
     BridgeOpen,
     BridgeClose { session: u32 },
 }
@@ -551,6 +598,7 @@ impl Operation {
             | Self::P8055SetDebounce { .. }
             | Self::P8055GetDebounce { .. } => Phase::P8055Ready,
             Self::FtdiSetBaud { .. } => Phase::FtdiReady,
+            Self::UsbtmcWrite(_) | Self::UsbtmcExchange(_) => Phase::UsbtmcReady,
             Self::BridgeOpen | Self::BridgeClose { .. } => Phase::CdcReady,
         }
     }
@@ -577,6 +625,7 @@ impl Operation {
     const fn reply_timeout(self) -> Duration {
         match self {
             Self::Exchange { .. } => EXCHANGE_COMMAND_TIMEOUT,
+            Self::UsbtmcExchange(_) => USBTMC_COMMAND_TIMEOUT,
             Self::Read { .. }
             | Self::Write(_)
             | Self::P8055ReadInput
@@ -586,6 +635,7 @@ impl Operation {
             | Self::P8055SetDebounce { .. }
             | Self::P8055GetDebounce { .. }
             | Self::FtdiSetBaud { .. }
+            | Self::UsbtmcWrite(_)
             | Self::BridgeOpen
             | Self::BridgeClose { .. } => COMMAND_TIMEOUT,
         }
@@ -600,6 +650,7 @@ struct Command {
 }
 
 #[derive(Clone, Copy)]
+#[allow(clippy::large_enum_variant)]
 enum ReplyResult {
     Read(Result<CdcData, Error>),
     Write(Result<u8, Error>),
@@ -609,6 +660,8 @@ enum ReplyResult {
     P8055Unit(Result<(), Error>),
     P8055Debounce(Result<u32, Error>),
     FtdiBaud(Result<u32, Error>),
+    UsbtmcUnit(Result<(), Error>),
+    UsbtmcData(Result<UsbtmcData, Error>),
     BridgeOpen(Result<u32, Error>),
     BridgeClose(Result<(), Error>),
 }
@@ -868,6 +921,22 @@ pub(crate) async fn ftdi_baud_rate() -> Result<u32, Error> {
     }
 }
 
+pub(crate) async fn usbtmc_write(bytes: &[u8]) -> Result<(), Error> {
+    let data = UsbtmcData::from_slice(bytes)?;
+    match send_command(Operation::UsbtmcWrite(data)).await? {
+        ReplyResult::UsbtmcUnit(result) => result,
+        _ => Err(Error::Transfer),
+    }
+}
+
+pub(crate) async fn usbtmc_exchange(bytes: &[u8]) -> Result<UsbtmcData, Error> {
+    let data = UsbtmcData::from_slice(bytes)?;
+    match send_command(Operation::UsbtmcExchange(data)).await? {
+        ReplyResult::UsbtmcData(result) => result,
+        _ => Err(Error::Transfer),
+    }
+}
+
 async fn bridge_open() -> Result<u32, Error> {
     match send_command(Operation::BridgeOpen).await? {
         ReplyResult::BridgeOpen(result) => result,
@@ -906,6 +975,8 @@ async fn set_resetting(speed: HostSpeed) {
     state.error_count = 0;
     state.ftdi_baud_rate = 0;
     state.bridge_connected = false;
+    state.usbtmc_connected = false;
+    state.usbtmc_usb488 = false;
     state.unexpected_toggle_count = 0;
     state.accepted_zlp_count = 0;
     state.latest_expected_pid = None;
@@ -985,6 +1056,21 @@ async fn set_ftdi_baud_if_current(generation: u32, baud_rate: u32) -> bool {
     }
     state.ftdi_baud_rate = baud_rate;
     true
+}
+
+async fn set_usbtmc_ready_if_current(generation: u32, usb488: bool) -> bool {
+    let mut state = HOST_STATE.lock().await;
+    if state.generation != generation || state.phase != Phase::Enumerating {
+        return false;
+    }
+    state.phase = Phase::UsbtmcReady;
+    state.usbtmc_usb488 = usb488;
+    true
+}
+
+async fn set_usbtmc_connected(connected: bool) {
+    let mut state = HOST_STATE.lock().await;
+    state.usbtmc_connected = connected && state.phase == Phase::UsbtmcReady;
 }
 
 async fn set_error_phase(phase: Phase) {
@@ -1180,6 +1266,8 @@ fn reject_command(command: Command, error: Error) {
         | Operation::P8055SetDebounce { .. } => ReplyResult::P8055Unit(Err(error)),
         Operation::P8055GetDebounce { .. } => ReplyResult::P8055Debounce(Err(error)),
         Operation::FtdiSetBaud { .. } => ReplyResult::FtdiBaud(Err(error)),
+        Operation::UsbtmcWrite(_) => ReplyResult::UsbtmcUnit(Err(error)),
+        Operation::UsbtmcExchange(_) => ReplyResult::UsbtmcData(Err(error)),
         Operation::BridgeOpen => ReplyResult::BridgeOpen(Err(error)),
         Operation::BridgeClose { .. } => ReplyResult::BridgeClose(Err(error)),
     };
@@ -2287,6 +2375,244 @@ async fn run(hardware: Hardware) {
                 continue;
             }
 
+            if UsbtmcInterface::discover(&configuration[..configuration_len]).is_ok() {
+                match allocate_usbtmc_from_enumeration(
+                    &bus_handle,
+                    &configuration[..configuration_len],
+                    &enumeration,
+                ) {
+                    Ok(mut usbtmc) => {
+                        usbtmc.set_control_timeout(
+                            embassy_rp_pio_usb_host::host::TimeoutConfig::default(),
+                        );
+                        let capabilities = with_timeout(CLASS_CONTROL_TIMEOUT, async {
+                            let capabilities = usbtmc.get_capabilities().await?;
+                            if capabilities.supports_remote_enable() {
+                                usbtmc.remote_enable(true).await?;
+                            }
+                            Ok::<_, UsbtmcError>(capabilities)
+                        })
+                        .await;
+                        match capabilities {
+                            Ok(Ok(capabilities)) => {
+                                usbtmc.reset_data_toggles();
+                                if set_usbtmc_ready_if_current(
+                                    session_generation,
+                                    usbtmc.interface().supports_usb488(),
+                                )
+                                .await
+                                {
+                                    info!(
+                                        "PIO USBTMC ready at address {}, USBTMC={=u16:04x}, USB488={=u16:04x}",
+                                        address,
+                                        capabilities.usbtmc_version_bcd,
+                                        capabilities.usb488_version_bcd
+                                    );
+
+                                    let mut transport_failed = false;
+                                    loop {
+                                        match select(
+                                            controller.wait_for_device_event(),
+                                            HOST_COMMANDS.receive(),
+                                        )
+                                        .await
+                                        {
+                                            Either::First(
+                                                DeviceEvent::Disconnected
+                                                | DeviceEvent::Overcurrent,
+                                            ) => break,
+                                            Either::First(_) => {}
+                                            Either::Second(
+                                                command @ Command {
+                                                    sequence,
+                                                    operation: Operation::UsbtmcWrite(data),
+                                                    ..
+                                                },
+                                            ) => {
+                                                if !command_is_current(&command).await {
+                                                    reject_command(command, Error::NotReady);
+                                                    continue;
+                                                }
+                                                let result = match with_timeout(
+                                                    USBTMC_COMMAND_TIMEOUT,
+                                                    usbtmc.write(data.as_bytes()),
+                                                )
+                                                .await
+                                                {
+                                                    Ok(Ok(())) => {
+                                                        if record_tx_if_current(
+                                                            session_generation,
+                                                            Phase::UsbtmcReady,
+                                                            data.as_bytes().len(),
+                                                        )
+                                                        .await
+                                                        {
+                                                            Ok(())
+                                                        } else {
+                                                            Err(Error::NotReady)
+                                                        }
+                                                    }
+                                                    Ok(Err(UsbtmcError::Transfer(
+                                                        PipeError::Disconnected,
+                                                    ))) => Err(Error::NotReady),
+                                                    Ok(Err(_)) => {
+                                                        Err(record_current_session_error(
+                                                            session_generation,
+                                                            Phase::UsbtmcReady,
+                                                            Error::Protocol,
+                                                        )
+                                                        .await)
+                                                    }
+                                                    Err(_) => Err(record_current_session_error(
+                                                        session_generation,
+                                                        Phase::UsbtmcReady,
+                                                        Error::Timeout,
+                                                    )
+                                                    .await),
+                                                };
+                                                send_reply(Reply {
+                                                    sequence,
+                                                    result: ReplyResult::UsbtmcUnit(result),
+                                                });
+                                                if matches!(
+                                                    result,
+                                                    Err(Error::Timeout | Error::Protocol)
+                                                ) {
+                                                    transport_failed = true;
+                                                    let _ = set_error_phase_if_current(
+                                                        session_generation,
+                                                        Phase::UsbtmcReady,
+                                                        Phase::UsbtmcError,
+                                                    )
+                                                    .await;
+                                                    break;
+                                                }
+                                            }
+                                            Either::Second(
+                                                command @ Command {
+                                                    sequence,
+                                                    operation: Operation::UsbtmcExchange(data),
+                                                    ..
+                                                },
+                                            ) => {
+                                                if !command_is_current(&command).await {
+                                                    reject_command(command, Error::NotReady);
+                                                    continue;
+                                                }
+                                                let mut response = UsbtmcData::empty();
+                                                let result = match with_timeout(
+                                                    USBTMC_COMMAND_TIMEOUT,
+                                                    usbtmc.exchange(
+                                                        data.as_bytes(),
+                                                        &mut response.bytes,
+                                                    ),
+                                                )
+                                                .await
+                                                {
+                                                    Ok(Ok(count))
+                                                        if count <= USBTMC_MAX_TRANSFER =>
+                                                    {
+                                                        response.len = count as u16;
+                                                        let tx_current = record_tx_if_current(
+                                                            session_generation,
+                                                            Phase::UsbtmcReady,
+                                                            data.as_bytes().len(),
+                                                        )
+                                                        .await;
+                                                        let rx_current = record_rx_if_current(
+                                                            session_generation,
+                                                            Phase::UsbtmcReady,
+                                                            count,
+                                                        )
+                                                        .await;
+                                                        if tx_current && rx_current {
+                                                            Ok(response)
+                                                        } else {
+                                                            Err(Error::NotReady)
+                                                        }
+                                                    }
+                                                    Ok(Ok(_)) => Err(Error::InvalidLength),
+                                                    Ok(Err(UsbtmcError::Transfer(
+                                                        PipeError::Disconnected,
+                                                    ))) => Err(Error::NotReady),
+                                                    Ok(Err(_)) => {
+                                                        Err(record_current_session_error(
+                                                            session_generation,
+                                                            Phase::UsbtmcReady,
+                                                            Error::Protocol,
+                                                        )
+                                                        .await)
+                                                    }
+                                                    Err(_) => Err(record_current_session_error(
+                                                        session_generation,
+                                                        Phase::UsbtmcReady,
+                                                        Error::Timeout,
+                                                    )
+                                                    .await),
+                                                };
+                                                send_reply(Reply {
+                                                    sequence,
+                                                    result: ReplyResult::UsbtmcData(result),
+                                                });
+                                                if matches!(
+                                                    result,
+                                                    Err(Error::Timeout | Error::Protocol)
+                                                ) {
+                                                    transport_failed = true;
+                                                    let _ = set_error_phase_if_current(
+                                                        session_generation,
+                                                        Phase::UsbtmcReady,
+                                                        Phase::UsbtmcError,
+                                                    )
+                                                    .await;
+                                                    break;
+                                                }
+                                            }
+                                            Either::Second(command) => {
+                                                reject_command(command, Error::NotReady);
+                                            }
+                                        }
+                                    }
+                                    if transport_failed {
+                                        warn!("PIO USBTMC transport requires device reconnect");
+                                        wait_for_removal(&mut controller).await;
+                                    }
+                                }
+                            }
+                            Ok(Err(_)) | Err(_) => {
+                                if set_error_phase_if_current(
+                                    session_generation,
+                                    Phase::Enumerating,
+                                    Phase::UsbtmcError,
+                                )
+                                .await
+                                {
+                                    warn!("PIO USBTMC class setup failed");
+                                    wait_for_removal(&mut controller).await;
+                                }
+                            }
+                        }
+                    }
+                    Err(_) => {
+                        if set_error_phase_if_current(
+                            session_generation,
+                            Phase::Enumerating,
+                            Phase::UsbtmcError,
+                        )
+                        .await
+                        {
+                            warn!("PIO USBTMC discovery or pipe allocation failed");
+                            wait_for_removal(&mut controller).await;
+                        }
+                    }
+                }
+
+                bus_handle.free_address(address);
+                set_waiting_if_current(session_generation).await;
+                info!("PIO USB root address {} released", address);
+                continue;
+            }
+
             if enumeration.device_desc.vendor_id == FTDI_VENDOR_ID {
                 match allocate_ftdi_from_enumeration(
                     &bus_handle,
@@ -3102,6 +3428,102 @@ pub(crate) async fn usb_serial_task(stack: Stack<'static>) {
 
         BRIDGE_TO_USB.clear();
         USB_TO_BRIDGE.clear();
+        socket.abort();
+        let _ = socket.flush().await;
+        Timer::after(Duration::from_millis(20)).await;
+    }
+}
+
+async fn usbtmc_socket_write_all(socket: &mut TcpSocket<'_>, mut bytes: &[u8]) -> Result<(), ()> {
+    while !bytes.is_empty() {
+        let count = socket.write(bytes).await.map_err(|_| ())?;
+        if count == 0 {
+            return Err(());
+        }
+        bytes = &bytes[count..];
+    }
+    socket.flush().await.map_err(|_| ())
+}
+
+async fn execute_usbtmc_program_message(
+    socket: &mut TcpSocket<'_>,
+    command: &[u8],
+) -> Result<(), ()> {
+    if command.contains(&b'?') {
+        let response = usbtmc_exchange(command).await.map_err(|_| ())?;
+        usbtmc_socket_write_all(socket, response.as_bytes()).await
+    } else {
+        usbtmc_write(command).await.map_err(|_| ())
+    }
+}
+
+#[embassy_executor::task]
+pub(crate) async fn usbtmc_task(stack: Stack<'static>) {
+    let mut rx_buffer = [0; USBTMC_SOCKET_BUFFER_SIZE];
+    let mut tx_buffer = [0; USBTMC_SOCKET_BUFFER_SIZE];
+    let mut socket = TcpSocket::new(stack, &mut rx_buffer, &mut tx_buffer);
+    let mut command = [0_u8; USBTMC_MAX_TRANSFER];
+
+    loop {
+        socket.set_timeout(Some(Duration::from_secs(30)));
+        socket.set_keep_alive(Some(Duration::from_secs(10)));
+        socket.set_nagle_enabled(false);
+
+        if socket.accept(crate::USBTMC_PORT).await.is_ok() {
+            let ready = status().await.phase == Phase::UsbtmcReady;
+            if ready {
+                set_usbtmc_connected(true).await;
+                info!("USBTMC SCPI TCP client connected");
+                let mut length = 0;
+                let mut failed = false;
+                loop {
+                    let mut byte = [0_u8; 1];
+                    match socket.read(&mut byte).await {
+                        Ok(0) => {
+                            if length != 0
+                                && execute_usbtmc_program_message(&mut socket, &command[..length])
+                                    .await
+                                    .is_err()
+                            {
+                                failed = true;
+                            }
+                            break;
+                        }
+                        Ok(1) => {
+                            if length == command.len() {
+                                failed = true;
+                                break;
+                            }
+                            command[length] = byte[0];
+                            length += 1;
+                            if byte[0] == b'\n' {
+                                if execute_usbtmc_program_message(&mut socket, &command[..length])
+                                    .await
+                                    .is_err()
+                                {
+                                    failed = true;
+                                    break;
+                                }
+                                length = 0;
+                            }
+                        }
+                        Ok(_) | Err(_) => {
+                            failed = true;
+                            break;
+                        }
+                    }
+                }
+                set_usbtmc_connected(false).await;
+                if failed {
+                    warn!("USBTMC SCPI TCP session failed");
+                } else {
+                    info!("USBTMC SCPI TCP client disconnected");
+                }
+            } else {
+                warn!("USBTMC SCPI TCP client rejected: instrument unavailable");
+            }
+        }
+
         socket.abort();
         let _ = socket.flush().await;
         Timer::after(Duration::from_millis(20)).await;
