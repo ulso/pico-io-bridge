@@ -65,6 +65,7 @@ const EXCHANGE_IDLE_TIMEOUT: Duration = Duration::from_millis(50);
 const DIAGNOSTIC_SNAPSHOT_INTERVAL: Duration = Duration::from_millis(100);
 const DIAGNOSTIC_PAYLOAD_PREFIX_CAPACITY: usize = 8;
 const ENUMERATION_RESET_RETRIES: u8 = 2;
+const ENUMERATION_RETRY_BACKOFF: Duration = Duration::from_secs(1);
 const DEFAULT_FTDI_BAUD_RATE: u32 = 115_200;
 const USBTMC_COMMAND_TIMEOUT: Duration = Duration::from_secs(15);
 const USBTMC_SOCKET_BUFFER_SIZE: usize = 1024;
@@ -1746,6 +1747,26 @@ where
     }
 }
 
+async fn wait_for_enumeration_retry<'d, C>(controller: &mut BusController<'d, C>) -> bool
+where
+    C: UsbHostController<'d>,
+{
+    loop {
+        match select3(
+            controller.wait_for_device_event(),
+            HOST_COMMANDS.receive(),
+            Timer::after(ENUMERATION_RETRY_BACKOFF),
+        )
+        .await
+        {
+            Either3::First(DeviceEvent::Disconnected | DeviceEvent::Overcurrent) => return false,
+            Either3::First(_) => {}
+            Either3::Second(command) => reject_command(command, Error::NotReady),
+            Either3::Third(()) => return true,
+        }
+    }
+}
+
 async fn root_port_monitor<'d>(host_state: &PioHostState<Rp2040PioEngine<'d>>) {
     let mut detector = AttachDetector::new(ATTACH_DEBOUNCE_SAMPLES);
     let mut ticker = Ticker::every(Duration::from_millis(1));
@@ -1938,13 +1959,15 @@ async fn run(hardware: Hardware) {
                         }
 
                         if reset_retries_remaining == 0 {
-                            warn!("PIO USB device enumeration failed");
-                            wait_for_removal(&mut controller).await;
-                            set_waiting_if_current(session_generation).await;
-                            continue 'device;
+                            warn!("PIO USB enumeration retry backoff");
+                            if !wait_for_enumeration_retry(&mut controller).await {
+                                set_waiting_if_current(session_generation).await;
+                                continue 'device;
+                            }
+                        } else {
+                            reset_retries_remaining -= 1;
                         }
 
-                        reset_retries_remaining -= 1;
                         warn!("retrying PIO USB enumeration after root-port reset");
                         set_resetting(host_speed).await;
                         controller.controller_mut().bus_reset().await;
