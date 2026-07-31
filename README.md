@@ -204,7 +204,7 @@ page and `/can` WebSocket endpoint from the resulting firmware. The USB-host
 profile adds
 [`embassy-rp-pio-usb-host`](https://github.com/ulso/embassy-rp-pio-usb-host)
 as an optional Git dependency pinned to commit
-`d0481d2f9dc5169b2282701bf9e1fffec0be7534`.
+`b78eaa0ae3dbea60b7ab3261bcc8acdc12b6cbad`.
 
 ## Flash
 
