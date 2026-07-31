@@ -41,6 +41,7 @@ RP2040 PIO blocks while the native USB controller remains the CDC-NCM device.
 - Concurrent I2C status, scan, read, write, and write-read transactions
 - PIO USB host with full-speed CDC-ACM and low-speed Velleman P8055 HID support
 - Raw binary TCP bridge to a hosted CDC-ACM stream on port 7000
+- SCPI-RAW bridge to a hosted USBTMC/USB488 instrument on port 5026
 - Compile-time profiles for four Adafruit RP2040 boards
 - Board status indication while the USB network is not ready, where available
 
@@ -173,7 +174,7 @@ page and `/can` WebSocket endpoint from the resulting firmware. The USB-host
 profile adds
 [`embassy-rp-pio-usb-host`](https://github.com/ulso/embassy-rp-pio-usb-host)
 as an optional Git dependency pinned to commit
-`0e743e5a8a8a2cd09ecab46e68670c07fc3dcf2e`.
+`d0481d2f9dc5169b2282701bf9e1fffec0be7534`.
 
 ## Flash
 
@@ -916,3 +917,23 @@ The stable MAC and IP derivation makes repeated development sessions easier and
 avoids all boards presenting the same hard-coded MAC address. The mDNS responder
 also announces an IPv6 link-local AAAA record, which often gives macOS and iOS a
 more reliable scoped route to the USB CDC-NCM interface.
+### USBTMC instruments over Ethernet
+
+The USB-host profile recognizes full-speed USBTMC interfaces (`FE/03`) and
+their USB488 extension (`FE/03/01`). Instrument SCPI is exposed separately
+from the bridge's own command tree:
+
+- TCP 5025 controls Pico I/O Bridge itself.
+- TCP 5026 forwards SCPI program messages to the attached USBTMC instrument.
+
+The USBTMC socket is advertised as `_usbtmc._tcp`. For example, query a
+Keysight 34450A connected to the host port with:
+
+```sh
+printf '*IDN?\n' | nc -w 10 pico-io-usb-host.local 5026
+python3 examples/usbtmc_tcp.py
+```
+
+The initial implementation supports bounded textual program messages and
+responses up to 512 bytes. USB488 interrupt status/SRQ, abort/clear recovery,
+binary blocks, and larger streaming responses are future extensions.

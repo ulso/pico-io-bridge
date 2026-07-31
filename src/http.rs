@@ -25,7 +25,7 @@ enum WebSocketEndpoint {
 }
 
 #[cfg(feature = "board-adafruit-rp2040-usb-host")]
-const API_STATUS_CAPABILITIES: &str = r#","interfaces":["usb-host","usb-serial","i2c","scpi"],"usbSerial":{"protocol":"RAW","port":7000,"service":"_usbserial._tcp"},"websocket":"/i2c","websockets":["/i2c"],"pages":{"i2c":"/","usb":"/usb-host.html","scpi":"/scpi.html"}"#;
+const API_STATUS_CAPABILITIES: &str = r#","interfaces":["usb-host","usb-serial","usbtmc","i2c","scpi"],"usbSerial":{"protocol":"RAW","port":7000,"service":"_usbserial._tcp"},"usbtmc":{"protocol":"SCPI-RAW","port":5026,"service":"_usbtmc._tcp"},"websocket":"/i2c","websockets":["/i2c"],"pages":{"i2c":"/","usb":"/usb-host.html","scpi":"/scpi.html"}"#;
 #[cfg(all(
     not(feature = "board-adafruit-rp2040-usb-host"),
     feature = "can",
@@ -231,7 +231,7 @@ async fn write_api_status_response(
     socket: &mut TcpSocket<'_>,
     serial: &str,
 ) -> Result<(), embassy_net::tcp::Error> {
-    let mut body = String::<640>::new();
+    let mut body = String::<896>::new();
     write!(
         body,
         "{{\"device\":\"pico-io-bridge\",\"manufacturer\":\"{}\",\"board\":\"{}\",\"serial\":\"{}\",\"firmware\":\"{}\",\"network\":\"cdc-ncm\",\"scpi\":{{\"protocol\":\"SCPI-RAW\",\"port\":{},\"service\":\"_scpi-raw._tcp\"}}{}}}",
@@ -274,13 +274,14 @@ async fn write_usb_host_status_response(
     let mut body = String::<640>::new();
     write!(
         body,
-        "{{\"phase\":\"{}\",\"ready\":{},\"speed\":{},\"address\":{},\"vendorId\":{},\"productId\":{},\"rxBytes\":{},\"txBytes\":{},\"errorCount\":{},\"maxTransfer\":{},\"ftdiBaudRate\":{},\"resetCause\":\"{}\",\"serialBridge\":{{\"port\":{},\"service\":\"_usbserial._tcp\",\"available\":{},\"clientConnected\":{}}}}}",
+        "{{\"phase\":\"{}\",\"ready\":{},\"speed\":{},\"address\":{},\"vendorId\":{},\"productId\":{},\"rxBytes\":{},\"txBytes\":{},\"errorCount\":{},\"maxTransfer\":{},\"ftdiBaudRate\":{},\"usb488\":{},\"resetCause\":\"{}\",\"serialBridge\":{{\"port\":{},\"service\":\"_usbserial._tcp\",\"available\":{},\"clientConnected\":{}}},\"usbtmcBridge\":{{\"port\":{},\"service\":\"_usbtmc._tcp\",\"available\":{},\"clientConnected\":{}}}}}",
         status.phase.as_str(),
         matches!(
             status.phase,
             crate::usb_host::Phase::CdcReady
                 | crate::usb_host::Phase::FtdiReady
                 | crate::usb_host::Phase::P8055Ready
+                | crate::usb_host::Phase::UsbtmcReady
         ),
         speed,
         address,
@@ -291,9 +292,15 @@ async fn write_usb_host_status_response(
         status.error_count,
         match status.speed {
             Some(crate::usb_host::HostSpeed::Low) => crate::p8055::REPORT_LEN,
+            Some(crate::usb_host::HostSpeed::Full)
+                if status.phase == crate::usb_host::Phase::UsbtmcReady =>
+            {
+                crate::usb_host::USBTMC_MAX_TRANSFER
+            }
             Some(crate::usb_host::HostSpeed::Full) | None => crate::USB_HOST_CDC_MAX_TRANSFER,
         },
         status.ftdi_baud_rate,
+        status.usbtmc_usb488,
         crate::network::reset_cause_label(),
         crate::USB_SERIAL_PORT,
         matches!(
@@ -301,6 +308,9 @@ async fn write_usb_host_status_response(
             crate::usb_host::Phase::CdcReady | crate::usb_host::Phase::FtdiReady
         ),
         status.bridge_connected,
+        crate::USBTMC_PORT,
+        status.phase == crate::usb_host::Phase::UsbtmcReady,
+        status.usbtmc_connected,
     )
     .unwrap();
     write_http_response(socket, "application/json", body.as_bytes()).await
