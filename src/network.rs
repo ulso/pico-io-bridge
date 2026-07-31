@@ -11,6 +11,72 @@ use embassy_usb::class::cdc_ncm::embassy_net::Device as NcmDevice;
 use portable_atomic::{AtomicU32, Ordering};
 
 pub(crate) static NET_RX_PACKETS: AtomicU32 = AtomicU32::new(0);
+static RESET_CAUSE: AtomicU32 = AtomicU32::new(0);
+
+const RESET_CAUSE_WATCHDOG_TIMER: u32 = 1 << 0;
+const RESET_CAUSE_WATCHDOG_FORCE: u32 = 1 << 1;
+const RESET_CAUSE_POWER_ON_OR_BROWNOUT: u32 = 1 << 2;
+const RESET_CAUSE_RUN_PIN: u32 = 1 << 3;
+const RESET_CAUSE_DEBUG_RESTART: u32 = 1 << 4;
+const RESET_CAUSE_HOST_SILENCE_REQUEST: u32 = 1 << 5;
+const RESET_CAUSE_LINK_WATCHDOG_REQUEST: u32 = 1 << 6;
+const LINK_WATCHDOG_RESET_MARKER: u32 = 0xC0DE_1A1C;
+
+/// Capture reset registers and the intentional-reset marker before startup
+/// recovery consumes the watchdog scratch registers.
+pub(crate) fn capture_reset_cause() {
+    let watchdog = embassy_rp::pac::WATCHDOG.reason().read();
+    let chip = embassy_rp::pac::VREG_AND_CHIP_RESET.chip_reset().read();
+    let marker = embassy_rp::pac::WATCHDOG.scratch1().read();
+    let mut cause = 0;
+
+    if watchdog.timer() {
+        cause |= RESET_CAUSE_WATCHDOG_TIMER;
+    }
+    if watchdog.force() {
+        cause |= RESET_CAUSE_WATCHDOG_FORCE;
+    }
+    if chip.had_por() {
+        cause |= RESET_CAUSE_POWER_ON_OR_BROWNOUT;
+    }
+    if chip.had_run() {
+        cause |= RESET_CAUSE_RUN_PIN;
+    }
+    if chip.had_psm_restart() {
+        cause |= RESET_CAUSE_DEBUG_RESTART;
+    }
+    if marker == crate::HOST_SILENCE_RESET_MARKER {
+        cause |= RESET_CAUSE_HOST_SILENCE_REQUEST;
+    }
+    if marker == LINK_WATCHDOG_RESET_MARKER {
+        cause |= RESET_CAUSE_LINK_WATCHDOG_REQUEST;
+    }
+
+    RESET_CAUSE.store(cause, Ordering::Relaxed);
+}
+
+/// Human-readable cause captured at the beginning of this boot.
+pub(crate) fn reset_cause_label() -> &'static str {
+    let cause = RESET_CAUSE.load(Ordering::Relaxed);
+
+    if cause & RESET_CAUSE_HOST_SILENCE_REQUEST != 0 {
+        "CDC_NCM_HOST_SILENCE_RECOVERY"
+    } else if cause & RESET_CAUSE_LINK_WATCHDOG_REQUEST != 0 {
+        "CDC_NCM_LINK_WATCHDOG_RECOVERY"
+    } else if cause & RESET_CAUSE_WATCHDOG_FORCE != 0 {
+        "WATCHDOG_FORCE"
+    } else if cause & RESET_CAUSE_WATCHDOG_TIMER != 0 {
+        "WATCHDOG_TIMEOUT"
+    } else if cause & RESET_CAUSE_POWER_ON_OR_BROWNOUT != 0 {
+        "POWER_ON_OR_BROWNOUT"
+    } else if cause & RESET_CAUSE_RUN_PIN != 0 {
+        "RUN_PIN"
+    } else if cause & RESET_CAUSE_DEBUG_RESTART != 0 {
+        "DEBUG_RESTART"
+    } else {
+        "UNKNOWN"
+    }
+}
 
 /// embassy-net device wrapper that counts received frames, so the main loop
 /// can tell a live host from one that missed the NCM link-up notification.
@@ -88,6 +154,13 @@ pub(crate) fn arm_host_silence_reset(count: u32) {
     embassy_rp::pac::WATCHDOG
         .scratch1()
         .write_value(crate::HOST_SILENCE_RESET_MARKER);
+}
+
+pub(crate) fn arm_link_watchdog_reset() {
+    store_host_silence_reset_count(0);
+    embassy_rp::pac::WATCHDOG
+        .scratch1()
+        .write_value(LINK_WATCHDOG_RESET_MARKER);
 }
 
 pub(crate) fn clear_host_silence_reset_count() {

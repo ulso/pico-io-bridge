@@ -1,9 +1,14 @@
+use core::ptr::addr_of_mut;
+
+use embassy_executor::Executor;
 use embassy_executor::Spawner;
 use embassy_rp::bind_interrupts;
 use embassy_rp::i2c::{Config as I2cConfig, I2c, InterruptHandler};
-use embassy_rp::peripherals::{FLASH, I2C1, USB};
+use embassy_rp::multicore::{self, Stack};
+use embassy_rp::peripherals::{CORE1, FLASH, I2C1, USB};
 use embassy_rp::uart::{Blocking, Config as UartConfig, UartTx};
 use embassy_rp::{Peri, Peripherals};
+use static_cell::StaticCell;
 
 use super::StatusIndicator;
 use crate::{i2c, scpi, usb_host};
@@ -23,9 +28,14 @@ bind_interrupts!(struct I2cIrqs {
     I2C1_IRQ => InterruptHandler<I2C1>;
 });
 
+const CORE1_STACK_SIZE: usize = 16 * 1024;
+static mut CORE1_STACK: Stack<CORE1_STACK_SIZE> = Stack::new();
+static CORE1_EXECUTOR: StaticCell<Executor> = StaticCell::new();
+
 pub(crate) struct Board {
     pub(crate) flash: Peri<'static, FLASH>,
     pub(crate) usb: Peri<'static, USB>,
+    pub(crate) core1: Peri<'static, CORE1>,
     pub(crate) uart: UartTx<'static, Blocking>,
     pub(crate) status: StatusIndicator,
     pub(crate) interfaces: Interfaces,
@@ -43,11 +53,28 @@ impl Interfaces {
         spawner: Spawner,
         stack: embassy_net::Stack<'static>,
         serial: &'static str,
+        core1: Peri<'static, CORE1>,
     ) {
-        spawner.spawn(i2c::i2c1_task(self.i2c).unwrap());
-        spawner.spawn(usb_host::usb_host_task(self.usb_host).unwrap());
+        let Self {
+            i2c,
+            scpi,
+            usb_host,
+        } = self;
+
+        multicore::spawn_core1(
+            core1,
+            unsafe { &mut *addr_of_mut!(CORE1_STACK) },
+            move || {
+                let executor = CORE1_EXECUTOR.init(Executor::new());
+                executor.run(|spawner| {
+                    spawner.spawn(usb_host::usb_host_task(usb_host).unwrap());
+                })
+            },
+        );
+
+        spawner.spawn(i2c::i2c1_task(i2c).unwrap());
         spawner.spawn(usb_host::usb_serial_task(stack).unwrap());
-        self.scpi.spawn(spawner, stack, serial);
+        scpi.spawn(spawner, stack, serial);
     }
 }
 
@@ -58,6 +85,7 @@ pub(crate) fn init(p: Peripherals) -> Board {
     Board {
         flash: p.FLASH,
         usb: p.USB,
+        core1: p.CORE1,
         uart: UartTx::new_blocking(p.UART0, p.PIN_0, UartConfig::default()),
         status: StatusIndicator::active_high(p.PIN_13),
         interfaces: Interfaces {

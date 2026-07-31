@@ -79,6 +79,13 @@ source VBUS directly. The RP2040 native USB controller and `USBCTRL_IRQ` remain
 dedicated to CDC-NCM, so device-side networking and the PIO root port operate
 concurrently.
 
+The PIO USB host manager runs on RP2040 core 1 together with PIO/DMA interrupt
+handling, enumeration, pipe scheduling, and class transport. Core 0 retains
+CDC-NCM networking, TCP, HTTP, SCPI, and the other application tasks. Bounded
+`embassy-sync` channels carry commands and byte frames between the cores. This
+separation is required to keep the CPU-assisted full-speed ACK turnaround free
+from unrelated network and executor latency.
+
 The default Adafruit RP2040 CAN Bus Feather connects its onboard MCP25625 as
 follows:
 
@@ -313,7 +320,9 @@ Initial command set:
 | `SYST:VERS?` | Supported SCPI standard version |
 | `SYST:ERR?`, `SYST:ERR:COUN?` | Read the error queue |
 | `SYST:CHAN:COUN?` | Number of external ADC channels (`4`) |
+| `SYST:RES:CAUS?` | Reset cause captured at boot |
 | `SYST:USB:HOST:STAT?` | PIO USB host state and transfer counters; USB-host profile only |
+| `SYST:USB:HOST:ENUM:DIAG?` | Enumeration attempts and most recent failure details; USB-host profile only |
 | `SYST:USB:HOST:CDC:WRITE:HEX "<hex>"` | Write 1-64 bytes to the enumerated CDC-ACM stream; USB-host profile only |
 | `SYST:USB:HOST:CDC:READ:HEX? <length>` | Read up to 1-64 CDC-ACM bytes and return uppercase hex; USB-host profile only |
 | `SYST:USB:HOST:CDC:EXCH:HEX? "<hex>",<max-length>` | Atomically write and collect a 1-64 byte CDC-ACM response; USB-host profile only |
@@ -367,27 +376,43 @@ between ground and 3.3 V; RP2040 GPIO pins are not 5 V tolerant.
 On the USB-host profile, `SYST:USB:HOST:STAT?` returns:
 
 ```text
-phase,speed,address,vid,pid,rx_bytes,tx_bytes,error_count,max_transfer
+phase,speed,address,vid,pid,rx_bytes,tx_bytes,error_count,max_transfer,unexpected_toggle_count,accepted_zlp_count,latest_expected_pid,latest_actual_pid,latest_payload_len,latest_prefix_hex
 ```
 
-For example, `CDC_READY,FULL,1,2458,1,12,4,0,64` reports a configured
-full-speed CDC-ACM function, while
-`P8055_READY,LOW,1,4303,21760,8,8,0,8` reports an original P8055. The possible
+For example, `CDC_READY,FULL,1,2458,1,12,4,0,64,0,0,NONE,NONE,NONE,NONE`
+reports a configured full-speed CDC-ACM function, while
+`P8055_READY,LOW,1,4303,21760,8,8,0,8,0,0,NONE,NONE,NONE,NONE` reports an
+original P8055. The final six fields are a roughly 100 ms snapshot of accepted
+zero-length IN packets and CRC-valid packets discarded because their DATA
+toggle was unexpected. PIDs and the retained payload prefix are uppercase hex;
+the prefix is at most eight bytes, `EMPTY` for a zero-length packet, and all
+four latest-packet fields are `NONE` until one has been observed. The possible
 phases are `POWER_OFF`, `WAITING`, `RESETTING`, `ENUMERATING`, `CDC_READY`,
 `P8055_READY`, `UNSUPPORTED_SPEED`, `UNSUPPORTED_DEVICE`,
 `ENUMERATION_ERROR`, `CDC_ERROR`, and `P8055_ERROR`. Speed is `FULL`, `LOW`, or
 `NONE`.
+
+`SYST:USB:HOST:ENUM:DIAG?` returns:
+
+```text
+attempts,failures,origin,error,site,handshake,setup_attempts,bmRequestType,bRequest,wValueLo,wValueHi,wIndexLo,wIndexHi,wLengthLo,wLengthHi
+```
+
+The diagnostic survives a successful automatic retry, making intermittent
+enumeration failures visible after the device reaches a ready phase. Fields
+without an observed failure are reported as `NONE`; setup bytes are uppercase
+hex.
 
 CDC transfers use owned 64-byte messages between SCPI and the host-manager task;
 the manager remains the sole owner of enumeration state and all control,
 bulk-IN, and bulk-OUT pipes. Hex input must contain an even number of
 hexadecimal digits. The manager asserts DTR and RTS, then selects 115200 baud,
 8 data bits, no parity, and one stop bit when it opens a CDC-ACM function. For
-example, this atomically writes `AT` followed by CRLF and collects up to 64
+example, this atomically writes `AT` followed by CR and collects up to 64
 response bytes without returning through SCPI between bulk-OUT and bulk-IN:
 
 ```text
-SYST:USB:HOST:CDC:EXCH:HEX? "41540D0A",64
+SYST:USB:HOST:CDC:EXCH:HEX? "41540D",64
 ```
 
 The exchange query returns uppercase hex without separators. It waits up to ten
@@ -432,7 +457,9 @@ opens it at a fixed 115200 baud, 8 data bits, no parity, and one stop bit, with
 DTR and RTS asserted. Vendor-specific serial adapters such as FTDI are not yet
 supported by this port.
 
-The standard-library-only Python client sends `AT` followed by CRLF by default.
+The standard-library-only Python client sends `AT` followed by CR by default,
+matching BleuIO's command terminator. Use `--terminator crlf` for serial
+devices that require CRLF.
 For that exact probe it reassembles arbitrary USB/TCP fragments until the
 echoed `AT` and a complete CRLF-delimited BleuIO `OK` or `ERROR` line arrive:
 

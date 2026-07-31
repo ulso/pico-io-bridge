@@ -71,7 +71,7 @@ def parse_uint_csv(response: str, field_count: int, name: str) -> tuple[int, ...
 
 def require_p8055(status: str) -> None:
     fields = status.split(",")
-    if len(fields) != 9:
+    if len(fields) < 9:
         raise RuntimeError(f"unexpected USB host status: {status!r}")
     phase, speed = fields[:2]
     try:

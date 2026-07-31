@@ -78,8 +78,8 @@ def main() -> None:
     parser.add_argument(
         "--terminator",
         choices=TERMINATORS,
-        default="crlf",
-        help="line ending appended to the CDC command (default: crlf)",
+        default="cr",
+        help="line ending appended to the CDC command (default: cr)",
     )
     parser.add_argument(
         "--read-length",

@@ -22,6 +22,7 @@ const ADC_COUNTS: f32 = 4096.0;
 const ADC_VREF: f32 = 3.3;
 const SCPI_BUFFER_SIZE: usize = 1024;
 const SOCKET_BUFFER_SIZE: usize = 1024;
+const USB_HOST_DIAGNOSTIC_PREFIX_CAPACITY: usize = 8;
 
 struct DeviceListResponse(devices::DeviceList);
 struct EnvironmentResponse(crate::bme688::Measurement);
@@ -39,6 +40,23 @@ struct UsbHostStatusResponse {
     tx_bytes: u32,
     error_count: u32,
     max_transfer: usize,
+    unexpected_toggle_count: u32,
+    accepted_zlp_count: u32,
+    latest_expected_pid: Option<u8>,
+    latest_actual_pid: Option<u8>,
+    latest_payload_len: Option<u8>,
+    latest_payload_prefix_len: u8,
+    latest_payload_prefix: [u8; USB_HOST_DIAGNOSTIC_PREFIX_CAPACITY],
+}
+struct UsbHostEnumerationDiagnosticResponse {
+    attempts: u32,
+    failures: u32,
+    origin: &'static str,
+    error: &'static str,
+    site: &'static str,
+    handshake: &'static str,
+    setup_attempts: u32,
+    setup: [u8; 8],
 }
 struct UsbHostDataResponse {
     length: u8,
@@ -98,15 +116,39 @@ impl scpi::Response for UsbHostStatusResponse {
         output.write_char(',')?;
         output.write_str(self.speed)?;
         output.write_fmt(format_args!(
-            ",{},{},{},{},{},{},{}",
+            ",{},{},{},{},{},{},{},{},{}",
             self.address,
             self.vendor_id,
             self.product_id,
             self.rx_bytes,
             self.tx_bytes,
             self.error_count,
-            self.max_transfer
-        ))
+            self.max_transfer,
+            self.unexpected_toggle_count,
+            self.accepted_zlp_count
+        ))?;
+        match (
+            self.latest_expected_pid,
+            self.latest_actual_pid,
+            self.latest_payload_len,
+        ) {
+            (Some(expected_pid), Some(actual_pid), Some(payload_len)) => {
+                output.write_fmt(format_args!(
+                    ",{expected_pid:02X},{actual_pid:02X},{payload_len},"
+                ))?;
+                let prefix_len = usize::from(self.latest_payload_prefix_len)
+                    .min(self.latest_payload_prefix.len());
+                if prefix_len == 0 {
+                    output.write_str("EMPTY")?;
+                } else {
+                    for byte in &self.latest_payload_prefix[..prefix_len] {
+                        output.write_fmt(format_args!("{byte:02X}"))?;
+                    }
+                }
+            }
+            _ => output.write_str(",NONE,NONE,NONE,NONE")?,
+        }
+        Ok(())
     }
 }
 
@@ -129,6 +171,48 @@ impl UsbHostStatusResponse {
                 Some(crate::usb_host::HostSpeed::Low) => crate::p8055::REPORT_LEN,
                 Some(crate::usb_host::HostSpeed::Full) | None => crate::USB_HOST_CDC_MAX_TRANSFER,
             },
+            unexpected_toggle_count: status.unexpected_toggle_count,
+            accepted_zlp_count: status.accepted_zlp_count,
+            latest_expected_pid: status.latest_expected_pid,
+            latest_actual_pid: status.latest_actual_pid,
+            latest_payload_len: status.latest_payload_len,
+            latest_payload_prefix_len: status.latest_payload_prefix_len,
+            latest_payload_prefix: status.latest_payload_prefix,
+        }
+    }
+}
+
+impl scpi::Response for UsbHostEnumerationDiagnosticResponse {
+    fn write_response(&self, output: &mut impl scpi::Write) -> Result<(), scpi::Error> {
+        output.write_fmt(format_args!(
+            "{},{},{},{},{},{},{}",
+            self.attempts,
+            self.failures,
+            self.origin,
+            self.error,
+            self.site,
+            self.handshake,
+            self.setup_attempts
+        ))?;
+        for byte in self.setup {
+            output.write_fmt(format_args!(",{byte:02X}"))?;
+        }
+        Ok(())
+    }
+}
+
+impl UsbHostEnumerationDiagnosticResponse {
+    #[cfg(feature = "board-adafruit-rp2040-usb-host")]
+    fn from_diagnostic(diagnostic: crate::usb_host::EnumerationDiagnostic) -> Self {
+        Self {
+            attempts: diagnostic.attempts(),
+            failures: diagnostic.failures(),
+            origin: diagnostic.origin(),
+            error: diagnostic.error(),
+            site: diagnostic.site(),
+            handshake: diagnostic.handshake(),
+            setup_attempts: diagnostic.setup_attempts(),
+            setup: diagnostic.setup(),
         }
     }
 }
@@ -503,12 +587,33 @@ impl ScpiInstrument {
         Ok(CHANNEL_COUNT)
     }
 
+    #[scpi(cmd = "SYSTem:RESet:CAUSe?")]
+    async fn reset_cause(&mut self) -> Result<Characters<'static>, scpi::Error> {
+        Ok(Characters(crate::network::reset_cause_label()))
+    }
+
     #[scpi(cmd = "SYSTem:USB:HOST:STATus?")]
     async fn usb_host_status(&mut self) -> Result<UsbHostStatusResponse, scpi::Error> {
         #[cfg(feature = "board-adafruit-rp2040-usb-host")]
         {
             Ok(UsbHostStatusResponse::from_status(
                 crate::usb_host::status().await,
+            ))
+        }
+        #[cfg(not(feature = "board-adafruit-rp2040-usb-host"))]
+        {
+            Err(scpi::Error::SettingsConflict)
+        }
+    }
+
+    #[scpi(cmd = "SYSTem:USB:HOST:ENUMeration:DIAGnostic?")]
+    async fn usb_host_enumeration_diagnostic(
+        &mut self,
+    ) -> Result<UsbHostEnumerationDiagnosticResponse, scpi::Error> {
+        #[cfg(feature = "board-adafruit-rp2040-usb-host")]
+        {
+            Ok(UsbHostEnumerationDiagnosticResponse::from_diagnostic(
+                crate::usb_host::enumeration_diagnostic().await,
             ))
         }
         #[cfg(not(feature = "board-adafruit-rp2040-usb-host"))]
@@ -1062,5 +1167,69 @@ async fn scpi_task(stack: Stack<'static>, serial: &'static str, hardware: Hardwa
         socket.abort();
         let _ = socket.flush().await;
         Timer::after(Duration::from_millis(20)).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SCPI_NODE_0, UsbHostEnumerationDiagnosticResponse};
+    use microscpi::{self as scpi, Response as _};
+
+    fn query_id(input: &[u8]) -> scpi::CommandId {
+        let (remaining, call) =
+            scpi::parser::parse(&SCPI_NODE_0, &SCPI_NODE_0, input).expect("valid SCPI query");
+        assert!(remaining.is_empty());
+        let call = call.expect("query call");
+        assert!(call.query);
+        assert!(call.terminated);
+        assert!(call.args.is_empty());
+        call.node.query.expect("registered query")
+    }
+
+    #[test]
+    fn usb_host_enumeration_diagnostic_response_is_stable_csv() {
+        let response = UsbHostEnumerationDiagnosticResponse {
+            attempts: 3,
+            failures: 2,
+            origin: "ENUMERATE",
+            error: "BAD_RESPONSE",
+            site: "CONTROL_IN_SETUP",
+            handshake: "INVALID_PID_COMPLEMENT",
+            setup_attempts: 2,
+            setup: [0x80, 0x06, 0, 1, 0, 0, 8, 0],
+        };
+        let mut output = heapless::Vec::<u8, 128>::new();
+
+        scpi::Response::write_response(&response, &mut output).unwrap();
+
+        assert_eq!(
+            output.as_slice(),
+            b"3,2,ENUMERATE,BAD_RESPONSE,CONTROL_IN_SETUP,INVALID_PID_COMPLEMENT,2,80,06,00,01,00,00,08,00"
+        );
+
+        let empty = UsbHostEnumerationDiagnosticResponse {
+            attempts: 0,
+            failures: 0,
+            origin: "NONE",
+            error: "NONE",
+            site: "NONE",
+            handshake: "NONE",
+            setup_attempts: 0,
+            setup: [0; 8],
+        };
+        output.clear();
+        empty.write_response(&mut output).unwrap();
+        assert_eq!(
+            output.as_slice(),
+            b"0,0,NONE,NONE,NONE,NONE,0,00,00,00,00,00,00,00,00"
+        );
+    }
+
+    #[test]
+    fn usb_host_enumeration_diagnostic_query_accepts_short_and_long_headers() {
+        let short = query_id(b"SYST:USB:HOST:ENUM:DIAG?\n");
+        let long = query_id(b"SYSTEM:USB:HOST:ENUMERATION:DIAGNOSTIC?\n");
+
+        assert_eq!(short, long);
     }
 }

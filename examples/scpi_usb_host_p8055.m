@@ -97,7 +97,7 @@ endfunction
 
 function require_p8055(status)
   fields = strsplit(status, ",");
-  if numel(fields) != 9
+  if numel(fields) < 9
     error("Unexpected USB host status: %s", status);
   endif
   vendor_id = str2double(fields{4});

@@ -26,16 +26,18 @@ use embassy_rp_pio_usb_host::hid::{
 use embassy_rp_pio_usb_host::host::{
     DeviceEvent, PipeError, Speed, UsbHostController, UsbPipe, pipe,
 };
-use embassy_rp_pio_usb_host::pio_host::PioHostState;
-use embassy_rp_pio_usb_host::pio_host::rp2040::Rp2040PioEngine;
+use embassy_rp_pio_usb_host::pio_host::rp2040::{
+    BadResponseDiagnostic, BadResponseSite, HandshakeFailure, Rp2040PioEngine,
+};
+use embassy_rp_pio_usb_host::pio_host::{PioHostState, snapshot_in_pipe_progress_diagnostics};
 use embassy_rp_pio_usb_host::usb::{CdcLineCoding, ConfigurationError};
 use embassy_rp_pio_usb_host::{AttachDetector, BusEvent, DeviceSpeed};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
 use embassy_sync::mutex::Mutex;
 use embassy_sync::signal::Signal;
-use embassy_time::{Duration, Ticker, Timer, with_timeout};
-use embassy_usb_host::{BusController, BusRoute, BusState};
+use embassy_time::{Duration, Instant, Ticker, Timer, with_timeout};
+use embassy_usb_host::{BusController, BusRoute, BusState, EnumerationError};
 
 use crate::p8055;
 
@@ -51,6 +53,9 @@ const CLASS_CONTROL_TIMEOUT: Duration = Duration::from_secs(2);
 const TRANSFER_TIMEOUT: Duration = Duration::from_secs(2);
 const EXCHANGE_FIRST_RESPONSE_TIMEOUT: Duration = Duration::from_secs(10);
 const EXCHANGE_IDLE_TIMEOUT: Duration = Duration::from_millis(50);
+const DIAGNOSTIC_SNAPSHOT_INTERVAL: Duration = Duration::from_millis(100);
+const DIAGNOSTIC_PAYLOAD_PREFIX_CAPACITY: usize = 8;
+const ENUMERATION_RESET_RETRIES: u8 = 2;
 pub(crate) const CDC_MAX_TRANSFER: usize = crate::USB_HOST_CDC_MAX_TRANSFER;
 
 bind_interrupts!(struct PioUsbHostIrqs {
@@ -136,6 +141,186 @@ impl HostSpeed {
     }
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(crate) enum EnumerationOrigin {
+    None,
+    Reset,
+    Se1,
+    Enumerate,
+}
+
+impl EnumerationOrigin {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "NONE",
+            Self::Reset => "RESET",
+            Self::Se1 => "SE1",
+            Self::Enumerate => "ENUMERATE",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(crate) enum EnumerationErrorKind {
+    None,
+    BufferOverflow,
+    BadResponse,
+    Babble,
+    DataToggleError,
+    Canceled,
+    Stall,
+    Timeout,
+    Disconnected,
+    InvalidDescriptor,
+    ConfigBufferTooSmall,
+    NoPipe,
+    RequestFailed,
+    Other,
+}
+
+impl EnumerationErrorKind {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "NONE",
+            Self::BufferOverflow => "BUFFER_OVERFLOW",
+            Self::BadResponse => "BAD_RESPONSE",
+            Self::Babble => "BABBLE",
+            Self::DataToggleError => "DATA_TOGGLE_ERROR",
+            Self::Canceled => "CANCELED",
+            Self::Stall => "STALL",
+            Self::Timeout => "TIMEOUT",
+            Self::Disconnected => "DISCONNECTED",
+            Self::InvalidDescriptor => "INVALID_DESCRIPTOR",
+            Self::ConfigBufferTooSmall => "CONFIG_BUFFER_TOO_SMALL",
+            Self::NoPipe => "NO_PIPE",
+            Self::RequestFailed => "REQUEST_FAILED",
+            Self::Other => "OTHER",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(crate) struct EnumerationDiagnostic {
+    attempts: u32,
+    failures: u32,
+    origin: EnumerationOrigin,
+    error: EnumerationErrorKind,
+    site: Option<BadResponseSite>,
+    handshake: Option<HandshakeFailure>,
+    setup_attempts: u32,
+    setup: [u8; 8],
+}
+
+impl EnumerationDiagnostic {
+    const fn none() -> Self {
+        Self {
+            attempts: 0,
+            failures: 0,
+            origin: EnumerationOrigin::None,
+            error: EnumerationErrorKind::None,
+            site: None,
+            handshake: None,
+            setup_attempts: 0,
+            setup: [0; 8],
+        }
+    }
+
+    const fn new(
+        origin: EnumerationOrigin,
+        error: EnumerationErrorKind,
+        bad_response: Option<BadResponseDiagnostic>,
+    ) -> Self {
+        match bad_response {
+            Some(diagnostic) => Self {
+                attempts: 0,
+                failures: 0,
+                origin,
+                error,
+                site: Some(diagnostic.site),
+                handshake: diagnostic.handshake_failure,
+                setup_attempts: diagnostic.setup_attempts,
+                setup: diagnostic.setup,
+            },
+            None => Self {
+                attempts: 0,
+                failures: 0,
+                origin,
+                error,
+                site: None,
+                handshake: None,
+                setup_attempts: 0,
+                setup: [0; 8],
+            },
+        }
+    }
+
+    fn begin_attempt(&mut self) {
+        self.attempts = self.attempts.wrapping_add(1);
+    }
+
+    fn record_failure(&mut self, diagnostic: Self) {
+        self.failures = self.failures.wrapping_add(1);
+        self.origin = diagnostic.origin;
+        self.error = diagnostic.error;
+        self.site = diagnostic.site;
+        self.handshake = diagnostic.handshake;
+        self.setup_attempts = diagnostic.setup_attempts;
+        self.setup = diagnostic.setup;
+    }
+
+    pub(crate) const fn attempts(self) -> u32 {
+        self.attempts
+    }
+
+    pub(crate) const fn failures(self) -> u32 {
+        self.failures
+    }
+
+    pub(crate) const fn origin(self) -> &'static str {
+        self.origin.as_str()
+    }
+
+    pub(crate) const fn error(self) -> &'static str {
+        self.error.as_str()
+    }
+
+    pub(crate) const fn site(self) -> &'static str {
+        match self.site {
+            Some(BadResponseSite::ControlInContract) => "CONTROL_IN_CONTRACT",
+            Some(BadResponseSite::ControlInSetup) => "CONTROL_IN_SETUP",
+            Some(BadResponseSite::ControlInData) => "CONTROL_IN_DATA",
+            Some(BadResponseSite::ControlInStatus) => "CONTROL_IN_STATUS",
+            Some(BadResponseSite::ControlOutContract) => "CONTROL_OUT_CONTRACT",
+            Some(BadResponseSite::ControlOutSetup) => "CONTROL_OUT_SETUP",
+            Some(BadResponseSite::ControlOutData) => "CONTROL_OUT_DATA",
+            Some(BadResponseSite::ControlOutStatus) => "CONTROL_OUT_STATUS",
+            None => "NONE",
+        }
+    }
+
+    pub(crate) const fn handshake(self) -> &'static str {
+        match self.handshake {
+            Some(HandshakeFailure::RxDecoderError) => "RX_DECODER_ERROR",
+            Some(HandshakeFailure::FalseStart) => "FALSE_START",
+            Some(HandshakeFailure::IncompletePacket) => "INCOMPLETE_PACKET",
+            Some(HandshakeFailure::WrongLength) => "WRONG_LENGTH",
+            Some(HandshakeFailure::InvalidSync) => "INVALID_SYNC",
+            Some(HandshakeFailure::InvalidPidComplement) => "INVALID_PID_COMPLEMENT",
+            Some(HandshakeFailure::UnexpectedPid) => "UNEXPECTED_PID",
+            Some(HandshakeFailure::Unknown) => "UNKNOWN",
+            None => "NONE",
+        }
+    }
+
+    pub(crate) const fn setup_attempts(self) -> u32 {
+        self.setup_attempts
+    }
+
+    pub(crate) const fn setup(self) -> [u8; 8] {
+        self.setup
+    }
+}
+
 #[derive(Clone, Copy)]
 pub(crate) struct Status {
     pub(crate) phase: Phase,
@@ -147,6 +332,32 @@ pub(crate) struct Status {
     pub(crate) tx_bytes: u32,
     pub(crate) error_count: u32,
     pub(crate) bridge_connected: bool,
+    pub(crate) unexpected_toggle_count: u32,
+    pub(crate) accepted_zlp_count: u32,
+    pub(crate) latest_expected_pid: Option<u8>,
+    pub(crate) latest_actual_pid: Option<u8>,
+    pub(crate) latest_payload_len: Option<u8>,
+    pub(crate) latest_payload_prefix_len: u8,
+    pub(crate) latest_payload_prefix: [u8; DIAGNOSTIC_PAYLOAD_PREFIX_CAPACITY],
+    pub(crate) bridge_out_transfers: u32,
+    pub(crate) latest_bridge_out_len: u8,
+    pub(crate) bridge_in_starts: u32,
+    pub(crate) bridge_in_completions: u32,
+    pub(crate) bridge_in_cancellations: u32,
+    pub(crate) bridge_in_forwards: u32,
+    pub(crate) bridge_last_outcome: u8,
+    pub(crate) bridge_tcp_end: u8,
+    pub(crate) pipe_in_starts: u32,
+    pub(crate) pipe_in_deadline_ready: u32,
+    pub(crate) pipe_in_engine_acquired: u32,
+    pub(crate) pipe_in_engine_returned: u32,
+    pub(crate) pipe_in_service_returned: u32,
+    pub(crate) wire_in_attempts: u32,
+    pub(crate) wire_in_data_accepted: u32,
+    pub(crate) wire_in_nak: u32,
+    pub(crate) wire_in_no_response: u32,
+    pub(crate) wire_in_invalid_or_stall: u32,
+    enumeration_diagnostic: EnumerationDiagnostic,
     generation: u32,
 }
 
@@ -162,6 +373,32 @@ impl Status {
             tx_bytes: 0,
             error_count: 0,
             bridge_connected: false,
+            unexpected_toggle_count: 0,
+            accepted_zlp_count: 0,
+            latest_expected_pid: None,
+            latest_actual_pid: None,
+            latest_payload_len: None,
+            latest_payload_prefix_len: 0,
+            latest_payload_prefix: [0; DIAGNOSTIC_PAYLOAD_PREFIX_CAPACITY],
+            bridge_out_transfers: 0,
+            latest_bridge_out_len: 0,
+            bridge_in_starts: 0,
+            bridge_in_completions: 0,
+            bridge_in_cancellations: 0,
+            bridge_in_forwards: 0,
+            bridge_last_outcome: 0,
+            bridge_tcp_end: 0,
+            pipe_in_starts: 0,
+            pipe_in_deadline_ready: 0,
+            pipe_in_engine_acquired: 0,
+            pipe_in_engine_returned: 0,
+            pipe_in_service_returned: 0,
+            wire_in_attempts: 0,
+            wire_in_data_accepted: 0,
+            wire_in_nak: 0,
+            wire_in_no_response: 0,
+            wire_in_invalid_or_stall: 0,
+            enumeration_diagnostic: EnumerationDiagnostic::none(),
             generation: 0,
         }
     }
@@ -369,7 +606,42 @@ static USB_TO_BRIDGE: Channel<CriticalSectionRawMutex, BridgeFrame, BRIDGE_CHANN
 static BRIDGE_EVENT: Signal<CriticalSectionRawMutex, BridgeEvent> = Signal::new();
 
 pub(crate) async fn status() -> Status {
-    *HOST_STATE.lock().await
+    let progress = snapshot_in_pipe_progress_diagnostics();
+    let mut status = *HOST_STATE.lock().await;
+    status.pipe_in_starts = progress.starts;
+    status.pipe_in_deadline_ready = progress.deadline_ready;
+    status.pipe_in_engine_acquired = progress.engine_acquired;
+    status.pipe_in_engine_returned = progress.engine_returned;
+    status.pipe_in_service_returned = progress.service_returned;
+    status
+}
+
+pub(crate) async fn enumeration_diagnostic() -> EnumerationDiagnostic {
+    HOST_STATE.lock().await.enumeration_diagnostic
+}
+
+fn pipe_enumeration_error(error: PipeError) -> EnumerationErrorKind {
+    match error {
+        PipeError::BufferOverflow => EnumerationErrorKind::BufferOverflow,
+        PipeError::BadResponse => EnumerationErrorKind::BadResponse,
+        PipeError::Babble => EnumerationErrorKind::Babble,
+        PipeError::DataToggleError => EnumerationErrorKind::DataToggleError,
+        PipeError::Canceled => EnumerationErrorKind::Canceled,
+        PipeError::Stall => EnumerationErrorKind::Stall,
+        PipeError::Timeout => EnumerationErrorKind::Timeout,
+        PipeError::Disconnected => EnumerationErrorKind::Disconnected,
+        _ => EnumerationErrorKind::Other,
+    }
+}
+
+fn enumeration_error(error: &EnumerationError) -> EnumerationErrorKind {
+    match error {
+        EnumerationError::Transfer(error) => pipe_enumeration_error(*error),
+        EnumerationError::InvalidDescriptor => EnumerationErrorKind::InvalidDescriptor,
+        EnumerationError::ConfigBufferTooSmall(_) => EnumerationErrorKind::ConfigBufferTooSmall,
+        EnumerationError::NoPipe => EnumerationErrorKind::NoPipe,
+        EnumerationError::RequestFailed => EnumerationErrorKind::RequestFailed,
+    }
 }
 
 fn hex_nibble(byte: u8) -> Option<u8> {
@@ -574,6 +846,32 @@ async fn set_resetting(speed: HostSpeed) {
     state.tx_bytes = 0;
     state.error_count = 0;
     state.bridge_connected = false;
+    state.unexpected_toggle_count = 0;
+    state.accepted_zlp_count = 0;
+    state.latest_expected_pid = None;
+    state.latest_actual_pid = None;
+    state.latest_payload_len = None;
+    state.latest_payload_prefix_len = 0;
+    state.latest_payload_prefix = [0; DIAGNOSTIC_PAYLOAD_PREFIX_CAPACITY];
+    state.bridge_out_transfers = 0;
+    state.latest_bridge_out_len = 0;
+    state.bridge_in_starts = 0;
+    state.bridge_in_completions = 0;
+    state.bridge_in_cancellations = 0;
+    state.bridge_in_forwards = 0;
+    state.bridge_last_outcome = 0;
+    state.bridge_tcp_end = 0;
+    state.pipe_in_starts = 0;
+    state.pipe_in_deadline_ready = 0;
+    state.pipe_in_engine_acquired = 0;
+    state.pipe_in_engine_returned = 0;
+    state.pipe_in_service_returned = 0;
+    state.wire_in_attempts = 0;
+    state.wire_in_data_accepted = 0;
+    state.wire_in_nak = 0;
+    state.wire_in_no_response = 0;
+    state.wire_in_invalid_or_stall = 0;
+    state.enumeration_diagnostic.begin_attempt();
 }
 
 async fn begin_enumeration(speed: HostSpeed) -> Option<u32> {
@@ -617,6 +915,29 @@ async fn set_error_phase(phase: Phase) {
     state.bridge_connected = false;
 }
 
+async fn set_enumeration_error(diagnostic: EnumerationDiagnostic) {
+    let mut state = HOST_STATE.lock().await;
+    state.phase = Phase::EnumerationError;
+    state.error_count = state.error_count.wrapping_add(1);
+    state.bridge_connected = false;
+    state.enumeration_diagnostic.record_failure(diagnostic);
+}
+
+async fn set_enumeration_error_if_current(
+    generation: u32,
+    diagnostic: EnumerationDiagnostic,
+) -> bool {
+    let mut state = HOST_STATE.lock().await;
+    if state.generation != generation || state.phase != Phase::Enumerating {
+        return false;
+    }
+    state.phase = Phase::EnumerationError;
+    state.error_count = state.error_count.wrapping_add(1);
+    state.bridge_connected = false;
+    state.enumeration_diagnostic.record_failure(diagnostic);
+    true
+}
+
 async fn set_error_phase_if_current(generation: u32, expected: Phase, phase: Phase) -> bool {
     let mut state = HOST_STATE.lock().await;
     if state.generation != generation || state.phase != expected {
@@ -637,6 +958,14 @@ async fn set_bridge_connected_if_current(generation: u32, expected: bool, connec
         return false;
     }
     state.bridge_connected = connected;
+    if connected {
+        state.bridge_in_starts = 0;
+        state.bridge_in_completions = 0;
+        state.bridge_in_cancellations = 0;
+        state.bridge_in_forwards = 0;
+        state.bridge_last_outcome = 0;
+        state.bridge_tcp_end = 0;
+    }
     true
 }
 
@@ -689,6 +1018,65 @@ async fn record_tx_if_current(generation: u32, expected: Phase, count: usize) ->
     true
 }
 
+async fn record_bridge_tx_if_current(generation: u32, count: usize) -> bool {
+    let mut state = HOST_STATE.lock().await;
+    if state.generation != generation || state.phase != Phase::CdcReady {
+        return false;
+    }
+    state.tx_bytes = state.tx_bytes.wrapping_add(count as u32);
+    state.bridge_out_transfers = state.bridge_out_transfers.wrapping_add(1);
+    state.latest_bridge_out_len = count as u8;
+    true
+}
+
+async fn record_bridge_in_start_if_current(generation: u32) -> bool {
+    let mut state = HOST_STATE.lock().await;
+    if state.generation != generation || state.phase != Phase::CdcReady || !state.bridge_connected {
+        return false;
+    }
+    state.bridge_in_starts = state.bridge_in_starts.wrapping_add(1);
+    true
+}
+
+async fn record_bridge_in_cycle_if_current(
+    generation: u32,
+    received: usize,
+    forwarded: bool,
+    start_next: bool,
+) -> bool {
+    let mut state = HOST_STATE.lock().await;
+    if state.generation != generation || state.phase != Phase::CdcReady || !state.bridge_connected {
+        return false;
+    }
+    state.bridge_in_completions = state.bridge_in_completions.wrapping_add(1);
+    state.rx_bytes = state.rx_bytes.wrapping_add(received as u32);
+    if forwarded {
+        state.bridge_in_forwards = state.bridge_in_forwards.wrapping_add(1);
+    }
+    if start_next {
+        state.bridge_in_starts = state.bridge_in_starts.wrapping_add(1);
+    }
+    true
+}
+
+async fn record_bridge_outcome_if_current(generation: u32, outcome: u8) {
+    let mut state = HOST_STATE.lock().await;
+    if state.generation == generation && state.phase == Phase::CdcReady {
+        let pending = state
+            .bridge_in_starts
+            .saturating_sub(state.bridge_in_completions);
+        state.bridge_in_cancellations = state.bridge_in_cancellations.wrapping_add(pending);
+        state.bridge_last_outcome = outcome;
+    }
+}
+
+async fn record_bridge_tcp_end_if_connected(outcome: u8) {
+    let mut state = HOST_STATE.lock().await;
+    if state.phase == Phase::CdcReady && state.bridge_connected {
+        state.bridge_tcp_end = outcome;
+    }
+}
+
 fn send_reply(reply: Reply) {
     if HOST_REPLIES.try_send(reply).is_err() {
         warn!("PIO USB host reply queue full");
@@ -724,13 +1112,13 @@ async fn session_is_current(generation: u32, expected: Phase) -> bool {
     state.generation == generation && state.phase == expected
 }
 
-enum BridgeOutputEnd {
-    Closed,
+enum BridgeIoEnd {
+    Closed { sequence: u32 },
     Failed,
 }
 
 enum BridgeRunOutcome {
-    Closed,
+    Closed { sequence: u32 },
     Disconnected,
     Failed,
 }
@@ -776,125 +1164,241 @@ where
     }
 }
 
-async fn bridge_usb_to_tcp<I>(
+async fn bridge_write_frame<O>(
+    bulk_out: &mut O,
+    generation: u32,
+    frame: BridgeFrame,
+) -> Result<(), BridgeIoEnd>
+where
+    O: UsbPipe<pipe::Bulk, pipe::Out>,
+{
+    let count = frame.data.as_bytes().len();
+    match with_timeout(
+        TRANSFER_TIMEOUT,
+        bulk_out.request_out(frame.data.as_bytes(), false),
+    )
+    .await
+    {
+        Ok(Ok(())) => {
+            if record_bridge_tx_if_current(generation, count).await {
+                Ok(())
+            } else {
+                Err(BridgeIoEnd::Failed)
+            }
+        }
+        Ok(Err(PipeError::Disconnected)) => Err(BridgeIoEnd::Failed),
+        Ok(Err(_)) => {
+            fail_current_session(
+                generation,
+                Phase::CdcReady,
+                Phase::CdcError,
+                Error::Transfer,
+            )
+            .await;
+            Err(BridgeIoEnd::Failed)
+        }
+        Err(_) => {
+            fail_current_session(generation, Phase::CdcReady, Phase::CdcError, Error::Timeout)
+                .await;
+            Err(BridgeIoEnd::Failed)
+        }
+    }
+}
+
+async fn handle_bridge_command(command: Command, session: u32) -> Option<BridgeIoEnd> {
+    if !command_is_current(&command).await {
+        reject_command(command, Error::NotReady);
+        return None;
+    }
+
+    match command.operation {
+        Operation::BridgeClose {
+            session: close_session,
+        } if close_session == session => Some(BridgeIoEnd::Closed {
+            sequence: command.sequence,
+        }),
+        Operation::BridgeOpen | Operation::BridgeClose { .. } => {
+            reject_command(command, Error::ResourceBusy);
+            None
+        }
+        operation if operation.is_cdc_data() => {
+            reject_command(command, Error::ResourceBusy);
+            None
+        }
+        _ => {
+            reject_command(command, Error::NotReady);
+            None
+        }
+    }
+}
+
+async fn bridge_usb_in<I>(
     bulk_in: &mut I,
     session: u32,
     generation: u32,
     packet_size: usize,
-    initial: Option<CdcData>,
-) -> Error
+) -> BridgeIoEnd
 where
     I: UsbPipe<pipe::Bulk, pipe::In>,
 {
-    if let Some(data) = initial {
-        USB_TO_BRIDGE.send(BridgeFrame { session, data }).await;
+    if !record_bridge_in_start_if_current(generation).await {
+        return BridgeIoEnd::Failed;
     }
 
     loop {
-        let mut data = CdcData::empty();
-        match bulk_in.request_in(&mut data.bytes[..packet_size]).await {
-            Ok(0) => {}
-            Ok(count) if count <= packet_size => {
-                data.len = count as u8;
-                if !record_rx_if_current(generation, Phase::CdcReady, count).await {
-                    return Error::NotReady;
+        let mut output = CdcData::empty();
+        let mut first = true;
+
+        loop {
+            let mut packet = [0_u8; CDC_MAX_TRANSFER];
+            let request = bulk_in.request_in(&mut packet[..packet_size]);
+            let result = if first {
+                Ok(request.await)
+            } else {
+                with_timeout(EXCHANGE_IDLE_TIMEOUT, request).await
+            };
+
+            let count = match result {
+                Err(_) => break,
+                Ok(Ok(count)) if count <= packet_size => count,
+                Ok(Ok(_)) => {
+                    let _ = record_bridge_in_cycle_if_current(generation, 0, false, false).await;
+                    fail_current_session(
+                        generation,
+                        Phase::CdcReady,
+                        Phase::CdcError,
+                        Error::Transfer,
+                    )
+                    .await;
+                    return BridgeIoEnd::Failed;
                 }
-                USB_TO_BRIDGE.send(BridgeFrame { session, data }).await;
+                Ok(Err(PipeError::Disconnected)) => {
+                    let _ = record_bridge_in_cycle_if_current(generation, 0, false, false).await;
+                    return BridgeIoEnd::Failed;
+                }
+                Ok(Err(_)) => {
+                    let _ = record_bridge_in_cycle_if_current(generation, 0, false, false).await;
+                    fail_current_session(
+                        generation,
+                        Phase::CdcReady,
+                        Phase::CdcError,
+                        Error::Transfer,
+                    )
+                    .await;
+                    return BridgeIoEnd::Failed;
+                }
+            };
+
+            first = false;
+            if !record_bridge_in_cycle_if_current(generation, count, count != 0, true).await {
+                return BridgeIoEnd::Failed;
             }
-            Ok(_) => {
-                return fail_current_session(
-                    generation,
-                    Phase::CdcReady,
-                    Phase::CdcError,
-                    Error::Transfer,
-                )
-                .await;
+            if count == 0 {
+                break;
             }
-            Err(PipeError::Disconnected) => return Error::NotReady,
-            Err(_) => {
-                return fail_current_session(
-                    generation,
-                    Phase::CdcReady,
-                    Phase::CdcError,
-                    Error::Transfer,
-                )
-                .await;
+
+            let start = usize::from(output.len);
+            if start + count > output.bytes.len() {
+                let frame = BridgeFrame {
+                    session,
+                    data: output,
+                };
+                if USB_TO_BRIDGE.try_send(frame).is_err() {
+                    USB_TO_BRIDGE.send(frame).await;
+                }
+                output = CdcData::empty();
+            }
+
+            let start = usize::from(output.len);
+            output.bytes[start..start + count].copy_from_slice(&packet[..count]);
+            output.len += count as u8;
+            if usize::from(output.len) == output.bytes.len() {
+                break;
+            }
+        }
+
+        if output.len != 0 {
+            let frame = BridgeFrame {
+                session,
+                data: output,
+            };
+            if USB_TO_BRIDGE.try_send(frame).is_err() {
+                USB_TO_BRIDGE.send(frame).await;
             }
         }
     }
 }
 
-async fn bridge_tcp_to_usb<O>(bulk_out: &mut O, session: u32, generation: u32) -> BridgeOutputEnd
+async fn bridge_usb_out<O>(bulk_out: &mut O, session: u32, generation: u32) -> BridgeIoEnd
 where
     O: UsbPipe<pipe::Bulk, pipe::Out>,
 {
     loop {
-        match select(BRIDGE_TO_USB.receive(), HOST_COMMANDS.receive()).await {
-            Either::First(frame) => {
-                if frame.session != session {
-                    continue;
-                }
-                let count = frame.data.as_bytes().len();
-                match with_timeout(
-                    TRANSFER_TIMEOUT,
-                    bulk_out.request_out(frame.data.as_bytes(), false),
-                )
-                .await
-                {
-                    Ok(Ok(())) => {
-                        if !record_tx_if_current(generation, Phase::CdcReady, count).await {
-                            return BridgeOutputEnd::Failed;
-                        }
-                    }
-                    Ok(Err(PipeError::Disconnected)) => return BridgeOutputEnd::Failed,
-                    Ok(Err(_)) => {
-                        fail_current_session(
-                            generation,
-                            Phase::CdcReady,
-                            Phase::CdcError,
-                            Error::Transfer,
-                        )
-                        .await;
-                        return BridgeOutputEnd::Failed;
-                    }
-                    Err(_) => {
-                        fail_current_session(
-                            generation,
-                            Phase::CdcReady,
-                            Phase::CdcError,
-                            Error::Timeout,
-                        )
-                        .await;
-                        return BridgeOutputEnd::Failed;
-                    }
-                }
-            }
-            Either::Second(command) => {
-                if !command_is_current(&command).await {
-                    reject_command(command, Error::NotReady);
-                    continue;
-                }
+        let frame = BRIDGE_TO_USB.receive().await;
+        if frame.session != session {
+            continue;
+        }
+        if let Err(end) = bridge_write_frame(bulk_out, generation, frame).await {
+            return end;
+        }
+    }
+}
 
-                match command.operation {
-                    Operation::BridgeClose {
-                        session: close_session,
-                    } if close_session == session => {
-                        send_reply(Reply {
-                            sequence: command.sequence,
-                            result: ReplyResult::BridgeClose(Ok(())),
-                        });
-                        return BridgeOutputEnd::Closed;
-                    }
-                    Operation::BridgeOpen | Operation::BridgeClose { .. } => {
-                        reject_command(command, Error::ResourceBusy);
-                    }
-                    operation if operation.is_cdc_data() => {
-                        reject_command(command, Error::ResourceBusy);
-                    }
-                    _ => reject_command(command, Error::NotReady),
+async fn bridge_commands(session: u32) -> BridgeIoEnd {
+    loop {
+        if let Some(end) = handle_bridge_command(HOST_COMMANDS.receive().await, session).await {
+            return end;
+        }
+    }
+}
+
+async fn bridge_usb_io<I, O>(
+    bulk_in: &mut I,
+    bulk_out: &mut O,
+    session: u32,
+    generation: u32,
+    packet_size: usize,
+    initial: Option<CdcData>,
+) -> BridgeIoEnd
+where
+    I: UsbPipe<pipe::Bulk, pipe::In>,
+    O: UsbPipe<pipe::Bulk, pipe::Out>,
+{
+    if let Some(data) = initial {
+        USB_TO_BRIDGE.send(BridgeFrame { session, data }).await;
+    }
+
+    // Match the proven SCPI exchange for the first raw frame: do not issue
+    // any speculative bulk-IN token before the first command has completed
+    // its bulk-OUT transaction.
+    loop {
+        match select(BRIDGE_TO_USB.receive(), HOST_COMMANDS.receive()).await {
+            Either::First(frame) if frame.session == session => {
+                if let Err(end) = bridge_write_frame(bulk_out, generation, frame).await {
+                    return end;
+                }
+                break;
+            }
+            Either::First(_) => {}
+            Either::Second(command) => {
+                if let Some(end) = handle_bridge_command(command, session).await {
+                    return end;
                 }
             }
         }
+    }
+
+    // Keep the bulk-IN future alive while independent OUT and manager-command
+    // loops wait concurrently. The shared host engine serializes their actual
+    // wire transactions without repeatedly cancelling the dormant IN retry.
+    match select3(
+        bridge_usb_out(bulk_out, session, generation),
+        bridge_commands(session),
+        bridge_usb_in(bulk_in, session, generation, packet_size),
+    )
+    .await
+    {
+        Either3::First(end) | Either3::Second(end) | Either3::Third(end) => end,
     }
 }
 
@@ -915,21 +1419,41 @@ where
     let initial = buffered.take();
     let (function, control, mut bulk_in, mut bulk_out) = cdc.into_parts();
 
-    let outcome = match select3(
+    let outcome = match select(
         bridge_wait_for_disconnect(controller),
-        bridge_usb_to_tcp(&mut bulk_in, session, generation, packet_size, initial),
-        bridge_tcp_to_usb(&mut bulk_out, session, generation),
+        bridge_usb_io(
+            &mut bulk_in,
+            &mut bulk_out,
+            session,
+            generation,
+            packet_size,
+            initial,
+        ),
     )
     .await
     {
-        Either3::First(()) => BridgeRunOutcome::Disconnected,
-        Either3::Second(_) => BridgeRunOutcome::Failed,
-        Either3::Third(BridgeOutputEnd::Closed) => BridgeRunOutcome::Closed,
-        Either3::Third(BridgeOutputEnd::Failed) => BridgeRunOutcome::Failed,
+        Either::First(()) => BridgeRunOutcome::Disconnected,
+        Either::Second(BridgeIoEnd::Closed { sequence }) => BridgeRunOutcome::Closed { sequence },
+        Either::Second(BridgeIoEnd::Failed) => BridgeRunOutcome::Failed,
     };
 
-    set_bridge_connected_if_current(generation, true, false).await;
-    if !matches!(outcome, BridgeRunOutcome::Closed) {
+    let outcome_code = match &outcome {
+        BridgeRunOutcome::Closed { .. } => 1,
+        BridgeRunOutcome::Disconnected => 2,
+        BridgeRunOutcome::Failed => 3,
+    };
+    record_bridge_outcome_if_current(generation, outcome_code).await;
+    let released = set_bridge_connected_if_current(generation, true, false).await;
+    if let BridgeRunOutcome::Closed { sequence } = outcome {
+        send_reply(Reply {
+            sequence,
+            result: ReplyResult::BridgeClose(if released {
+                Ok(())
+            } else {
+                Err(Error::NotReady)
+            }),
+        });
+    } else {
         BRIDGE_EVENT.signal(BridgeEvent::Closed { session });
     }
 
@@ -955,6 +1479,7 @@ where
 async fn root_port_monitor<'d>(host_state: &PioHostState<Rp2040PioEngine<'d>>) {
     let mut detector = AttachDetector::new(ATTACH_DEBOUNCE_SAMPLES);
     let mut ticker = Ticker::every(Duration::from_millis(1));
+    let mut next_diagnostic_snapshot = Instant::now() + DIAGNOSTIC_SNAPSHOT_INTERVAL;
     let mut connected = false;
 
     loop {
@@ -978,9 +1503,14 @@ async fn root_port_monitor<'d>(host_state: &PioHostState<Rp2040PioEngine<'d>>) {
                             connected = true;
                             ticker = Ticker::every(Duration::from_millis(1));
                         }
-                        Err(_) => {
+                        Err(error) => {
                             connected = false;
-                            set_error_phase(Phase::EnumerationError).await;
+                            set_enumeration_error(EnumerationDiagnostic::new(
+                                EnumerationOrigin::Reset,
+                                pipe_enumeration_error(error),
+                                None,
+                            ))
+                            .await;
                             warn!("PIO USB root reset failed");
                         }
                     }
@@ -996,7 +1526,12 @@ async fn root_port_monitor<'d>(host_state: &PioHostState<Rp2040PioEngine<'d>>) {
                     if connected && host_state.report_disconnected_if_not_resetting() {
                         connected = false;
                     }
-                    set_error_phase(Phase::EnumerationError).await;
+                    set_enumeration_error(EnumerationDiagnostic::new(
+                        EnumerationOrigin::Se1,
+                        EnumerationErrorKind::None,
+                        None,
+                    ))
+                    .await;
                     warn!("invalid SE1 state on PIO USB root port");
                 }
             }
@@ -1004,6 +1539,35 @@ async fn root_port_monitor<'d>(host_state: &PioHostState<Rp2040PioEngine<'d>>) {
 
         if connected {
             let _ = host_state.service_frame().await;
+        }
+
+        if Instant::now() >= next_diagnostic_snapshot {
+            let diagnostics = host_state.snapshot_in_transaction_diagnostics().await;
+            let mut status = HOST_STATE.lock().await;
+            status.wire_in_attempts = diagnostics.attempt_count;
+            status.wire_in_data_accepted = diagnostics.accepted_data_count;
+            status.wire_in_nak = diagnostics.nak_count;
+            status.wire_in_no_response = diagnostics.no_response_count;
+            status.wire_in_invalid_or_stall = diagnostics.invalid_or_stall_count;
+            status.unexpected_toggle_count = diagnostics.unexpected_toggle_count;
+            status.accepted_zlp_count = diagnostics.accepted_zlp_count;
+            match diagnostics.latest_unexpected_toggle {
+                Some(latest) => {
+                    status.latest_expected_pid = Some(latest.expected_pid);
+                    status.latest_actual_pid = Some(latest.actual_pid);
+                    status.latest_payload_len = Some(latest.payload_len);
+                    status.latest_payload_prefix_len = latest.payload_prefix_len;
+                    status.latest_payload_prefix = latest.payload_prefix;
+                }
+                None => {
+                    status.latest_expected_pid = None;
+                    status.latest_actual_pid = None;
+                    status.latest_payload_len = None;
+                    status.latest_payload_prefix_len = 0;
+                    status.latest_payload_prefix = [0; DIAGNOSTIC_PAYLOAD_PREFIX_CAPACITY];
+                }
+            }
+            next_diagnostic_snapshot = Instant::now() + DIAGNOSTIC_SNAPSHOT_INTERVAL;
         }
     }
 }
@@ -1032,11 +1596,12 @@ async fn run(hardware: Hardware) {
     set_waiting().await;
     info!("PIO USB host VBUS enabled");
 
+    let application_host_state = &host_state;
     let application = async move {
         let _vbus_enable = vbus_enable;
         let mut next_bridge_session = 0_u32;
 
-        loop {
+        'device: loop {
             let speed = loop {
                 match select(controller.wait_for_device_event(), HOST_COMMANDS.receive()).await {
                     Either::First(DeviceEvent::Connected(speed)) => break speed,
@@ -1066,36 +1631,58 @@ async fn run(hardware: Hardware) {
                     continue;
                 }
             };
-            let Some(session_generation) = begin_enumeration(host_speed).await else {
+            let Some(mut session_generation) = begin_enumeration(host_speed).await else {
                 continue;
             };
             let mut configuration = [0_u8; CONFIG_DESCRIPTOR_CAPACITY];
-            let (enumeration, configuration_len) = match bus_handle
-                .enumerate(BusRoute::Direct(speed), &mut configuration)
-                .await
-            {
-                Ok(result) => result,
-                Err(_) => {
-                    if set_error_phase_if_current(
-                        session_generation,
-                        Phase::Enumerating,
-                        Phase::EnumerationError,
-                    )
+            let mut reset_retries_remaining = ENUMERATION_RESET_RETRIES;
+            let (enumeration, configuration_len) = 'enumeration: loop {
+                application_host_state.clear_bad_response_diagnostic().await;
+                match bus_handle
+                    .enumerate(BusRoute::Direct(speed), &mut configuration)
                     .await
-                    {
-                        warn!("PIO USB device enumeration failed");
-                        wait_for_removal(&mut controller).await;
-                    }
+                {
+                    Ok(result) => break 'enumeration result,
+                    Err(error) => {
+                        let bad_response =
+                            application_host_state.take_bad_response_diagnostic().await;
+                        if !set_enumeration_error_if_current(
+                            session_generation,
+                            EnumerationDiagnostic::new(
+                                EnumerationOrigin::Enumerate,
+                                enumeration_error(&error),
+                                bad_response,
+                            ),
+                        )
+                        .await
+                        {
+                            continue 'device;
+                        }
 
-                    // embassy-usb-host 0.1.0 can retain an address lease on an
-                    // enumeration error. This root-only backend has no hubs,
-                    // so releasing the complete address space after physical
-                    // detach is safe.
-                    for address in 1_u8..=127 {
-                        bus_handle.free_address(address);
+                        // The failed enumeration has dropped its logical
+                        // control pipe. This root-only backend has no hubs, so
+                        // reclaim the complete address pool before a fresh
+                        // root-port reset.
+                        for address in 1_u8..=127 {
+                            bus_handle.free_address(address);
+                        }
+
+                        if reset_retries_remaining == 0 {
+                            warn!("PIO USB device enumeration failed");
+                            wait_for_removal(&mut controller).await;
+                            set_waiting_if_current(session_generation).await;
+                            continue 'device;
+                        }
+
+                        reset_retries_remaining -= 1;
+                        warn!("retrying PIO USB enumeration after root-port reset");
+                        set_resetting(host_speed).await;
+                        controller.controller_mut().bus_reset().await;
+                        let Some(next_generation) = begin_enumeration(host_speed).await else {
+                            continue 'device;
+                        };
+                        session_generation = next_generation;
                     }
-                    set_waiting_if_current(session_generation).await;
-                    continue;
                 }
             };
 
@@ -1611,7 +2198,7 @@ async fn run(hardware: Hardware) {
                                         cdc = restored_cdc;
 
                                         match outcome {
-                                            BridgeRunOutcome::Closed => {
+                                            BridgeRunOutcome::Closed { .. } => {
                                                 info!("raw USB serial bridge released");
                                             }
                                             BridgeRunOutcome::Disconnected => break,
@@ -2056,6 +2643,15 @@ async fn bridge_closed(session: u32) {
     }
 }
 
+async fn discard_closed_bridge_output(session: u32) {
+    loop {
+        let frame = USB_TO_BRIDGE.receive().await;
+        if frame.session != session {
+            continue;
+        }
+    }
+}
+
 #[embassy_executor::task]
 pub(crate) async fn usb_serial_task(stack: Stack<'static>) {
     let mut rx_buffer = [0; BRIDGE_SOCKET_BUFFER_SIZE];
@@ -2077,14 +2673,35 @@ pub(crate) async fn usb_serial_task(stack: Stack<'static>) {
                     info!("raw USB serial TCP client connected");
                     {
                         let (mut reader, mut writer) = socket.split();
-                        let _ = select3(
+                        let end = select3(
                             tcp_to_bridge(&mut reader, session),
                             bridge_to_tcp(&mut writer, session),
                             bridge_closed(session),
                         )
                         .await;
+                        let end_code = match end {
+                            Either3::First(Ok(())) => 1,
+                            Either3::First(Err(())) => 2,
+                            Either3::Second(Ok(())) => 3,
+                            Either3::Second(Err(())) => 4,
+                            Either3::Third(()) => 5,
+                        };
+                        record_bridge_tcp_end_if_connected(end_code).await;
                     }
-                    let _ = bridge_close(session).await;
+                    // Frames not yet started belong to the TCP peer that just
+                    // closed. Dropping them here also bounds BridgeClose to
+                    // at most the one bulk-OUT transaction already in flight.
+                    BRIDGE_TO_USB.clear();
+                    // Keep draining frames after the TCP peer has gone away.
+                    // This lets the host-side bulk-IN loop finish forwarding
+                    // an already accepted packet before it acknowledges the
+                    // close, instead of cancelling that USB transaction.
+                    let _ = select3(
+                        bridge_close(session),
+                        discard_closed_bridge_output(session),
+                        bridge_closed(session),
+                    )
+                    .await;
                     info!("raw USB serial TCP client disconnected");
                 }
                 Err(_) => {

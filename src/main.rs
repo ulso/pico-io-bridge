@@ -154,9 +154,12 @@ fn host_silence_recovery(attempt: u32) -> (Duration, &'static [u8]) {
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
     let p = embassy_rp::init(board::rp_config());
+    network::capture_reset_cause();
     let board::Board {
         flash,
         usb,
+        #[cfg(feature = "board-adafruit-rp2040-usb-host")]
+        core1,
         mut uart,
         mut status,
         interfaces,
@@ -275,6 +278,9 @@ async fn main(spawner: Spawner) {
     for _ in 0..HTTP_SOCKETS {
         spawner.spawn(http::http_task(stack, usb_serial).unwrap());
     }
+    #[cfg(feature = "board-adafruit-rp2040-usb-host")]
+    interfaces.spawn(spawner, stack, usb_serial, core1);
+    #[cfg(not(feature = "board-adafruit-rp2040-usb-host"))]
     interfaces.spawn(spawner, stack, usb_serial);
 
     #[cfg(feature = "dhcp-server")]
@@ -338,6 +344,7 @@ async fn main(spawner: Spawner) {
                         warn!("CDC-NCM watchdog requesting system reset");
                         uart.blocking_write(b"CDC-NCM watchdog reset\r\n").unwrap();
                         uart.blocking_flush().unwrap();
+                        network::arm_link_watchdog_reset();
                         network::usb_reenumeration_reset(Duration::from_millis(350)).await;
                     }
                     continue;

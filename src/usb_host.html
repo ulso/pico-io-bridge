@@ -91,6 +91,7 @@ code{font:12px ui-monospace,SFMono-Regular,Menlo,monospace;color:#173f73}
 <dt>PIO blocks</dt><dd><code>PIO0 + PIO1</code></dd>
 <dt>DMA</dt><dd><code>DMA_CH0</code></dd>
 <dt>System clock</dt><dd><code>120 MHz</code></dd>
+<dt>Last reset</dt><dd id="resetCause">-</dd>
 <dt>Raw TCP bridge</dt><dd id="serialBridge">-</dd>
 <dt>DNS-SD service</dt><dd><code id="serialService">-</code></dd>
 <dt>TCP client</dt><dd id="serialClient">-</dd>
@@ -122,6 +123,7 @@ const addressEl=document.getElementById("address");
 const classEl=document.getElementById("deviceClass");
 const driverEl=document.getElementById("deviceDriver");
 const vbusEl=document.getElementById("vbus");
+const resetCauseEl=document.getElementById("resetCause");
 const serialBridgeEl=document.getElementById("serialBridge");
 const serialServiceEl=document.getElementById("serialService");
 const serialClientEl=document.getElementById("serialClient");
@@ -130,6 +132,10 @@ let lastPhase=null;
 let refreshing=false;
 let events=[];
 function phaseLabel(value){return String(value||"-").toLowerCase().split("_").map(word=>word.charAt(0).toUpperCase()+word.slice(1)).join(" ")}
+function resetCauseLabel(value){
+ const labels={POWER_ON_OR_BROWNOUT:"Power-on / brownout",RUN_PIN:"RUN pin",DEBUG_RESTART:"Debug restart",CDC_NCM_HOST_SILENCE_RECOVERY:"CDC-NCM host-silence recovery",CDC_NCM_LINK_WATCHDOG_RECOVERY:"CDC-NCM link-watchdog recovery",WATCHDOG_FORCE:"Watchdog force",WATCHDOG_TIMEOUT:"Watchdog timeout",UNKNOWN:"Unknown"};
+ return labels[value]||phaseLabel(value)
+}
 function hex16(value){return Number(value||0).toString(16).toUpperCase().padStart(4,"0")}
 function isFtdi(info){return info.vendorId===0x0403&&info.productId===0x6001}
 function deviceName(info){
@@ -182,6 +188,8 @@ function updateHost(info){
  classEl.textContent=deviceClass(info);
  driverEl.textContent=driverName(info);
  vbusEl.textContent=info.phase==="POWER_OFF"?"Off":"Enabled (firmware output)";
+ resetCauseEl.textContent=resetCauseLabel(info.resetCause);
+ resetCauseEl.className=info.resetCause==="POWER_ON_OR_BROWNOUT"?"stateWait":"";
  const bridge=info.serialBridge||(info.usbHost&&info.usbHost.serialBridge)||{};
  const bridgePort=Number.isInteger(bridge.port)&&bridge.port>0?bridge.port:null;
  serialBridgeEl.textContent=bridgePort===null?"-":bridge.available?"TCP "+bridgePort+" available":"TCP "+bridgePort+" unavailable";

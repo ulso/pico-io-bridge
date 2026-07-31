@@ -1,7 +1,7 @@
 """Send bytes through the Pico I/O Bridge raw USB-serial TCP port.
 
 No third-party Python packages are required. The default request is ``AT``
-followed by CRLF, which is suitable for a connected BleuIO. For that exact
+followed by CR, which is suitable for a connected BleuIO. For that exact
 probe, the client reassembles arbitrary stream fragments until the echoed
 command and a complete ``OK`` or ``ERROR`` line arrive. Other commands remain
 unframed and end when the stream is idle. ``--idle-response`` also selects
@@ -15,6 +15,7 @@ Examples:
 
 import argparse
 import socket
+import time
 from typing import Optional, Union
 
 
@@ -39,6 +40,14 @@ def positive_float(value: str) -> float:
     parsed = float(value)
     if parsed <= 0:
         raise argparse.ArgumentTypeError("must be greater than zero")
+    return parsed
+
+
+def non_negative_float(value: str) -> float:
+    """Parse a non-negative floating-point command-line value."""
+    parsed = float(value)
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("must be zero or greater")
     return parsed
 
 
@@ -108,6 +117,47 @@ def collect_response(
     return bytes(response), reached_limit, complete
 
 
+def print_exchange(
+    payload: bytes,
+    response: bytes,
+    reached_limit: bool,
+    response_complete: bool,
+    *,
+    expected_echo: Optional[bytes],
+    first_timeout: float,
+    max_bytes: int,
+) -> None:
+    """Print and validate one request/response exchange."""
+    print(f"Sent {len(payload)} bytes")
+    print(f"TX hex:  {payload.hex().upper()}")
+
+    if not response:
+        raise SystemExit(
+            f"No response received within {first_timeout:g} seconds."
+        )
+
+    print(f"Received {len(response)} bytes")
+    print(f"RX hex:  {response.hex().upper()}")
+    print(f"RX text: {response.decode('utf-8', errors='backslashreplace')!r}")
+    if expected_echo is not None and not response_complete:
+        if reached_limit:
+            raise SystemExit(
+                "Incomplete AT response: the "
+                f"{max_bytes}-byte response limit was reached before a "
+                "complete echoed AT and OK or ERROR line."
+            )
+        raise SystemExit(
+            "Incomplete AT response: the stream ended or the "
+            f"{first_timeout:g}-second response timeout expired before a "
+            "complete echoed AT and OK or ERROR line."
+        )
+    if reached_limit:
+        print(
+            f"Response reached the {max_bytes}-byte limit; "
+            "more stream data may remain."
+        )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
@@ -135,7 +185,7 @@ def main() -> None:
         "--terminator",
         choices=TERMINATORS,
         default=None,
-        help="terminator appended to text commands (default: crlf)",
+        help="terminator appended to text commands (default: cr)",
     )
     parser.add_argument(
         "--connect-timeout",
@@ -178,6 +228,26 @@ def main() -> None:
         metavar="COUNT",
         help="maximum response size (default: 65536)",
     )
+    parser.add_argument(
+        "--repeat",
+        type=positive_int,
+        default=1,
+        metavar="COUNT",
+        help=(
+            "send the same request COUNT times over one persistent TCP "
+            "connection (default: 1)"
+        ),
+    )
+    parser.add_argument(
+        "--repeat-delay",
+        type=non_negative_float,
+        default=0.0,
+        metavar="SECONDS",
+        help=(
+            "wait SECONDS between repeated requests while keeping the TCP "
+            "connection open (default: 0)"
+        ),
+    )
     args = parser.parse_args()
 
     command_bytes: Optional[bytes] = None
@@ -194,7 +264,7 @@ def main() -> None:
             parser.error("--hex payload must contain at least one byte")
     else:
         command = "AT" if args.command is None else args.command
-        terminator = "crlf" if args.terminator is None else args.terminator
+        terminator = "cr" if args.terminator is None else args.terminator
         command_bytes = command.encode("utf-8")
         payload = command_bytes + TERMINATORS[terminator]
         if not payload:
@@ -204,7 +274,7 @@ def main() -> None:
         b"AT"
         if (
             command_bytes == b"AT"
-            and payload == b"AT\r\n"
+            and payload in (b"AT\r", b"AT\r\n")
             and not args.idle_response
         )
         else None
@@ -215,47 +285,34 @@ def main() -> None:
             (args.host, args.port),
             timeout=args.connect_timeout,
         ) as connection:
-            connection.sendall(payload)
-            response, reached_limit, response_complete = collect_response(
-                connection,
-                args.first_timeout,
-                args.idle_timeout,
-                args.max_bytes,
-                expected_echo=expected_echo,
-            )
+            for exchange_index in range(args.repeat):
+                if args.repeat > 1:
+                    if exchange_index:
+                        print()
+                    print(f"Exchange {exchange_index + 1}/{args.repeat}")
+                connection.sendall(payload)
+                response, reached_limit, response_complete = collect_response(
+                    connection,
+                    args.first_timeout,
+                    args.idle_timeout,
+                    args.max_bytes,
+                    expected_echo=expected_echo,
+                )
+                print_exchange(
+                    payload,
+                    response,
+                    reached_limit,
+                    response_complete,
+                    expected_echo=expected_echo,
+                    first_timeout=args.first_timeout,
+                    max_bytes=args.max_bytes,
+                )
+                if exchange_index + 1 < args.repeat and args.repeat_delay:
+                    time.sleep(args.repeat_delay)
     except OSError as error:
         raise SystemExit(
             f"USB-serial TCP connection to {args.host}:{args.port} failed: {error}"
         ) from error
-
-    print(f"Sent {len(payload)} bytes")
-    print(f"TX hex:  {payload.hex().upper()}")
-
-    if not response:
-        raise SystemExit(
-            f"No response received within {args.first_timeout:g} seconds."
-        )
-
-    print(f"Received {len(response)} bytes")
-    print(f"RX hex:  {response.hex().upper()}")
-    print(f"RX text: {response.decode('utf-8', errors='backslashreplace')!r}")
-    if expected_echo is not None and not response_complete:
-        if reached_limit:
-            raise SystemExit(
-                "Incomplete AT response: the "
-                f"{args.max_bytes}-byte response limit was reached before a "
-                "complete echoed AT and OK or ERROR line."
-            )
-        raise SystemExit(
-            "Incomplete AT response: the stream ended or the "
-            f"{args.first_timeout:g}-second response timeout expired before a "
-            "complete echoed AT and OK or ERROR line."
-        )
-    if reached_limit:
-        print(
-            f"Response reached the {args.max_bytes}-byte limit; "
-            "more stream data may remain."
-        )
 
 
 if __name__ == "__main__":
