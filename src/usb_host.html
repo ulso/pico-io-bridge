@@ -20,6 +20,7 @@ h1{font-size:24px;line-height:1.2;margin:0 0 4px;font-weight:700}
 .tabs a.active{background:#17202a;color:#fff;border-color:#17202a}
 .toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:16px}
 button{border:1px solid #9aa7b2;background:#fff;color:#17202a;border-radius:6px;padding:8px 12px;font:inherit;font-weight:650;min-height:38px}
+.toolbarActions{display:flex;align-items:center;gap:14px}.toggle{display:flex;align-items:center;gap:7px;font-size:12px;font-weight:650;color:#52606d}.toggle input{width:16px;height:16px}
 .hint{color:#65717d;font-size:12px}
 .metrics{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:8px;margin-bottom:16px}
 .metric{border:1px solid #d7dee6;border-radius:6px;padding:10px;background:#f9fafb;min-width:0}
@@ -30,6 +31,7 @@ button{border:1px solid #9aa7b2;background:#fff;color:#17202a;border-radius:6px;
 .wide{grid-column:1/-1}
 .hidden{display:none}
 .spectrumMeta{display:flex;flex-wrap:wrap;justify-content:space-between;gap:8px;color:#65717d;font-size:12px;margin:-4px 0 10px}
+.sensorGrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:10px}.sensorCard{border:1px solid #d7dee6;border-radius:7px;padding:12px;background:#f9fafb}.sensorHead{display:flex;justify-content:space-between;gap:10px;margin-bottom:10px}.sensorHead strong{font-size:15px}.sensorHead span,.sensorMeta{color:#65717d;font-size:11px}.sensorValues{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:7px}.sensorValue{border-top:1px solid #e4e9ee;padding-top:7px}.sensorValue span{display:block;color:#65717d;font-size:10px}.sensorValue strong{font-size:15px}.emptyState{color:#65717d;font-size:13px;margin:0}
 #spectrumCanvas{display:block;width:100%;height:280px;border:1px solid #d7dee6;border-radius:6px;background:#f9fafb}
 h2{font-size:15px;margin:0 0 12px;font-weight:700}
 .facts{display:grid;grid-template-columns:145px minmax(0,1fr);margin:0}
@@ -41,9 +43,9 @@ code{font:12px ui-monospace,SFMono-Regular,Menlo,monospace;color:#173f73}
 .events li{display:grid;grid-template-columns:85px minmax(0,1fr);gap:10px;padding:8px 0;border-bottom:1px solid #edf0f3;font-size:13px}
 .events li:last-child{border-bottom:0}.events time{color:#65717d;font:12px ui-monospace,SFMono-Regular,Menlo,monospace}
 @media(max-width:820px){.metrics{grid-template-columns:repeat(3,minmax(0,1fr))}}
-@media(max-width:680px){main{padding:14px}header,.toolbar{align-items:flex-start;flex-direction:column}.layout{grid-template-columns:1fr}.wide{grid-column:auto}.metrics{grid-template-columns:repeat(2,minmax(0,1fr))}.facts{grid-template-columns:110px minmax(0,1fr)}}
+@media(max-width:680px){main{padding:14px}header,.toolbar{align-items:flex-start;flex-direction:column}.layout{grid-template-columns:1fr}.wide{grid-column:auto}.metrics{grid-template-columns:repeat(2,minmax(0,1fr))}.facts{grid-template-columns:110px minmax(0,1fr)}.toolbarActions{width:100%;justify-content:space-between}}
 @media(max-width:420px){.tabs a{flex:1;text-align:center}.metrics{grid-template-columns:1fr 1fr}}
-@media(prefers-color-scheme:dark){body{background:#111820;color:#edf2f7}.model,.hint,.metric span,.facts dt,.events time,.spectrumMeta{color:#b9c3cf}.panel,.metric,.tabs a,button{background:#17212b;color:#edf2f7;border-color:#3b4b5c}.tabs a.active{background:#edf2f7;color:#111820}.facts dt,.facts dd,.events li{border-color:#273544}code{color:#8ab8ee}#spectrumCanvas{background:#111820;border-color:#3b4b5c}}
+@media(prefers-color-scheme:dark){body{background:#111820;color:#edf2f7}.model,.hint,.metric span,.facts dt,.events time,.spectrumMeta,.toggle,.sensorHead span,.sensorMeta,.sensorValue span,.emptyState{color:#b9c3cf}.panel,.metric,.tabs a,button,.sensorCard{background:#17212b;color:#edf2f7;border-color:#3b4b5c}.tabs a.active{background:#edf2f7;color:#111820}.facts dt,.facts dd,.events li,.sensorValue{border-color:#273544}code{color:#8ab8ee}#spectrumCanvas{background:#111820;border-color:#3b4b5c}}
 </style>
 </head>
 <body>
@@ -59,7 +61,7 @@ code{font:12px ui-monospace,SFMono-Regular,Menlo,monospace;color:#173f73}
 <nav id="interfaceNav" class="tabs"><a class="active" href="/usb-host.html">USB</a></nav>
 
 <div class="toolbar">
-<button id="refresh">Refresh</button>
+<div class="toolbarActions"><button id="refresh">Refresh</button><label class="toggle"><input id="showTechnical" type="checkbox" checked> Show technical details</label></div>
 <span class="hint">Read-only status updates every 2 seconds</span>
 </div>
 
@@ -73,7 +75,7 @@ code{font:12px ui-monospace,SFMono-Regular,Menlo,monospace;color:#173f73}
 </section>
 
 <div class="layout">
-<section class="panel">
+<section class="panel technicalPanel">
 <h2>Attached Device</h2>
 <dl class="facts">
 <dt>Device</dt><dd id="device">-</dd>
@@ -86,7 +88,7 @@ code{font:12px ui-monospace,SFMono-Regular,Menlo,monospace;color:#173f73}
 </dl>
 </section>
 
-<section class="panel">
+<section class="panel technicalPanel">
 <h2>Host Resources</h2>
 <dl class="facts">
 <dt>Controller</dt><dd>RP2040 PIO USB host</dd>
@@ -103,6 +105,12 @@ code{font:12px ui-monospace,SFMono-Regular,Menlo,monospace;color:#173f73}
 <dt>USBTMC service</dt><dd><code id="usbtmcService">-</code></dd>
 <dt>Instrument client</dt><dd id="usbtmcClient">-</dd>
 </dl>
+</section>
+
+<section id="bleuioPanel" class="panel wide hidden">
+<h2>BleuIO · HibouAir Sensors</h2>
+<div class="spectrumMeta"><span id="bleuioState">Starting managed scan</span><span id="bleuioCount">No sensors discovered</span></div>
+<div id="sensorGrid" class="sensorGrid"><p class="emptyState">Waiting for HibouAir advertisements.</p></div>
 </section>
 
 <section id="spectrumPanel" class="panel wide hidden">
@@ -124,6 +132,8 @@ const pageTitle=document.getElementById("pageTitle");
 const statusEl=document.getElementById("status");
 const statusText=document.getElementById("statusText");
 const refreshBtn=document.getElementById("refresh");
+const showTechnical=document.getElementById("showTechnical");
+const technicalPanels=[...document.querySelectorAll(".technicalPanel")];
 const phaseEl=document.getElementById("phase");
 const speedEl=document.getElementById("speed");
 const rxBytesEl=document.getElementById("rxBytes");
@@ -148,10 +158,15 @@ const spectrumPanel=document.getElementById("spectrumPanel");
 const spectrumCanvas=document.getElementById("spectrumCanvas");
 const spectrumRange=document.getElementById("spectrumRange");
 const spectrumSweeps=document.getElementById("spectrumSweeps");
+const bleuioPanel=document.getElementById("bleuioPanel");
+const bleuioState=document.getElementById("bleuioState");
+const bleuioCount=document.getElementById("bleuioCount");
+const sensorGrid=document.getElementById("sensorGrid");
 const eventsEl=document.getElementById("events");
 let lastPhase=null;
 let refreshing=false;
 let events=[];
+let technicalPreference=null;try{const saved=localStorage.getItem("usbHostShowTechnical");if(saved!==null)technicalPreference=saved==="true"}catch(_){ }
 function phaseLabel(value){return String(value||"-").toLowerCase().split("_").map(word=>word.charAt(0).toUpperCase()+word.slice(1)).join(" ")}
 function resetCauseLabel(value){
  const labels={POWER_ON_OR_BROWNOUT:"Power-on / brownout",RUN_PIN:"RUN pin",DEBUG_RESTART:"Debug restart",CDC_NCM_HOST_SILENCE_RECOVERY:"CDC-NCM host-silence recovery",CDC_NCM_LINK_WATCHDOG_RECOVERY:"CDC-NCM link-watchdog recovery",WATCHDOG_FORCE:"Watchdog force",WATCHDOG_TIMEOUT:"Watchdog timeout",UNKNOWN:"Unknown"};
@@ -160,6 +175,7 @@ function resetCauseLabel(value){
 function hex16(value){return Number(value||0).toString(16).toUpperCase().padStart(4,"0")}
 function isFtdi(info){return info.vendorId===0x0403&&[0x6001,0x6010,0x6011,0x6014,0x6015].includes(info.productId)}
 function isWispy(info){return (info.vendorId===0x1781&&info.productId===0x083e)||(info.vendorId===0x04b4&&info.productId===0x0bad)}
+function isBleuio(info){return info.vendorId===0x2dcf&&info.productId===0x6002}
 function deviceName(info){
  if(info.vendorId===0x2dcf&&info.productId===0x6001)return "BleuIO bootloader";
  if(info.vendorId===0x2dcf&&info.productId===0x6002)return "BleuIO";
@@ -174,6 +190,7 @@ function deviceName(info){
 }
 function deviceClass(info){
  if(isFtdi(info))return "Vendor-specific USB serial";
+ if(info.phase==="BLEUIO_READY"||info.phase==="BLEUIO_ERROR")return "CDC-ACM / BLE scanner";
  if(info.phase==="P8055_READY"||info.phase==="P8055_ERROR")return "HID / P8055";
  if(info.phase==="WISPY_READY"||info.phase==="WISPY_ERROR")return "HID / spectrum analyzer";
  if(info.phase==="FTDI_READY"||info.phase==="FTDI_ERROR")return "FTDI UART";
@@ -182,6 +199,8 @@ function deviceClass(info){
  return "-";
 }
 function driverName(info){
+ if(info.phase==="BLEUIO_READY")return "BleuIO managed scanner";
+ if(info.phase==="BLEUIO_ERROR")return "BleuIO (error)";
  if(info.phase==="FTDI_READY")return "FTDI UART";
  if(info.phase==="FTDI_ERROR")return "FTDI UART (error)";
  if(info.phase==="P8055_READY")return "P8055 HID";
@@ -194,6 +213,29 @@ function driverName(info){
  if(info.phase==="USBTMC_ERROR")return "USBTMC (error)";
  if(info.phase==="UNSUPPORTED_DEVICE")return "Not installed";
  return "-";
+}
+function setTechnicalVisibility(visible){showTechnical.checked=visible;for(const panel of technicalPanels)panel.classList.toggle("hidden",!visible)}
+function metric(card,label,value,unit=""){const box=document.createElement("div");box.className="sensorValue";const name=document.createElement("span");name.textContent=label;const number=document.createElement("strong");number.textContent=value+unit;box.append(name,number);card.appendChild(box)}
+function fixed(value,scale,digits=1){return (Number(value||0)/scale).toFixed(digits)}
+function drawBleuio(info){
+ const data=info.bleuio;if(!data){bleuioPanel.classList.add("hidden");return}
+ bleuioPanel.classList.remove("hidden");
+ bleuioState.textContent=data.scanning?"Managed HibouAir scan active":info.serialBridge&&info.serialBridge.clientConnected?"Raw TCP client owns the BleuIO stream":"Scanner unavailable";
+ const sensors=Array.isArray(data.sensors)?data.sensors:[];bleuioCount.textContent=sensors.length+" sensor"+(sensors.length===1?"":"s")+" discovered";
+ sensorGrid.textContent="";
+ if(!sensors.length){const empty=document.createElement("p");empty.className="emptyState";empty.textContent="Waiting for HibouAir advertisements.";sensorGrid.appendChild(empty);return}
+ for(const sensor of sensors){
+  const card=document.createElement("article");card.className="sensorCard";const head=document.createElement("div");head.className="sensorHead";const title=document.createElement("strong");title.textContent=sensor.type;const id=document.createElement("span");id.textContent="#"+sensor.id;head.append(title,id);card.appendChild(head);
+  const values=document.createElement("div");values.className="sensorValues";
+  metric(values,"Temperature",fixed(sensor.temperatureTenthsC,10)," °C");metric(values,"Humidity",fixed(sensor.humidityTenthsPercent,10)," %");
+  if(Number(sensor.co2Ppm)>0||String(sensor.type).includes("CO2"))metric(values,"CO₂",Number(sensor.co2Ppm).toLocaleString()," ppm");
+  if(Number(sensor.pressureTenthsHpa)>0)metric(values,"Pressure",fixed(sensor.pressureTenthsHpa,10)," hPa");
+  if(Number(sensor.vocRaw)>0)metric(values,sensor.vocType===0||sensor.vocType===1?"VOC raw":"VOC",sensor.vocType===2?fixed(sensor.vocRaw,100,2):Number(sensor.vocRaw).toLocaleString(),sensor.vocType===2?" ppm":sensor.vocType===3?" IAQ":"");
+  if(Number(sensor.pm1Tenths)>0||String(sensor.type).includes("Particulate")){metric(values,"PM1",fixed(sensor.pm1Tenths,10)," µg/m³");metric(values,"PM2.5",fixed(sensor.pm25Tenths,10)," µg/m³");metric(values,"PM10",fixed(sensor.pm10Tenths,10)," µg/m³")}
+  if(String(sensor.type).includes("noise"))metric(values,"Noise",Number(sensor.noiseDbSpl).toLocaleString()," dB SPL");
+  if(Number(sensor.ambientLight)>0&&!String(sensor.type).includes("noise"))metric(values,"Ambient light",Number(sensor.ambientLight).toLocaleString()," lx");
+  card.appendChild(values);const age=Math.max(0,Number(data.nowMs||0)-Number(sensor.lastSeenMs||0));const meta=document.createElement("div");meta.className="sensorMeta";meta.style.marginTop="10px";meta.textContent="Seen "+(age<1500?"just now":Math.round(age/1000)+" s ago")+" · "+Number(sensor.reports||0).toLocaleString()+" reports";card.appendChild(meta);sensorGrid.appendChild(card)
+ }
 }
 function addEvent(text){events.unshift({time:new Date().toLocaleTimeString(),text});events=events.slice(0,12);eventsEl.textContent="";for(const item of events){const row=document.createElement("li");const time=document.createElement("time");const text=document.createElement("span");time.textContent=item.time;text.textContent=item.text;row.append(time,text);eventsEl.appendChild(row)}}
 function drawSpectrum(spectrum){
@@ -221,7 +263,7 @@ function drawSpectrum(spectrum){
 }
 function showPhase(phase){
  const label=phaseLabel(phase);phaseEl.textContent=label;phaseEl.className="";
- if(phase==="CDC_READY"||phase==="FTDI_READY"||phase==="P8055_READY"||phase==="WISPY_READY"||phase==="USBTMC_READY"){statusEl.className="status online";statusText.textContent=phase==="P8055_READY"?"P8055 HID ready":phase==="WISPY_READY"?"Wi-Spy spectrum analyzer ready":phase==="FTDI_READY"?"FTDI UART ready":phase==="USBTMC_READY"?"USBTMC instrument ready":"CDC-ACM ready";phaseEl.className="stateOk"}
+ if(phase==="CDC_READY"||phase==="BLEUIO_READY"||phase==="FTDI_READY"||phase==="P8055_READY"||phase==="WISPY_READY"||phase==="USBTMC_READY"){statusEl.className="status online";statusText.textContent=phase==="BLEUIO_READY"?"BleuIO HibouAir scanner ready":phase==="P8055_READY"?"P8055 HID ready":phase==="WISPY_READY"?"Wi-Spy spectrum analyzer ready":phase==="FTDI_READY"?"FTDI UART ready":phase==="USBTMC_READY"?"USBTMC instrument ready":"CDC-ACM ready";phaseEl.className="stateOk"}
  else if(phase==="WAITING"||phase==="POWER_OFF"){statusEl.className="status";statusText.textContent=phase==="WAITING"?"waiting for device":"host powered off";phaseEl.className="stateOff"}
  else if(phase==="RESETTING"||phase==="ENUMERATING"){statusEl.className="status";statusText.textContent=label.toLowerCase();phaseEl.className="stateWait"}
  else if(phase==="UNSUPPORTED_DEVICE"){statusEl.className="status warning";statusText.textContent="unsupported device";phaseEl.className="stateWait"}
@@ -234,7 +276,7 @@ function updateHost(info){
  txBytesEl.textContent=Number(info.txBytes||0).toLocaleString();
  errorsEl.textContent=Number(info.errorCount||0).toLocaleString();
  errorsEl.className=Number(info.errorCount||0)>0?"stateBad":"";
- const transferReady=info.phase==="CDC_READY"||info.phase==="FTDI_READY"||info.phase==="P8055_READY"||info.phase==="WISPY_READY"||info.phase==="USBTMC_READY";
+ const transferReady=info.phase==="CDC_READY"||info.phase==="BLEUIO_READY"||info.phase==="FTDI_READY"||info.phase==="P8055_READY"||info.phase==="WISPY_READY"||info.phase==="USBTMC_READY";
  maxTransferEl.textContent=transferReady?Number(info.maxTransfer??64)+" B":"—";
  deviceEl.textContent=deviceName(info);
  const hasIdentity=info.vendorId!==null||info.productId!==null;
@@ -261,6 +303,8 @@ function updateHost(info){
  usbtmcClientEl.textContent=tmc.clientConnected?"Connected":tmc.available?"Not connected":"Unavailable";
  usbtmcClientEl.className=tmc.clientConnected?"stateOk":tmc.available?"stateOff":"stateWait";
  drawSpectrum(info.wispySpectrum);
+ drawBleuio(info);
+ if(technicalPreference===null)setTechnicalVisibility(!(info.bleuio||info.wispySpectrum));else setTechnicalVisibility(technicalPreference);
  if(lastPhase!==info.phase){addEvent(lastPhase===null?"Host state: "+phaseLabel(info.phase):phaseLabel(lastPhase)+" → "+phaseLabel(info.phase));lastPhase=info.phase}
 }
 async function refresh(){
@@ -270,6 +314,7 @@ async function refresh(){
  finally{refreshing=false;refreshBtn.disabled=false}
 }
 refreshBtn.onclick=refresh;
+showTechnical.onchange=()=>{technicalPreference=showTechnical.checked;try{localStorage.setItem("usbHostShowTechnical",String(technicalPreference))}catch(_){ }setTechnicalVisibility(technicalPreference)};
 fetch("/api/status",{cache:"no-store"}).then(response=>response.json()).then(info=>{
  if(info.board){const title="Pico I/O Bridge - "+info.board;pageTitle.textContent=title;document.title=title+" - USB Host"}
  nav.textContent="";

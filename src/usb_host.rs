@@ -47,7 +47,7 @@ use embassy_time::{Duration, Instant, Ticker, Timer, with_timeout};
 use embassy_usb_host::{BusController, BusRoute, BusState, EnumerationError};
 use portable_atomic::{AtomicU32, Ordering};
 
-use crate::{p8055, wispy};
+use crate::{bleuio, p8055, wispy};
 
 const ATTACH_DEBOUNCE_SAMPLES: u16 = 100;
 const CONFIG_DESCRIPTOR_CAPACITY: usize = 512;
@@ -116,6 +116,7 @@ pub(crate) enum Phase {
     Resetting,
     Enumerating,
     CdcReady,
+    BleuioReady,
     FtdiReady,
     P8055Ready,
     WispyReady,
@@ -124,6 +125,7 @@ pub(crate) enum Phase {
     UnsupportedDevice,
     EnumerationError,
     CdcError,
+    BleuioError,
     FtdiError,
     P8055Error,
     WispyError,
@@ -138,6 +140,7 @@ impl Phase {
             Self::Resetting => "RESETTING",
             Self::Enumerating => "ENUMERATING",
             Self::CdcReady => "CDC_READY",
+            Self::BleuioReady => "BLEUIO_READY",
             Self::FtdiReady => "FTDI_READY",
             Self::P8055Ready => "P8055_READY",
             Self::WispyReady => "WISPY_READY",
@@ -146,6 +149,7 @@ impl Phase {
             Self::UnsupportedDevice => "UNSUPPORTED_DEVICE",
             Self::EnumerationError => "ENUMERATION_ERROR",
             Self::CdcError => "CDC_ERROR",
+            Self::BleuioError => "BLEUIO_ERROR",
             Self::FtdiError => "FTDI_ERROR",
             Self::P8055Error => "P8055_ERROR",
             Self::WispyError => "WISPY_ERROR",
@@ -154,7 +158,7 @@ impl Phase {
     }
 
     const fn is_serial_ready(self) -> bool {
-        matches!(self, Self::CdcReady | Self::FtdiReady)
+        matches!(self, Self::CdcReady | Self::BleuioReady | Self::FtdiReady)
     }
 }
 
@@ -369,6 +373,7 @@ pub(crate) struct Status {
     pub(crate) usbtmc_usb488: bool,
     pub(crate) wispy_sweep_count: u32,
     pub(crate) wispy_samples: [u8; wispy::SAMPLE_COUNT],
+    pub(crate) bleuio_catalog: bleuio::Catalog,
     pub(crate) unexpected_toggle_count: u32,
     pub(crate) accepted_zlp_count: u32,
     pub(crate) latest_expected_pid: Option<u8>,
@@ -415,6 +420,7 @@ impl Status {
             usbtmc_usb488: false,
             wispy_sweep_count: 0,
             wispy_samples: [0; wispy::SAMPLE_COUNT],
+            bleuio_catalog: bleuio::Catalog::new(),
             unexpected_toggle_count: 0,
             accepted_zlp_count: 0,
             latest_expected_pid: None,
@@ -460,6 +466,7 @@ impl Status {
         self.usbtmc_usb488 = false;
         self.wispy_sweep_count = 0;
         self.wispy_samples = [0; wispy::SAMPLE_COUNT];
+        self.bleuio_catalog = bleuio::Catalog::new();
     }
 }
 
@@ -1104,6 +1111,43 @@ async fn record_wispy_report_if_current(generation: u32) -> bool {
     true
 }
 
+async fn publish_bleuio_reading_if_current(
+    generation: u32,
+    expected: Phase,
+    reading: bleuio::Reading,
+) -> bool {
+    let mut state = HOST_STATE.lock().await;
+    if state.generation != generation || state.phase != expected {
+        return false;
+    }
+    state
+        .bleuio_catalog
+        .update(reading, Instant::now().as_millis());
+    true
+}
+
+async fn ingest_bleuio_bytes(
+    parser: &mut bleuio::Parser,
+    generation: u32,
+    expected: Phase,
+    bytes: &[u8],
+) -> bool {
+    let mut readings = [None; 4];
+    let mut count = 0;
+    parser.push(bytes, |reading| {
+        if count < readings.len() {
+            readings[count] = Some(reading);
+            count += 1;
+        }
+    });
+    for reading in readings.into_iter().flatten() {
+        if !publish_bleuio_reading_if_current(generation, expected, reading).await {
+            return false;
+        }
+    }
+    true
+}
+
 async fn set_usbtmc_connected(connected: bool) {
     let mut state = HOST_STATE.lock().await;
     state.usbtmc_connected = connected && state.phase == Phase::UsbtmcReady;
@@ -1706,6 +1750,234 @@ where
         CdcAcmHost::new(function, control, bulk_in, bulk_out),
         outcome,
     )
+}
+
+async fn initialize_bleuio<C, I, O>(cdc: &mut CdcAcmHost<C, I, O>) -> Result<(), CdcAcmError>
+where
+    C: UsbPipe<pipe::Control, pipe::InOut>,
+    I: UsbPipe<pipe::Bulk, pipe::In>,
+    O: UsbPipe<pipe::Bulk, pipe::Out>,
+{
+    let mut response = [0_u8; CDC_MAX_TRANSFER];
+    for command in [
+        b"ATE0\r\n".as_slice(),
+        b"ATV1\r\n".as_slice(),
+        b"AT+FINDSCANDATA=FF5B07\r\n".as_slice(),
+    ] {
+        cdc.write(command).await?;
+        cdc.read(&mut response).await?;
+        Timer::after(Duration::from_millis(20)).await;
+    }
+    Ok(())
+}
+
+async fn initialize_bleuio_bulk<O>(bulk_out: &mut O, generation: u32) -> Result<(), PipeError>
+where
+    O: UsbPipe<pipe::Bulk, pipe::Out>,
+{
+    for command in [
+        b"ATE0\r\n".as_slice(),
+        b"ATV1\r\n".as_slice(),
+        b"AT+FINDSCANDATA=FF5B07\r\n".as_slice(),
+    ] {
+        bulk_out.request_out(command, false).await?;
+        let _ = record_tx_if_current(generation, Phase::BleuioReady, command.len()).await;
+        Timer::after(Duration::from_millis(100)).await;
+    }
+    Ok(())
+}
+
+async fn bleuio_usb_in<I>(
+    bulk_in: &mut I,
+    parser: &mut bleuio::Parser,
+    active_session: &AtomicU32,
+    generation: u32,
+    packet_size: usize,
+) -> Result<(), ()>
+where
+    I: UsbPipe<pipe::Bulk, pipe::In>,
+{
+    let mut packet = [0_u8; CDC_MAX_TRANSFER];
+    loop {
+        let count = bulk_in
+            .request_in(&mut packet[..packet_size])
+            .await
+            .map_err(|_| ())?;
+        if !record_rx_if_current(generation, Phase::BleuioReady, count).await
+            || !ingest_bleuio_bytes(parser, generation, Phase::BleuioReady, &packet[..count]).await
+        {
+            return Err(());
+        }
+
+        let session = active_session.load(Ordering::Acquire);
+        if session != 0 && count != 0 {
+            let mut data = CdcData::empty();
+            data.bytes[..count].copy_from_slice(&packet[..count]);
+            data.len = count as u8;
+            USB_TO_BRIDGE.send(BridgeFrame { session, data }).await;
+        }
+    }
+}
+
+async fn bleuio_commands_and_out<O>(
+    bulk_out: &mut O,
+    active_session: &AtomicU32,
+    generation: u32,
+    next_bridge_session: &mut u32,
+) -> Result<(), ()>
+where
+    O: UsbPipe<pipe::Bulk, pipe::Out>,
+{
+    loop {
+        match select(HOST_COMMANDS.receive(), BRIDGE_TO_USB.receive()).await {
+            Either::First(
+                command @ Command {
+                    sequence,
+                    operation: Operation::BridgeOpen,
+                    ..
+                },
+            ) => {
+                if !command_is_current(&command).await {
+                    reject_command(command, Error::NotReady);
+                    continue;
+                }
+                if active_session.load(Ordering::Acquire) != 0
+                    || !set_bridge_connected_if_current(generation, Phase::BleuioReady, false, true)
+                        .await
+                {
+                    reject_command(command, Error::ResourceBusy);
+                    continue;
+                }
+                *next_bridge_session = next_bridge_session.wrapping_add(1);
+                let session = *next_bridge_session;
+                active_session.store(session, Ordering::Release);
+                send_reply(Reply {
+                    sequence,
+                    result: ReplyResult::BridgeOpen(Ok(session)),
+                });
+                info!("raw BleuIO serial bridge acquired");
+            }
+            Either::First(Command {
+                sequence,
+                operation: Operation::BridgeClose { session },
+                ..
+            }) if session == active_session.load(Ordering::Acquire) => {
+                active_session.store(0, Ordering::Release);
+                let released =
+                    set_bridge_connected_if_current(generation, Phase::BleuioReady, true, false)
+                        .await;
+                send_reply(Reply {
+                    sequence,
+                    result: ReplyResult::BridgeClose(if released {
+                        Ok(())
+                    } else {
+                        Err(Error::NotReady)
+                    }),
+                });
+                if !released
+                    || !matches!(
+                        with_timeout(
+                            CLASS_CONTROL_TIMEOUT,
+                            initialize_bleuio_bulk(bulk_out, generation),
+                        )
+                        .await,
+                        Ok(Ok(()))
+                    )
+                {
+                    return Err(());
+                }
+                info!("raw BleuIO serial bridge released; managed scan resumed");
+            }
+            Either::First(command) => {
+                reject_command(
+                    command,
+                    if active_session.load(Ordering::Acquire) == 0 {
+                        Error::NotReady
+                    } else {
+                        Error::ResourceBusy
+                    },
+                );
+            }
+            Either::Second(frame) => {
+                if frame.session != active_session.load(Ordering::Acquire) {
+                    continue;
+                }
+                bridge_write_frame(
+                    bulk_out,
+                    generation,
+                    Phase::BleuioReady,
+                    Phase::BleuioError,
+                    frame,
+                )
+                .await
+                .map_err(|_| ())?;
+                BRIDGE_OUT_ACK.signal(frame.session);
+            }
+        }
+    }
+}
+
+async fn manage_bleuio<'d, H, C, I, O>(
+    controller: &mut BusController<'d, H>,
+    mut cdc: CdcAcmHost<C, I, O>,
+    generation: u32,
+    next_bridge_session: &mut u32,
+) where
+    H: UsbHostController<'d>,
+    C: UsbPipe<pipe::Control, pipe::InOut>,
+    I: UsbPipe<pipe::Bulk, pipe::In>,
+    O: UsbPipe<pipe::Bulk, pipe::Out>,
+{
+    let initialized = matches!(
+        with_timeout(CLASS_CONTROL_TIMEOUT, initialize_bleuio(&mut cdc),).await,
+        Ok(Ok(()))
+    );
+    if !initialized
+        || !set_phase_if_current(generation, Phase::Enumerating, Phase::BleuioReady).await
+    {
+        let _ =
+            set_error_phase_if_current(generation, Phase::Enumerating, Phase::BleuioError).await;
+        return;
+    }
+
+    info!("BleuIO managed HibouAir scan ready");
+    let mut parser = bleuio::Parser::new();
+    let packet_size = usize::from(cdc.function().bulk_in_endpoint.max_packet_size);
+    let (function, control, mut bulk_in, mut bulk_out) = cdc.into_parts();
+    let active_session = AtomicU32::new(0);
+    let result = select3(
+        bridge_wait_for_disconnect(controller),
+        bleuio_usb_in(
+            &mut bulk_in,
+            &mut parser,
+            &active_session,
+            generation,
+            packet_size,
+        ),
+        bleuio_commands_and_out(
+            &mut bulk_out,
+            &active_session,
+            generation,
+            next_bridge_session,
+        ),
+    )
+    .await;
+    let failed = matches!(result, Either3::Second(Err(())) | Either3::Third(Err(())));
+    let session = active_session.load(Ordering::Acquire);
+    if session != 0 {
+        active_session.store(0, Ordering::Release);
+        BRIDGE_EVENT.signal(BridgeEvent::Closed { session });
+    }
+    if failed {
+        let _ = fail_current_session(
+            generation,
+            Phase::BleuioReady,
+            Phase::BleuioError,
+            Error::Transfer,
+        )
+        .await;
+    }
+    drop((function, control, bulk_in, bulk_out));
 }
 
 async fn run_ftdi_bridge<'d, H, C, I, O>(
@@ -3057,7 +3329,18 @@ async fn run(hardware: Hardware) {
                     if controls_ready {
                         cdc.reset_data_toggles();
                         let mut cdc_rx_buffer = CdcRxBuffer::empty();
-                        if set_phase_if_current(
+                        if bleuio::is_bleuio(
+                            enumeration.device_desc.vendor_id,
+                            enumeration.device_desc.product_id,
+                        ) {
+                            manage_bleuio(
+                                &mut controller,
+                                cdc,
+                                session_generation,
+                                &mut next_bridge_session,
+                            )
+                            .await;
+                        } else if set_phase_if_current(
                             session_generation,
                             Phase::Enumerating,
                             Phase::CdcReady,

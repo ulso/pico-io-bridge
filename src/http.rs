@@ -297,14 +297,59 @@ async fn write_usb_host_status_response(
         wispy.push_str("null").unwrap();
     }
 
-    let mut body = String::<1280>::new();
+    let mut bleuio = String::<3328>::new();
+    if crate::bleuio::is_bleuio(status.vendor_id, status.product_id) {
+        write!(
+            bleuio,
+            "{{\"available\":{},\"scanning\":{},\"updateCount\":{},\"nowMs\":{},\"sensors\":[",
+            status.phase == crate::usb_host::Phase::BleuioReady,
+            status.phase == crate::usb_host::Phase::BleuioReady && !status.bridge_connected,
+            status.bleuio_catalog.update_count,
+            embassy_time::Instant::now().as_millis(),
+        )
+        .unwrap();
+        let mut first = true;
+        for sensor in status.bleuio_catalog.sensors.iter().flatten() {
+            if !first {
+                bleuio.push(',').unwrap();
+            }
+            first = false;
+            let reading = sensor.reading;
+            write!(
+                bleuio,
+                "{{\"id\":\"{:06X}\",\"type\":\"{}\",\"lastSeenMs\":{},\"reports\":{},\"ambientLight\":{},\"noiseDbSpl\":{},\"pressureTenthsHpa\":{},\"temperatureTenthsC\":{},\"humidityTenthsPercent\":{},\"vocRaw\":{},\"vocType\":{},\"pm1Tenths\":{},\"pm25Tenths\":{},\"pm10Tenths\":{},\"co2Ppm\":{}}}",
+                reading.board_id,
+                reading.sensor_type.as_str(),
+                sensor.last_seen_ms,
+                sensor.reports,
+                reading.ambient_light,
+                reading.noise_db_spl,
+                reading.pressure_tenths_hpa,
+                reading.temperature_tenths_c,
+                reading.humidity_tenths_percent,
+                reading.voc_raw,
+                reading.voc_type,
+                reading.pm1_tenths,
+                reading.pm25_tenths,
+                reading.pm10_tenths,
+                reading.co2_ppm,
+            )
+            .unwrap();
+        }
+        bleuio.push_str("]}").unwrap();
+    } else {
+        bleuio.push_str("null").unwrap();
+    }
+
+    let mut body = String::<4608>::new();
     write!(
         body,
-        "{{\"phase\":\"{}\",\"ready\":{},\"speed\":{},\"address\":{},\"vendorId\":{},\"productId\":{},\"rxBytes\":{},\"txBytes\":{},\"errorCount\":{},\"maxTransfer\":{},\"ftdiBaudRate\":{},\"usb488\":{},\"resetCause\":\"{}\",\"serialBridge\":{{\"port\":{},\"service\":\"_usbserial._tcp\",\"available\":{},\"clientConnected\":{}}},\"usbtmcBridge\":{{\"port\":{},\"service\":\"_usbtmc._tcp\",\"available\":{},\"clientConnected\":{}}},\"wispySpectrum\":{}}}",
+        "{{\"phase\":\"{}\",\"ready\":{},\"speed\":{},\"address\":{},\"vendorId\":{},\"productId\":{},\"rxBytes\":{},\"txBytes\":{},\"errorCount\":{},\"maxTransfer\":{},\"ftdiBaudRate\":{},\"usb488\":{},\"resetCause\":\"{}\",\"serialBridge\":{{\"port\":{},\"service\":\"_usbserial._tcp\",\"available\":{},\"clientConnected\":{}}},\"usbtmcBridge\":{{\"port\":{},\"service\":\"_usbtmc._tcp\",\"available\":{},\"clientConnected\":{}}},\"wispySpectrum\":{},\"bleuio\":{}}}",
         status.phase.as_str(),
         matches!(
             status.phase,
             crate::usb_host::Phase::CdcReady
+                | crate::usb_host::Phase::BleuioReady
                 | crate::usb_host::Phase::FtdiReady
                 | crate::usb_host::Phase::P8055Ready
                 | crate::usb_host::Phase::WispyReady
@@ -332,13 +377,16 @@ async fn write_usb_host_status_response(
         crate::USB_SERIAL_PORT,
         matches!(
             status.phase,
-            crate::usb_host::Phase::CdcReady | crate::usb_host::Phase::FtdiReady
+            crate::usb_host::Phase::CdcReady
+                | crate::usb_host::Phase::BleuioReady
+                | crate::usb_host::Phase::FtdiReady
         ),
         status.bridge_connected,
         crate::USBTMC_PORT,
         status.phase == crate::usb_host::Phase::UsbtmcReady,
         status.usbtmc_connected,
         wispy,
+        bleuio,
     )
     .unwrap();
     write_http_response(socket, "application/json", body.as_bytes()).await

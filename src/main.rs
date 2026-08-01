@@ -13,6 +13,8 @@ compile_error!("mcp2515 and mcp25625 are mutually exclusive");
 
 #[cfg(feature = "i2c")]
 mod amg8833;
+#[cfg(feature = "board-adafruit-rp2040-usb-host")]
+mod bleuio;
 #[cfg(feature = "i2c")]
 mod bme688;
 #[cfg(feature = "i2c")]
