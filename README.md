@@ -228,6 +228,24 @@ Select a different board while flashing in the same way as while building:
 cargo run --release --no-default-features --features board-adafruit-kb2040
 ```
 
+## Firmware releases
+
+GitHub Actions builds UF2 images for all supported board profiles on every push
+to `main`, on pull requests, and when run manually. These development builds are
+available as workflow artifacts for 30 days.
+
+Pushing a semantic-version tag publishes a GitHub Release after all four board
+builds have succeeded:
+
+```sh
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+The release contains one clearly named UF2 image per board profile together
+with a `SHA256SUMS` file. GitHub generates the release title and notes; no
+manual entry on the GitHub website is required.
+
 ## Network Use
 
 All current board profiles use the embedded DHCP server. The device uses its
