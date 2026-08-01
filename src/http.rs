@@ -1,6 +1,6 @@
 use core::fmt::Write;
 
-#[cfg(feature = "can")]
+#[cfg(any(feature = "can", feature = "board-adafruit-rp2040-usb-host"))]
 use embassy_futures::select::Either;
 use embassy_futures::select::select;
 use embassy_net::tcp::TcpSocket;
@@ -11,13 +11,19 @@ use heapless::String;
 use crate::can::{CAN_EVENTS, CanEvent, handle_can_ws_text, write_can_frame_json};
 #[cfg(feature = "i2c")]
 use crate::i2c::handle_i2c_ws_text;
-#[cfg(any(feature = "can", feature = "i2c"))]
+#[cfg(any(
+    feature = "can",
+    feature = "i2c",
+    feature = "board-adafruit-rp2040-usb-host"
+))]
 use crate::websocket::{self, Frame};
 
 const HTTP_SOCKETS: usize = crate::HTTP_SOCKETS;
 const HTTP_PEER_CLOSE_TIMEOUT: Duration = Duration::from_secs(2);
 
 enum WebSocketEndpoint {
+    #[cfg(feature = "board-adafruit-rp2040-usb-host")]
+    Audio,
     #[cfg(feature = "can")]
     Can,
     #[cfg(feature = "i2c")]
@@ -25,7 +31,7 @@ enum WebSocketEndpoint {
 }
 
 #[cfg(feature = "board-adafruit-rp2040-usb-host")]
-const API_STATUS_CAPABILITIES: &str = r#","interfaces":["usb-host","usb-serial","usbtmc","i2c","scpi"],"usbSerial":{"protocol":"RAW","port":7000,"service":"_usbserial._tcp"},"usbtmc":{"protocol":"SCPI-RAW","port":5026,"service":"_usbtmc._tcp"},"websocket":"/i2c","websockets":["/i2c"],"pages":{"i2c":"/","usb":"/usb-host.html","scpi":"/scpi.html"}"#;
+const API_STATUS_CAPABILITIES: &str = r#","interfaces":["usb-host","usb-serial","usbtmc","i2c","scpi"],"usbSerial":{"protocol":"RAW","port":7000,"service":"_usbserial._tcp"},"usbtmc":{"protocol":"SCPI-RAW","port":5026,"service":"_usbtmc._tcp"},"websocket":"/i2c","websockets":["/i2c","/audio"],"audio":{"protocol":"PCM_S16LE","sampleRateHz":48000,"channels":1,"websocket":"/audio"},"pages":{"i2c":"/","usb":"/usb-host.html","scpi":"/scpi.html"}"#;
 #[cfg(all(
     not(feature = "board-adafruit-rp2040-usb-host"),
     feature = "can",
@@ -52,6 +58,11 @@ const API_STATUS_CAPABILITIES: &str =
     r#","interfaces":["scpi"],"websockets":[],"pages":{"scpi":"/scpi.html"}"#;
 
 fn websocket_endpoint(request: &str) -> Option<WebSocketEndpoint> {
+    #[cfg(feature = "board-adafruit-rp2040-usb-host")]
+    if request.starts_with("GET /audio ") {
+        return Some(WebSocketEndpoint::Audio);
+    }
+
     #[cfg(feature = "can")]
     if request.starts_with("GET /can ") || request.starts_with("GET /ws ") {
         return Some(WebSocketEndpoint::Can);
@@ -351,10 +362,30 @@ async fn write_usb_host_status_response(
         bleuio.push_str("null").unwrap();
     }
 
-    let mut body = String::<4736>::new();
+    let mut audio = String::<256>::new();
+    if matches!(
+        status.phase,
+        crate::usb_host::Phase::AudioReady | crate::usb_host::Phase::AudioError
+    ) {
+        write!(
+            audio,
+            "{{\"available\":{},\"sampleRateHz\":{},\"sampleFormat\":\"S16LE\",\"channels\":1,\"samplesPerBlock\":{},\"blockSequence\":{},\"packetCount\":{},\"droppedFrames\":{},\"websocket\":\"/audio\"}}",
+            status.phase == crate::usb_host::Phase::AudioReady,
+            crate::audio_stream::SAMPLE_RATE_HZ,
+            crate::audio_stream::SAMPLES_PER_BLOCK,
+            status.audio_block_sequence,
+            status.audio_packet_count,
+            status.audio_dropped_frames,
+        )
+        .unwrap();
+    } else {
+        audio.push_str("null").unwrap();
+    }
+
+    let mut body = String::<6600>::new();
     write!(
         body,
-        "{{\"phase\":\"{}\",\"ready\":{},\"speed\":{},\"address\":{},\"vendorId\":{},\"productId\":{},\"rxBytes\":{},\"txBytes\":{},\"errorCount\":{},\"maxTransfer\":{},\"ftdiBaudRate\":{},\"usb488\":{},\"resetCause\":\"{}\",\"serialBridge\":{{\"port\":{},\"service\":\"_usbserial._tcp\",\"available\":{},\"clientConnected\":{}}},\"usbtmcBridge\":{{\"port\":{},\"service\":\"_usbtmc._tcp\",\"available\":{},\"clientConnected\":{}}},\"wispySpectrum\":{},\"bleuio\":{}}}",
+        "{{\"phase\":\"{}\",\"ready\":{},\"speed\":{},\"address\":{},\"vendorId\":{},\"productId\":{},\"rxBytes\":{},\"txBytes\":{},\"errorCount\":{},\"maxTransfer\":{},\"ftdiBaudRate\":{},\"usb488\":{},\"resetCause\":\"{}\",\"serialBridge\":{{\"port\":{},\"service\":\"_usbserial._tcp\",\"available\":{},\"clientConnected\":{}}},\"usbtmcBridge\":{{\"port\":{},\"service\":\"_usbtmc._tcp\",\"available\":{},\"clientConnected\":{}}},\"wispySpectrum\":{},\"bleuio\":{},\"audioSpectrum\":{}}}",
         status.phase.as_str(),
         matches!(
             status.phase,
@@ -364,6 +395,7 @@ async fn write_usb_host_status_response(
                 | crate::usb_host::Phase::P8055Ready
                 | crate::usb_host::Phase::WispyReady
                 | crate::usb_host::Phase::UsbtmcReady
+                | crate::usb_host::Phase::AudioReady
         ),
         speed,
         address,
@@ -378,6 +410,14 @@ async fn write_usb_host_status_response(
                 if status.phase == crate::usb_host::Phase::UsbtmcReady =>
             {
                 crate::usb_host::USBTMC_MAX_TRANSFER
+            }
+            Some(crate::usb_host::HostSpeed::Full)
+                if matches!(
+                    status.phase,
+                    crate::usb_host::Phase::AudioReady | crate::usb_host::Phase::AudioError
+                ) =>
+            {
+                embassy_rp_pio_usb_host::audio::CAPTURE_PACKET_CAPACITY
             }
             Some(crate::usb_host::HostSpeed::Full) | None => crate::USB_HOST_CDC_MAX_TRANSFER,
         },
@@ -397,6 +437,7 @@ async fn write_usb_host_status_response(
         status.usbtmc_connected,
         wispy,
         bleuio,
+        audio,
     )
     .unwrap();
     write_http_response(socket, "application/json", body.as_bytes()).await
@@ -519,6 +560,8 @@ async fn serve_http_connection(
             socket.set_timeout(Some(crate::WS_TIMEOUT));
             socket.set_keep_alive(Some(crate::WS_KEEPALIVE));
             match endpoint {
+                #[cfg(feature = "board-adafruit-rp2040-usb-host")]
+                WebSocketEndpoint::Audio => audio_websocket_loop(socket, rx_buf).await?,
                 #[cfg(feature = "can")]
                 WebSocketEndpoint::Can => can_websocket_loop(socket, rx_buf).await?,
                 #[cfg(feature = "i2c")]
@@ -773,6 +816,60 @@ setTimeout(connect,100);
     }
 
     Ok(())
+}
+
+#[cfg(feature = "board-adafruit-rp2040-usb-host")]
+async fn audio_websocket_loop(
+    socket: &mut TcpSocket<'_>,
+    buf: &mut [u8],
+) -> Result<(), embassy_net::tcp::Error> {
+    const READY: &[u8] = b"{\"type\":\"audio.ready\",\"format\":\"S16LE\",\"sampleRateHz\":48000,\"channels\":1,\"samplesPerBlock\":480,\"mode\":\"fftSnapshots\"}";
+    const BUSY: &[u8] = b"{\"type\":\"audio.error\",\"code\":\"client_busy\",\"message\":\"Only one audio stream client is supported\"}";
+
+    let Some(_client) = crate::audio_stream::ClientGuard::acquire() else {
+        websocket::send_text(socket, BUSY).await?;
+        websocket::send_close(socket).await?;
+        return Ok(());
+    };
+
+    websocket::send_text(socket, READY).await?;
+    let mut encoded = [0_u8; crate::audio_stream::FRAME_BYTES];
+    encoded[..4].copy_from_slice(b"PCM1");
+    encoded[8..10].copy_from_slice(&(crate::audio_stream::SAMPLES_PER_BLOCK as u16).to_le_bytes());
+    encoded[10..12].copy_from_slice(&0_u16.to_le_bytes());
+
+    loop {
+        if !socket.may_recv() {
+            return Ok(());
+        }
+
+        match select(socket.wait_read_ready(), crate::audio_stream::next_block()).await {
+            Either::First(()) => {
+                let Some(frame) = websocket::read_frame(socket, buf).await? else {
+                    return Ok(());
+                };
+                match frame {
+                    Frame::Close => {
+                        websocket::send_close(socket).await?;
+                        return Ok(());
+                    }
+                    Frame::Ping(payload) => websocket::send_pong(socket, payload).await?,
+                    Frame::Pong | Frame::Text(_) | Frame::Binary => {}
+                }
+            }
+            Either::Second(block) => {
+                encoded[4..8].copy_from_slice(&block.sequence.to_le_bytes());
+                encoded[10..12].copy_from_slice(&block.flags.to_le_bytes());
+                for (destination, sample) in encoded[crate::audio_stream::FRAME_HEADER_BYTES..]
+                    .chunks_exact_mut(2)
+                    .zip(block.samples)
+                {
+                    destination.copy_from_slice(&sample.to_le_bytes());
+                }
+                websocket::send_binary(socket, &encoded).await?;
+            }
+        }
+    }
 }
 
 #[cfg(feature = "can")]

@@ -13,6 +13,8 @@ compile_error!("mcp2515 and mcp25625 are mutually exclusive");
 
 #[cfg(feature = "i2c")]
 mod amg8833;
+#[cfg(feature = "board-adafruit-rp2040-usb-host")]
+mod audio_stream;
 #[cfg_attr(not(feature = "board-adafruit-rp2040-usb-host"), allow(dead_code))]
 mod bleuio;
 #[cfg(feature = "i2c")]
@@ -45,7 +47,11 @@ mod scpi;
 mod seesaw_encoder;
 #[cfg(feature = "board-adafruit-rp2040-usb-host")]
 mod usb_host;
-#[cfg(any(feature = "can", feature = "i2c"))]
+#[cfg(any(
+    feature = "can",
+    feature = "i2c",
+    feature = "board-adafruit-rp2040-usb-host"
+))]
 mod websocket;
 #[cfg(feature = "board-adafruit-rp2040-usb-host")]
 mod wispy;

@@ -32,7 +32,7 @@ button{border:1px solid #9aa7b2;background:#fff;color:#17202a;border-radius:6px;
 .hidden{display:none}
 .spectrumMeta{display:flex;flex-wrap:wrap;justify-content:space-between;gap:8px;color:#65717d;font-size:12px;margin:-4px 0 10px}
 .sensorGrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:10px}.sensorCard{border:1px solid #d7dee6;border-radius:7px;padding:12px;background:#f9fafb}.sensorHead{display:flex;justify-content:space-between;gap:10px;margin-bottom:10px}.sensorHead strong{font-size:15px}.sensorHead span,.sensorMeta{color:#65717d;font-size:11px}.sensorValues{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:7px}.sensorValue{border-top:1px solid #e4e9ee;padding-top:7px}.sensorValue span{display:block;color:#65717d;font-size:10px}.sensorValue strong{font-size:15px}.emptyState{color:#65717d;font-size:13px;margin:0}
-#spectrumCanvas{display:block;width:100%;height:280px;border:1px solid #d7dee6;border-radius:6px;background:#f9fafb}
+#spectrumCanvas,#audioCanvas{display:block;width:100%;height:280px;border:1px solid #d7dee6;border-radius:6px;background:#f9fafb}
 h2{font-size:15px;margin:0 0 12px;font-weight:700}
 .facts{display:grid;grid-template-columns:145px minmax(0,1fr);margin:0}
 .facts dt,.facts dd{padding:8px 0;border-bottom:1px solid #edf0f3}
@@ -45,7 +45,7 @@ code{font:12px ui-monospace,SFMono-Regular,Menlo,monospace;color:#173f73}
 @media(max-width:820px){.metrics{grid-template-columns:repeat(3,minmax(0,1fr))}}
 @media(max-width:680px){main{padding:14px}header,.toolbar{align-items:flex-start;flex-direction:column}.layout{grid-template-columns:1fr}.wide{grid-column:auto}.metrics{grid-template-columns:repeat(2,minmax(0,1fr))}.facts{grid-template-columns:110px minmax(0,1fr)}.toolbarActions{width:100%;justify-content:space-between}}
 @media(max-width:420px){.tabs a{flex:1;text-align:center}.metrics{grid-template-columns:1fr 1fr}}
-@media(prefers-color-scheme:dark){body{background:#111820;color:#edf2f7}.model,.hint,.metric span,.facts dt,.events time,.spectrumMeta,.toggle,.sensorHead span,.sensorMeta,.sensorValue span,.emptyState{color:#b9c3cf}.panel,.metric,.tabs a,button,.sensorCard{background:#17212b;color:#edf2f7;border-color:#3b4b5c}.tabs a.active{background:#edf2f7;color:#111820}.facts dt,.facts dd,.events li,.sensorValue{border-color:#273544}code{color:#8ab8ee}#spectrumCanvas{background:#111820;border-color:#3b4b5c}}
+@media(prefers-color-scheme:dark){body{background:#111820;color:#edf2f7}.model,.hint,.metric span,.facts dt,.events time,.spectrumMeta,.toggle,.sensorHead span,.sensorMeta,.sensorValue span,.emptyState{color:#b9c3cf}.panel,.metric,.tabs a,button,.sensorCard{background:#17212b;color:#edf2f7;border-color:#3b4b5c}.tabs a.active{background:#edf2f7;color:#111820}.facts dt,.facts dd,.events li,.sensorValue{border-color:#273544}code{color:#8ab8ee}#spectrumCanvas,#audioCanvas{background:#111820;border-color:#3b4b5c}}
 </style>
 </head>
 <body>
@@ -62,7 +62,7 @@ code{font:12px ui-monospace,SFMono-Regular,Menlo,monospace;color:#173f73}
 
 <div class="toolbar">
 <div class="toolbarActions"><button id="refresh">Refresh</button><label class="toggle"><input id="showTechnical" type="checkbox" checked> Show technical details</label></div>
-<span class="hint">Read-only status updates every 2 seconds</span>
+<span id="pollHint" class="hint">Read-only status updates every 2 seconds</span>
 </div>
 
 <section class="metrics" aria-label="USB host metrics">
@@ -119,6 +119,12 @@ code{font:12px ui-monospace,SFMono-Regular,Menlo,monospace;color:#173f73}
 <canvas id="spectrumCanvas" role="img" aria-label="Wi-Spy spectrum power by frequency"></canvas>
 </section>
 
+<section id="audioPanel" class="panel wide hidden">
+<h2>USB Measurement Microphone · Audio Spectrum</h2>
+<div class="spectrumMeta"><span id="audioRange">48 kHz mono · 16-bit PCM</span><span id="audioLevel">Waiting for audio samples</span></div>
+<canvas id="audioCanvas" role="img" aria-label="USB microphone audio spectrum in dBFS"></canvas>
+</section>
+
 <section class="panel wide">
 <h2>Page-session State Changes</h2>
 <ul id="events" class="events"><li><time>—</time><span>Waiting for host status</span></li></ul>
@@ -131,6 +137,7 @@ const nav=document.getElementById("interfaceNav");
 const pageTitle=document.getElementById("pageTitle");
 const statusEl=document.getElementById("status");
 const statusText=document.getElementById("statusText");
+const pollHint=document.getElementById("pollHint");
 const refreshBtn=document.getElementById("refresh");
 const showTechnical=document.getElementById("showTechnical");
 const technicalPanels=[...document.querySelectorAll(".technicalPanel")];
@@ -158,6 +165,10 @@ const spectrumPanel=document.getElementById("spectrumPanel");
 const spectrumCanvas=document.getElementById("spectrumCanvas");
 const spectrumRange=document.getElementById("spectrumRange");
 const spectrumSweeps=document.getElementById("spectrumSweeps");
+const audioPanel=document.getElementById("audioPanel");
+const audioCanvas=document.getElementById("audioCanvas");
+const audioRange=document.getElementById("audioRange");
+const audioLevel=document.getElementById("audioLevel");
 const bleuioPanel=document.getElementById("bleuioPanel");
 const bleuioState=document.getElementById("bleuioState");
 const bleuioCount=document.getElementById("bleuioCount");
@@ -165,7 +176,44 @@ const sensorGrid=document.getElementById("sensorGrid");
 const eventsEl=document.getElementById("events");
 let lastPhase=null;
 let refreshing=false;
+let pollDelay=2000;
 let events=[];
+let audioSocket=null;
+let audioReconnect=null;
+let audioActive=false;
+let audioMeta=null;
+let audioSpectrumData=null;
+const audioWorkerSource=`
+const N=4096,SAMPLE_RATE=48000,FIRST_BIN=16,LAST_BIN=1536;
+const ring=new Int16Array(N),real=new Float64Array(N),imag=new Float64Array(N),smoothed=new Float32Array(LAST_BIN-FIRST_BIN+1);
+let writeIndex=0,filled=0,sinceAnalysis=0,lastSequence=null,streamDrops=0,analyses=0;
+function reset(){ring.fill(0);smoothed.fill(-100);writeIndex=0;filled=0;sinceAnalysis=0;lastSequence=null;streamDrops=0;analyses=0}
+function transform(){
+ for(let i=1,j=0;i<N;i++){let bit=N>>1;for(;j&bit;bit>>=1)j^=bit;j^=bit;if(i<j){let t=real[i];real[i]=real[j];real[j]=t;t=imag[i];imag[i]=imag[j];imag[j]=t}}
+ for(let length=2;length<=N;length<<=1){const angle=-2*Math.PI/length,wr0=Math.cos(angle),wi0=Math.sin(angle),half=length>>1;for(let start=0;start<N;start+=length){let wr=1,wi=0;for(let offset=0;offset<half;offset++){const even=start+offset,odd=even+half,tr=wr*real[odd]-wi*imag[odd],ti=wr*imag[odd]+wi*real[odd],er=real[even],ei=imag[even];real[even]=er+tr;imag[even]=ei+ti;real[odd]=er-tr;imag[odd]=ei-ti;const nextWr=wr*wr0-wi*wi0;wi=wr*wi0+wi*wr0;wr=nextWr}}}
+}
+function analyze(){
+ let mean=0;for(let i=0;i<N;i++)mean+=ring[i];mean/=N;
+ let sumSquares=0,peak=0;for(let i=0;i<N;i++){const sample=ring[(writeIndex+i)&(N-1)]-mean,window=0.5-0.5*Math.cos(2*Math.PI*i/(N-1));real[i]=sample*window;imag[i]=0;sumSquares+=sample*sample;peak=Math.max(peak,Math.abs(sample))}
+ transform();
+ const output=new Float32Array(smoothed.length),normalizer=N*32768/4;
+ for(let bin=FIRST_BIN;bin<=LAST_BIN;bin++){const magnitude=Math.hypot(real[bin],imag[bin]),value=Math.max(-100,Math.min(0,20*Math.log10(Math.max(1e-12,magnitude/normalizer)))),index=bin-FIRST_BIN;smoothed[index]=analyses?0.65*smoothed[index]+0.35*value:value;output[index]=smoothed[index]}
+ analyses++;
+ const rms=Math.sqrt(sumSquares/N)/32768,rmsDbfs=rms>0?20*Math.log10(rms):-100,peakDbfs=peak>0?20*Math.log10(peak/32768):-100;
+ postMessage({dbfs:output.buffer,binWidthHz:SAMPLE_RATE/N,firstBin:FIRST_BIN,rmsDbfs,peakDbfs,streamDrops},[output.buffer]);
+}
+onmessage=event=>{
+ if(event.data==="reset"){reset();return}
+ const buffer=event.data,view=new DataView(buffer);if(view.byteLength<12||view.getUint32(0,true)!==0x314d4350)return;
+ const sequence=view.getUint32(4,true),count=view.getUint16(8,true),flags=view.getUint16(10,true);if(12+count*2>view.byteLength)return;
+ if(flags&1){ring.fill(0);writeIndex=0;filled=0;sinceAnalysis=0;lastSequence=null}
+ if(lastSequence!==null){const gap=(sequence-((lastSequence+1)>>>0))>>>0;if(gap<100000)streamDrops+=gap}lastSequence=sequence;
+ for(let i=0;i<count;i++){ring[writeIndex]=view.getInt16(12+i*2,true);writeIndex=(writeIndex+1)&(N-1);filled=Math.min(N,filled+1)}
+ sinceAnalysis+=count;if(filled===N&&sinceAnalysis>=N){sinceAnalysis%=N;analyze()}
+};
+reset();`;
+const audioWorker=new Worker(URL.createObjectURL(new Blob([audioWorkerSource],{type:"text/javascript"})));
+audioWorker.onmessage=event=>{const message=event.data;audioSpectrumData={dbfs:new Float32Array(message.dbfs),binWidthHz:Number(message.binWidthHz),firstBin:Number(message.firstBin),rmsDbfs:Number(message.rmsDbfs),peakDbfs:Number(message.peakDbfs),streamDrops:Number(message.streamDrops)};drawAudioSpectrum(audioSpectrumData)};
 let technicalPreference=null;try{const saved=localStorage.getItem("usbHostShowTechnical");if(saved!==null)technicalPreference=saved==="true"}catch(_){ }
 function phaseLabel(value){return String(value||"-").toLowerCase().split("_").map(word=>word==="bleuio"?"BleuIO":word.charAt(0).toUpperCase()+word.slice(1)).join(" ")}
 function resetCauseLabel(value){
@@ -181,6 +229,7 @@ function deviceName(info){
  if(info.vendorId===0x2dcf&&info.productId===0x6002)return "BleuIO";
  if(info.vendorId===0x10cf&&info.productId>=0x5500&&info.productId<=0x5503)return "Velleman K8055 / P8055";
  if(info.vendorId===0x2a8d&&info.productId===0xb318)return "Keysight 34450A";
+ if(info.vendorId===0x17ae&&info.productId===0x000e)return "NAD room-correction microphone";
  if(isWispy(info))return "MetaGeek Wi-Spy Original";
  if(isFtdi(info))return info.productId===0x6001?"FTDI FT232 / FT245":"FTDI USB serial";
  if(info.vendorId!==null||info.productId!==null)return "USB device";
@@ -196,6 +245,7 @@ function deviceClass(info){
  if(info.phase==="FTDI_READY"||info.phase==="FTDI_ERROR")return "FTDI UART";
  if(info.phase==="CDC_READY"||info.phase==="CDC_ERROR")return "CDC-ACM";
  if(info.phase==="USBTMC_READY"||info.phase==="USBTMC_ERROR")return info.usb488?"USBTMC-USB488":"USBTMC";
+ if(info.phase==="AUDIO_READY"||info.phase==="AUDIO_ERROR")return "USB Audio 1.0 / mono capture";
  return "-";
 }
 function driverName(info){
@@ -211,6 +261,8 @@ function driverName(info){
  if(info.phase==="CDC_ERROR")return "CDC-ACM (error)";
  if(info.phase==="USBTMC_READY")return "USBTMC";
  if(info.phase==="USBTMC_ERROR")return "USBTMC (error)";
+ if(info.phase==="AUDIO_READY")return "UAC1 isochronous capture";
+ if(info.phase==="AUDIO_ERROR")return "UAC1 capture (error)";
  if(info.phase==="UNSUPPORTED_DEVICE")return "Not installed";
  return "-";
 }
@@ -262,15 +314,53 @@ function drawSpectrum(spectrum){
  ctx.lineTo(width-pad.right,height-pad.bottom);ctx.lineTo(pad.left,height-pad.bottom);ctx.closePath();ctx.fillStyle=dark?"rgba(64,170,255,.20)":"rgba(31,122,77,.18)";ctx.fill();
  ctx.beginPath();for(let i=0;i<dbm.length;i++){const x=pad.left+i/(dbm.length-1)*plotW,y=pad.top+(-40-Math.max(-100,Math.min(-40,dbm[i])))/60*plotH;if(i===0)ctx.moveTo(x,y);else ctx.lineTo(x,y)}ctx.strokeStyle=dark?"#40aaff":"#1f7a4d";ctx.lineWidth=2*ratio;ctx.stroke();
 }
+function scheduleAudioReconnect(){if(audioReconnect)clearTimeout(audioReconnect);if(audioActive)audioReconnect=setTimeout(connectAudioStream,1000)}
+function connectAudioStream(){
+ if(!audioActive||audioSocket&&audioSocket.readyState<2)return;
+ const path=audioMeta&&audioMeta.websocket||"/audio",socket=new WebSocket((location.protocol==="https:"?"wss://":"ws://")+location.host+path);audioSocket=socket;socket.binaryType="arraybuffer";
+ socket.onopen=()=>{if(audioSocket!==socket)return;audioLevel.textContent="Audio stream connected · filling 4096-sample FFT window"};
+ socket.onmessage=event=>{if(audioSocket!==socket||typeof event.data==="string")return;audioWorker.postMessage(event.data,[event.data])};
+ socket.onclose=()=>{if(audioSocket===socket)audioSocket=null;if(audioActive){audioLevel.textContent="Audio stream reconnecting…";scheduleAudioReconnect()}};
+ socket.onerror=()=>{if(audioSocket===socket)audioLevel.textContent="Audio stream error"};
+}
+function setAudioStream(active,meta){
+ audioMeta=meta;audioActive=active;
+ if(!meta){audioPanel.classList.add("hidden");audioSpectrumData=null;audioWorker.postMessage("reset");if(audioSocket){const socket=audioSocket;audioSocket=null;socket.close()}return}
+ audioPanel.classList.remove("hidden");
+ if(active)connectAudioStream();else if(audioSocket){const socket=audioSocket;audioSocket=null;socket.close()}
+ drawAudioSpectrum(audioSpectrumData);
+}
+function drawAudioSpectrum(audio){
+ if(!audioMeta){audioPanel.classList.add("hidden");return}
+ audioPanel.classList.remove("hidden");
+ const dbfs=audio&&audio.dbfs?audio.dbfs:new Float32Array(0),binWidth=audio?audio.binWidthHz:48000/4096,firstBin=audio?audio.firstBin:16;
+ const displayedBins=dbfs.length||1537-firstBin,minHz=firstBin*binWidth,endHz=(firstBin+displayedBins-1)*binWidth,logSpan=Math.log(endHz/minHz);
+ const xForHz=hz=>pad.left+Math.log(Math.max(minHz,hz)/minHz)/logSpan*plotW;
+ audioRange.textContent=(Number(audioMeta.sampleRateHz||48000)/1000).toFixed(0)+" kHz mono · 16-bit PCM · 4096-point browser FFT · "+binWidth.toFixed(1)+" Hz/bin · "+(minHz/1000).toFixed(2)+"–"+(endHz/1000).toFixed(1)+" kHz logarithmic";
+ if(audio){const usbDrops=Number(audioMeta.droppedFrames||0),streamDrops=Number(audio.streamDrops||0);audioLevel.textContent="RMS "+Math.max(-100,audio.rmsDbfs).toFixed(1)+" dBFS · peak "+Math.max(-100,audio.peakDbfs).toFixed(1)+" dBFS · "+usbDrops.toLocaleString()+" USB drop"+(usbDrops===1?"":"s")+" · "+streamDrops.toLocaleString()+" stream drop"+(streamDrops===1?"":"s")}else if(!audioActive)audioLevel.textContent="Audio capture unavailable";
+ const rect=audioCanvas.getBoundingClientRect(),ratio=window.devicePixelRatio||1;
+ const width=Math.max(320,Math.round(rect.width*ratio)),height=Math.round(280*ratio);
+ if(audioCanvas.width!==width||audioCanvas.height!==height){audioCanvas.width=width;audioCanvas.height=height}
+ const ctx=audioCanvas.getContext("2d"),dark=matchMedia("(prefers-color-scheme: dark)").matches;
+ const pad={left:48*ratio,right:14*ratio,top:14*ratio,bottom:32*ratio},plotW=width-pad.left-pad.right,plotH=height-pad.top-pad.bottom;
+ ctx.clearRect(0,0,width,height);ctx.fillStyle=dark?"#111820":"#f9fafb";ctx.fillRect(0,0,width,height);ctx.font=11*ratio+"px ui-monospace, SFMono-Regular, Menlo, monospace";ctx.lineWidth=ratio;
+ for(let db=-100;db<=0;db+=20){const y=pad.top+(0-db)/100*plotH;ctx.strokeStyle=dark?"#273544":"#dfe5eb";ctx.beginPath();ctx.moveTo(pad.left,y);ctx.lineTo(width-pad.right,y);ctx.stroke();ctx.fillStyle=dark?"#b9c3cf":"#65717d";ctx.textAlign="right";ctx.textBaseline="middle";ctx.fillText(db+"",pad.left-7*ratio,y)}
+ for(const hz of [200,500,1000,2000,5000,10000,18000]){if(hz<minHz||hz>endHz)continue;const x=xForHz(hz);ctx.strokeStyle=dark?"#273544":"#dfe5eb";ctx.beginPath();ctx.moveTo(x,pad.top);ctx.lineTo(x,height-pad.bottom);ctx.stroke();ctx.fillStyle=dark?"#b9c3cf":"#65717d";ctx.textAlign="center";ctx.textBaseline="top";ctx.fillText(hz<1000?hz+"":hz/1000+"k",x,height-pad.bottom+7*ratio)}
+ if(!dbfs.length)return;
+ ctx.beginPath();for(let i=0;i<dbfs.length;i++){const x=xForHz((firstBin+i)*binWidth),y=pad.top+(0-dbfs[i])/100*plotH;if(i===0)ctx.moveTo(x,y);else ctx.lineTo(x,y)}ctx.lineTo(width-pad.right,height-pad.bottom);ctx.lineTo(pad.left,height-pad.bottom);ctx.closePath();ctx.fillStyle=dark?"rgba(64,170,255,.20)":"rgba(35,112,190,.18)";ctx.fill();
+ ctx.beginPath();for(let i=0;i<dbfs.length;i++){const x=xForHz((firstBin+i)*binWidth),y=pad.top+(0-dbfs[i])/100*plotH;if(i===0)ctx.moveTo(x,y);else ctx.lineTo(x,y)}ctx.strokeStyle=dark?"#40aaff":"#2370be";ctx.lineWidth=2*ratio;ctx.stroke();
+}
 function showPhase(phase){
  const label=phaseLabel(phase);phaseEl.textContent=label;phaseEl.className="";
- if(phase==="CDC_READY"||phase==="BLEUIO_READY"||phase==="FTDI_READY"||phase==="P8055_READY"||phase==="WISPY_READY"||phase==="USBTMC_READY"){statusEl.className="status online";statusText.textContent=phase==="BLEUIO_READY"?"BleuIO HibouAir scanner ready":phase==="P8055_READY"?"P8055 HID ready":phase==="WISPY_READY"?"Wi-Spy spectrum analyzer ready":phase==="FTDI_READY"?"FTDI UART ready":phase==="USBTMC_READY"?"USBTMC instrument ready":"CDC-ACM ready";phaseEl.className="stateOk"}
+ if(phase==="CDC_READY"||phase==="BLEUIO_READY"||phase==="FTDI_READY"||phase==="P8055_READY"||phase==="WISPY_READY"||phase==="USBTMC_READY"||phase==="AUDIO_READY"){statusEl.className="status online";statusText.textContent=phase==="BLEUIO_READY"?"BleuIO HibouAir scanner ready":phase==="P8055_READY"?"P8055 HID ready":phase==="WISPY_READY"?"Wi-Spy spectrum analyzer ready":phase==="FTDI_READY"?"FTDI UART ready":phase==="USBTMC_READY"?"USBTMC instrument ready":phase==="AUDIO_READY"?"USB measurement microphone ready":"CDC-ACM ready";phaseEl.className="stateOk"}
  else if(phase==="WAITING"||phase==="POWER_OFF"){statusEl.className="status";statusText.textContent=phase==="WAITING"?"waiting for device":"host powered off";phaseEl.className="stateOff"}
  else if(phase==="RESETTING"||phase==="ENUMERATING"){statusEl.className="status";statusText.textContent=label.toLowerCase();phaseEl.className="stateWait"}
  else if(phase==="UNSUPPORTED_DEVICE"){statusEl.className="status warning";statusText.textContent="unsupported device";phaseEl.className="stateWait"}
  else{statusEl.className="status offline";statusText.textContent=label.toLowerCase();phaseEl.className="stateBad"}
 }
 function updateHost(info){
+ pollDelay=2000;
+ pollHint.textContent=info.phase==="AUDIO_READY"?"PCM snapshots · browser FFT · status every 2 seconds":"Read-only status updates every 2 seconds";
  showPhase(info.phase);
  if(info.phase==="BLEUIO_READY"&&info.serialBridge&&info.serialBridge.clientConnected)statusText.textContent="BleuIO raw TCP session active";
  speedEl.textContent=info.speed==="FULL"?"Full speed":info.speed==="LOW"?"Low speed":"-";
@@ -278,7 +368,7 @@ function updateHost(info){
  txBytesEl.textContent=Number(info.txBytes||0).toLocaleString();
  errorsEl.textContent=Number(info.errorCount||0).toLocaleString();
  errorsEl.className=Number(info.errorCount||0)>0?"stateBad":"";
- const transferReady=info.phase==="CDC_READY"||info.phase==="BLEUIO_READY"||info.phase==="FTDI_READY"||info.phase==="P8055_READY"||info.phase==="WISPY_READY"||info.phase==="USBTMC_READY";
+ const transferReady=info.phase==="CDC_READY"||info.phase==="BLEUIO_READY"||info.phase==="FTDI_READY"||info.phase==="P8055_READY"||info.phase==="WISPY_READY"||info.phase==="USBTMC_READY"||info.phase==="AUDIO_READY";
  maxTransferEl.textContent=transferReady?Number(info.maxTransfer??64)+" B":"—";
  deviceEl.textContent=deviceName(info);
  const hasIdentity=info.vendorId!==null||info.productId!==null;
@@ -305,8 +395,9 @@ function updateHost(info){
  usbtmcClientEl.textContent=tmc.clientConnected?"Connected":tmc.available?"Not connected":"Unavailable";
  usbtmcClientEl.className=tmc.clientConnected?"stateOk":tmc.available?"stateOff":"stateWait";
  drawSpectrum(info.wispySpectrum);
+ setAudioStream(info.phase==="AUDIO_READY",info.audioSpectrum);
  drawBleuio(info);
- if(technicalPreference===null)setTechnicalVisibility(!(info.bleuio||info.wispySpectrum));else setTechnicalVisibility(technicalPreference);
+ if(technicalPreference===null)setTechnicalVisibility(!(info.bleuio||info.wispySpectrum||info.audioSpectrum));else setTechnicalVisibility(technicalPreference);
  if(lastPhase!==info.phase){addEvent(lastPhase===null?"Host state: "+phaseLabel(info.phase):phaseLabel(lastPhase)+" → "+phaseLabel(info.phase));lastPhase=info.phase}
 }
 async function refresh(){
@@ -315,6 +406,7 @@ async function refresh(){
  catch(error){statusEl.className="status offline";statusText.textContent="status unavailable";addEvent("Status request failed: "+error.message)}
  finally{refreshing=false;refreshBtn.disabled=false}
 }
+async function poll(){await refresh();setTimeout(poll,pollDelay)}
 refreshBtn.onclick=refresh;
 showTechnical.onchange=()=>{technicalPreference=showTechnical.checked;try{localStorage.setItem("usbHostShowTechnical",String(technicalPreference))}catch(_){ }setTechnicalVisibility(technicalPreference)};
 fetch("/api/status",{cache:"no-store"}).then(response=>response.json()).then(info=>{
@@ -322,8 +414,7 @@ fetch("/api/status",{cache:"no-store"}).then(response=>response.json()).then(inf
  nav.textContent="";
  for(const [name,path] of Object.entries(info.pages||{})){const link=document.createElement("a");link.href=path;link.textContent=name.toUpperCase();if(name==="usb")link.className="active";nav.appendChild(link)}
 }).catch(()=>{});
-refresh();
-setInterval(refresh,2000);
+poll();
 </script>
 </body>
 </html>

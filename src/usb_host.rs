@@ -16,6 +16,10 @@ use embassy_rp::dma::InterruptHandler as DmaInterruptHandler;
 use embassy_rp::gpio::{Level, Output};
 use embassy_rp::peripherals::{DMA_CH0, PIN_16, PIN_17, PIN_18, PIO0, PIO1};
 use embassy_rp::pio::InterruptHandler as PioInterruptHandler;
+use embassy_rp_pio_usb_host::audio::{
+    AudioError, AudioInputInterface, CAPTURE_PACKET_CAPACITY,
+    allocate_from_enumeration as allocate_audio_from_enumeration,
+};
 use embassy_rp_pio_usb_host::cdc_acm::{
     CdcAcmCreateError, CdcAcmError, CdcAcmHost,
     allocate_from_enumeration as allocate_cdc_from_enumeration,
@@ -123,6 +127,7 @@ pub(crate) enum Phase {
     P8055Ready,
     WispyReady,
     UsbtmcReady,
+    AudioReady,
     UnsupportedSpeed,
     UnsupportedDevice,
     EnumerationError,
@@ -132,6 +137,7 @@ pub(crate) enum Phase {
     P8055Error,
     WispyError,
     UsbtmcError,
+    AudioError,
 }
 
 impl Phase {
@@ -147,6 +153,7 @@ impl Phase {
             Self::P8055Ready => "P8055_READY",
             Self::WispyReady => "WISPY_READY",
             Self::UsbtmcReady => "USBTMC_READY",
+            Self::AudioReady => "AUDIO_READY",
             Self::UnsupportedSpeed => "UNSUPPORTED_SPEED",
             Self::UnsupportedDevice => "UNSUPPORTED_DEVICE",
             Self::EnumerationError => "ENUMERATION_ERROR",
@@ -156,6 +163,7 @@ impl Phase {
             Self::P8055Error => "P8055_ERROR",
             Self::WispyError => "WISPY_ERROR",
             Self::UsbtmcError => "USBTMC_ERROR",
+            Self::AudioError => "AUDIO_ERROR",
         }
     }
 
@@ -375,6 +383,9 @@ pub(crate) struct Status {
     pub(crate) usbtmc_usb488: bool,
     pub(crate) wispy_sweep_count: u32,
     pub(crate) wispy_samples: [u8; wispy::SAMPLE_COUNT],
+    pub(crate) audio_block_sequence: u32,
+    pub(crate) audio_packet_count: u32,
+    pub(crate) audio_dropped_frames: u32,
     pub(crate) bleuio_catalog: bleuio::Catalog,
     pub(crate) bleuio_filter: bleuio::Filter,
     pub(crate) unexpected_toggle_count: u32,
@@ -423,6 +434,9 @@ impl Status {
             usbtmc_usb488: false,
             wispy_sweep_count: 0,
             wispy_samples: [0; wispy::SAMPLE_COUNT],
+            audio_block_sequence: 0,
+            audio_packet_count: 0,
+            audio_dropped_frames: 0,
             bleuio_catalog: bleuio::Catalog::new(),
             bleuio_filter: bleuio::Filter::all(),
             unexpected_toggle_count: 0,
@@ -1011,6 +1025,7 @@ async fn set_waiting_if_current(generation: u32) {
 }
 
 async fn set_resetting(speed: HostSpeed) {
+    crate::audio_stream::reset();
     let mut state = HOST_STATE.lock().await;
     state.generation = state.generation.wrapping_add(1);
     state.phase = Phase::Resetting;
@@ -1027,6 +1042,9 @@ async fn set_resetting(speed: HostSpeed) {
     state.usbtmc_usb488 = false;
     state.wispy_sweep_count = 0;
     state.wispy_samples = [0; wispy::SAMPLE_COUNT];
+    state.audio_block_sequence = 0;
+    state.audio_packet_count = 0;
+    state.audio_dropped_frames = 0;
     state.unexpected_toggle_count = 0;
     state.accepted_zlp_count = 0;
     state.latest_expected_pid = None;
@@ -1138,6 +1156,24 @@ async fn record_wispy_report_if_current(generation: u32) -> bool {
         return false;
     }
     state.rx_bytes = state.rx_bytes.wrapping_add(wispy::REPORT_LEN as u32);
+    true
+}
+
+async fn record_audio_progress_if_current(
+    generation: u32,
+    block_sequence: u32,
+    packets: u32,
+    bytes: u32,
+    dropped_frames: u32,
+) -> bool {
+    let mut state = HOST_STATE.lock().await;
+    if state.generation != generation || state.phase != Phase::AudioReady {
+        return false;
+    }
+    state.audio_block_sequence = block_sequence;
+    state.audio_packet_count = state.audio_packet_count.wrapping_add(packets);
+    state.audio_dropped_frames = state.audio_dropped_frames.wrapping_add(dropped_frames);
+    state.rx_bytes = state.rx_bytes.wrapping_add(bytes);
     true
 }
 
@@ -2931,6 +2967,140 @@ async fn run(hardware: Hardware) {
                                     }
                                 }
                             }
+                        }
+                    }
+                }
+
+                bus_handle.free_address(address);
+                set_waiting_if_current(session_generation).await;
+                info!("PIO USB root address {} released", address);
+                continue;
+            }
+
+            if AudioInputInterface::discover(&configuration[..configuration_len]).is_ok() {
+                match allocate_audio_from_enumeration(
+                    &bus_handle,
+                    &configuration[..configuration_len],
+                    &enumeration,
+                ) {
+                    Ok(mut audio) => {
+                        audio.set_control_timeout(
+                            embassy_rp_pio_usb_host::host::TimeoutConfig::default(),
+                        );
+                        let configured = matches!(
+                            with_timeout(CLASS_CONTROL_TIMEOUT, audio.configure()).await,
+                            Ok(Ok(()))
+                        );
+                        if configured
+                            && set_phase_if_current(
+                                session_generation,
+                                Phase::Enumerating,
+                                Phase::AudioReady,
+                            )
+                            .await
+                        {
+                            info!(
+                                "PIO USB Audio capture ready at address {}, interface {}, endpoint {=u8:02x}",
+                                address,
+                                audio.interface().interface_number,
+                                audio.interface().endpoint_address
+                            );
+                            let mut packet = [0_u8; CAPTURE_PACKET_CAPACITY];
+                            let mut samples = [0_i16; crate::audio_stream::SAMPLES_PER_BLOCK];
+                            let mut sample_index = 0_usize;
+                            let mut block_sequence = 0_u32;
+                            let mut pending_packets = 0_u32;
+                            let mut pending_bytes = 0_u32;
+                            let mut pending_drops = 0_u32;
+
+                            'audio: loop {
+                                match select3(
+                                    controller.wait_for_device_event(),
+                                    HOST_COMMANDS.receive(),
+                                    audio.read_packet(&mut packet),
+                                )
+                                .await
+                                {
+                                    Either3::First(
+                                        DeviceEvent::Disconnected | DeviceEvent::Overcurrent,
+                                    ) => break 'audio,
+                                    Either3::First(_) => {}
+                                    Either3::Second(command) => {
+                                        reject_command(command, Error::NotReady);
+                                    }
+                                    Either3::Third(Ok(count)) => {
+                                        pending_packets = pending_packets.wrapping_add(1);
+                                        pending_bytes = pending_bytes.wrapping_add(count as u32);
+                                        for encoded in packet[..count].chunks_exact(2) {
+                                            samples[sample_index] =
+                                                i16::from_le_bytes([encoded[0], encoded[1]]);
+                                            sample_index += 1;
+                                            if sample_index == samples.len() {
+                                                sample_index = 0;
+                                                block_sequence = block_sequence.wrapping_add(1);
+                                                crate::audio_stream::publish(
+                                                    block_sequence,
+                                                    &samples,
+                                                );
+                                            }
+                                        }
+                                        if pending_packets >= 100
+                                            && !record_audio_progress_if_current(
+                                                session_generation,
+                                                block_sequence,
+                                                pending_packets,
+                                                pending_bytes,
+                                                pending_drops,
+                                            )
+                                            .await
+                                        {
+                                            break 'audio;
+                                        }
+                                        if pending_packets >= 100 {
+                                            pending_packets = 0;
+                                            pending_bytes = 0;
+                                            pending_drops = 0;
+                                        }
+                                    }
+                                    Either3::Third(Err(AudioError::Transfer(
+                                        PipeError::Timeout,
+                                    ))) => {
+                                        // Isochronous USB has no retry. A missed frame is
+                                        // counted and the next frame remains usable.
+                                        pending_drops = pending_drops.wrapping_add(1);
+                                    }
+                                    Either3::Third(Err(AudioError::Transfer(
+                                        PipeError::Disconnected,
+                                    ))) => break 'audio,
+                                    Either3::Third(Err(_)) => {
+                                        // Isochronous transfers are neither ACKed nor retried.
+                                        // A malformed packet therefore represents one lost
+                                        // audio frame, not a fatal class-session failure.
+                                        pending_drops = pending_drops.wrapping_add(1);
+                                    }
+                                }
+                            }
+                        } else if set_error_phase_if_current(
+                            session_generation,
+                            Phase::Enumerating,
+                            Phase::AudioError,
+                        )
+                        .await
+                        {
+                            warn!("PIO USB Audio class setup failed");
+                            wait_for_removal(&mut controller).await;
+                        }
+                    }
+                    Err(_) => {
+                        if set_error_phase_if_current(
+                            session_generation,
+                            Phase::Enumerating,
+                            Phase::AudioError,
+                        )
+                        .await
+                        {
+                            warn!("PIO USB Audio discovery or pipe allocation failed");
+                            wait_for_removal(&mut controller).await;
                         }
                     }
                 }

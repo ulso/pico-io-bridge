@@ -103,6 +103,11 @@ pub(crate) async fn send_text(socket: &mut TcpSocket<'_>, payload: &[u8]) -> Res
     send_frame(socket, 0x1, payload).await
 }
 
+#[cfg(feature = "board-adafruit-rp2040-usb-host")]
+pub(crate) async fn send_binary(socket: &mut TcpSocket<'_>, payload: &[u8]) -> Result<(), Error> {
+    send_frame(socket, 0x2, payload).await
+}
+
 pub(crate) async fn send_pong(socket: &mut TcpSocket<'_>, payload: &[u8]) -> Result<(), Error> {
     send_frame(socket, 0xA, payload).await
 }

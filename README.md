@@ -28,6 +28,9 @@ of separate adapters:
   devices are exposed as a raw bidirectional TCP stream, while supported HID
   devices receive application-specific interfaces: the Velleman P8055 through
   SCPI and the original MetaGeek Wi-Spy through a live browser spectrum view.
+- **Turn a USB measurement microphone into a network spectrum analyzer.** A
+  supported UAC1 mono microphone is sampled by the PIO host while a WebSocket
+  sends bounded PCM snapshots to a 4096-point FFT running in the browser.
 - **Connect a growing range of STEMMA QT and Qwiic peripherals.** Known sensor
   drivers expose measurements such as distance, temperature, humidity,
   pressure, gas resistance, orientation, and battery state directly through
@@ -71,7 +74,9 @@ of separate adapters:
 - CAN TX, RX broadcast to connected WebSocket clients, status, bitrate/mode config
 - Concurrent I2C status, scan, read, write, and write-read transactions
 - PIO USB host with CDC-ACM, FTDI UART, USBTMC/USB488, low-speed Velleman P8055
-  HID, and MetaGeek Wi-Spy Original spectrum-analyzer support
+  HID, MetaGeek Wi-Spy Original spectrum-analyzer support, and bounded UAC1
+  mono microphone capture
+- Browser-side 4096-point audio FFT fed by PCM snapshots over `/audio`
 - Raw binary TCP bridge to a hosted CDC-ACM stream on port 7000
 - SCPI-RAW bridge to a hosted USBTMC/USB488 instrument on port 5026
 - Compile-time profiles for four Adafruit RP2040 boards
@@ -206,7 +211,7 @@ page and `/can` WebSocket endpoint from the resulting firmware. The USB-host
 profile adds
 [`embassy-rp-pio-usb-host`](https://github.com/ulso/embassy-rp-pio-usb-host)
 as an optional Git dependency pinned to commit
-`74aa9b0e1b1827027fe6b2d905b487afd7600755`.
+`53e03cd490894f26b601bdfc165972dd472a27d2`.
 
 ## Flash
 
@@ -311,6 +316,27 @@ covering 2400-2482 MHz at 1 MHz spacing. The displayed dBm estimate uses the
 Gen1 conversion `-97 + 1.5 * raw_sample`. Only complete, bin-zero-synchronized
 sweeps are published to the browser. Its live data comes from
 `/api/usb-host/status`.
+
+The same page recognizes the tested NAD room-correction microphone
+(`17AE:000E`) as a USB Audio Class 1.0 mono input. The host selects 48 kHz,
+16-bit PCM capture and the page automatically opens the binary `/audio`
+WebSocket. A Web Worker applies a Hann window and 4096-point FFT, giving about
+11.7 Hz/bin over a logarithmic 0.19-18 kHz display without doing the transform
+on the RP2040.
+
+The WebSocket carries nine consecutive 480-sample blocks per snapshot, then
+pauses before the next snapshot. This preserves a real contiguous FFT window
+while reducing CDC-NCM traffic from a continuous 96 kB/s stream to about
+22 kB/s. A bounded cross-core FIFO never backpressures the 1 ms isochronous
+host schedule. In hardware testing this arrangement kept CDC-NCM, HTTP,
+DNS-SD, USB capture, and the browser spectrum running together for more than
+three hours; host-frame drops stopped after the short startup transient.
+
+Each binary frame begins with `PCM1`, followed by a little-endian `u32` block
+sequence, a little-endian `u16` sample count, a little-endian `u16` flags field
+(bit 0 marks the beginning of a snapshot), and signed little-endian 16-bit
+samples. Only one `/audio` client is admitted at a time.
+
 `/api/status` reports instrument identity, SCPI-RAW connection metadata, the
 active interface names and the endpoint paths in its `pages` and `websockets`
 fields.
@@ -999,22 +1025,27 @@ Example:
   mode. Full AutoIP/RFC 3927 probing and ARP defense are not implemented.
 - The DHCP mode does not probe the UID-derived `10.x.y.0/24` subnet before
   using it. A subnet collision is unlikely but possible in principle.
-- The WebSocket protocol is intentionally small and JSON-only at the moment.
+- The CAN and I2C WebSocket protocols are intentionally small and JSON-only.
+  The `/audio` endpoint instead uses the bounded binary PCM framing documented
+  above.
 - The SCPI server currently supports one TCP client at a time and scalar channel
   numbers rather than SCPI channel-list expressions such as `(@1:4)`.
-- The PIO host supports one directly connected root device and no hubs,
-  high-speed devices, or isochronous transfers. The integration exposes generic
-  full-speed CDC-ACM, FTDI UART and USBTMC transports plus the original
-  low-speed Velleman K8055/P8055 and MetaGeek Wi-Spy protocols; it is not yet a
-  general-purpose HID instrument API.
+- The PIO host supports one directly connected root device and no hubs or
+  high-speed devices. Isochronous support is deliberately limited to one
+  full-speed IN endpoint of at most 100 bytes per 1 ms frame and the UAC1
+  48 kHz mono capture profile described above. The integration additionally
+  exposes generic full-speed CDC-ACM, FTDI UART and USBTMC transports plus the
+  original low-speed Velleman K8055/P8055 and MetaGeek Wi-Spy protocols; it is
+  not yet a general-purpose HID or USB Audio API.
 - A tested Keysight MSO-X 3054A running firmware `02.66.2024012316`
   intermittently times out on the first complete device-descriptor request
   after `SET_ADDRESS`. Automatic enumeration retries have recovered to
   `USBTMC_READY` without user intervention, and USBTMC commands are stable once
   ready. The latest failure is available through `SYST:USB:HOST:ENUM:DIAG?`;
   the underlying EP0/reset interaction remains under investigation.
-- The raw USB-serial TCP bridge accepts one client, supports CDC-ACM only, and
-  uses fixed line settings; it does not implement Telnet or RFC 2217 controls.
+- The raw USB-serial TCP bridge accepts one client and supports CDC-ACM and
+  FTDI UART; it does not implement Telnet or RFC 2217 controls. CDC-ACM uses
+  fixed line settings, while FTDI baud rate is configurable through SCPI.
 - RP2040 ADC voltage and temperature results are nominal, not calibrated
   instrument-grade measurements.
 - The Embassy RP2040 I2C driver has no address-only probe operation. `i2c.scan`

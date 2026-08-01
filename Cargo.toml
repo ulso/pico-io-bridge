@@ -39,7 +39,7 @@ embassy-usb = { version = "0.6.0", default-features = false, features = ["defmt"
 embassy-usb-host = { version = "=0.1.0", default-features = false, optional = true }
 embassy-rp-pio-usb-host = {
     git = "https://github.com/ulso/embassy-rp-pio-usb-host",
-    rev = "74aa9b0e1b1827027fe6b2d905b487afd7600755",
+    rev = "53e03cd490894f26b601bdfc165972dd472a27d2",
     default-features = false,
     optional = true,
 }
