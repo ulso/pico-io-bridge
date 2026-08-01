@@ -119,6 +119,13 @@ td:first-child{width:38%;white-space:nowrap}td code{font-weight:650}
 <tr><td><code>SYST:CHAN:COUN?</code></td><td>Number of external ADC channels</td></tr>
 <tr><td><code>SYST:USB:HOST:STAT?</code></td><td>PIO USB host state and counters (USB-host profile)</td></tr>
 <tr><td><code>SYST:USB:HOST:ENUM:DIAG?</code></td><td>Enumeration attempts and last failure (USB-host profile)</td></tr>
+<tr><td><code>SYST:USB:HOST:BLEU:SENS:CAT?</code></td><td>List cached HibouAir sensor IDs, or <code>NONE</code></td></tr>
+<tr><td><code>SYST:USB:HOST:BLEU:SENS:FILT "&lt;id,...&gt;"</code></td><td>Whitelist up to eight six-digit sensor IDs</td></tr>
+<tr><td><code>SYST:USB:HOST:BLEU:SENS:FILT?</code></td><td>Read the whitelist, or <code>ALL</code></td></tr>
+<tr><td><code>SYST:USB:HOST:BLEU:SENS:FILT:CLE</code></td><td>Restore automatic discovery of the eight most recently active sensors</td></tr>
+<tr><td><code>SYST:USB:HOST:BLEU:SENS:SEL "&lt;id&gt;"</code></td><td>Select a cached sensor for subsequent queries</td></tr>
+<tr><td><code>SYST:USB:HOST:BLEU:SENS:DATA?</code></td><td>Read the selected sensor as stable CSV</td></tr>
+<tr><td><code>SYST:USB:HOST:BLEU:SENS:{TEMP|HUM|PRES|CO2|VOC|NOIS|PM1|PM25|PM10|LIGH|AGE|COUN}?</code></td><td>Read one value from the selected sensor</td></tr>
 <tr><td><code>SYST:USB:HOST:FTDI:BAUD &lt;300-3000000&gt;</code></td><td>Set the active FTDI UART baud rate while TCP port 7000 is idle</td></tr>
 <tr><td><code>SYST:USB:HOST:FTDI:BAUD?</code></td><td>Read the active FTDI UART baud rate</td></tr>
 <tr><td><code>SYST:RES:CAUS?</code></td><td>Reset cause captured at boot</td></tr>

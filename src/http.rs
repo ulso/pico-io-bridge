@@ -297,17 +297,27 @@ async fn write_usb_host_status_response(
         wispy.push_str("null").unwrap();
     }
 
-    let mut bleuio = String::<3328>::new();
+    let mut bleuio = String::<3456>::new();
     if crate::bleuio::is_bleuio(status.vendor_id, status.product_id) {
         write!(
             bleuio,
-            "{{\"available\":{},\"scanning\":{},\"updateCount\":{},\"nowMs\":{},\"sensors\":[",
+            "{{\"available\":{},\"scanning\":{},\"updateCount\":{},\"nowMs\":{},\"filterAll\":{},\"filter\":[",
             status.phase == crate::usb_host::Phase::BleuioReady,
             status.phase == crate::usb_host::Phase::BleuioReady && !status.bridge_connected,
             status.bleuio_catalog.update_count,
             embassy_time::Instant::now().as_millis(),
+            status.bleuio_filter.is_all(),
         )
         .unwrap();
+        let mut first = true;
+        for board_id in status.bleuio_filter.ids.iter().flatten() {
+            if !first {
+                bleuio.push(',').unwrap();
+            }
+            first = false;
+            write!(bleuio, "\"{board_id:06X}\"").unwrap();
+        }
+        bleuio.push_str("],\"sensors\":[").unwrap();
         let mut first = true;
         for sensor in status.bleuio_catalog.sensors.iter().flatten() {
             if !first {
@@ -341,7 +351,7 @@ async fn write_usb_host_status_response(
         bleuio.push_str("null").unwrap();
     }
 
-    let mut body = String::<4608>::new();
+    let mut body = String::<4736>::new();
     write!(
         body,
         "{{\"phase\":\"{}\",\"ready\":{},\"speed\":{},\"address\":{},\"vendorId\":{},\"productId\":{},\"rxBytes\":{},\"txBytes\":{},\"errorCount\":{},\"maxTransfer\":{},\"ftdiBaudRate\":{},\"usb488\":{},\"resetCause\":\"{}\",\"serialBridge\":{{\"port\":{},\"service\":\"_usbserial._tcp\",\"available\":{},\"clientConnected\":{}}},\"usbtmcBridge\":{{\"port\":{},\"service\":\"_usbtmc._tcp\",\"available\":{},\"clientConnected\":{}}},\"wispySpectrum\":{},\"bleuio\":{}}}",

@@ -56,6 +56,8 @@ const COMMAND_CAPACITY: usize = 4;
 const BRIDGE_CHANNEL_CAPACITY: usize = 4;
 const BRIDGE_SOCKET_BUFFER_SIZE: usize = 1024;
 const BRIDGE_TCP_EOF_DRAIN_TIMEOUT: Duration = Duration::from_millis(250);
+const BLEUIO_BRIDGE_QUIESCE: Duration = Duration::from_millis(300);
+const BLEUIO_BRIDGE_QUIESCING: u32 = u32::MAX;
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(4);
 const EXCHANGE_COMMAND_TIMEOUT: Duration = Duration::from_secs(18);
 const CLASS_CONTROL_TIMEOUT: Duration = Duration::from_secs(2);
@@ -374,6 +376,7 @@ pub(crate) struct Status {
     pub(crate) wispy_sweep_count: u32,
     pub(crate) wispy_samples: [u8; wispy::SAMPLE_COUNT],
     pub(crate) bleuio_catalog: bleuio::Catalog,
+    pub(crate) bleuio_filter: bleuio::Filter,
     pub(crate) unexpected_toggle_count: u32,
     pub(crate) accepted_zlp_count: u32,
     pub(crate) latest_expected_pid: Option<u8>,
@@ -421,6 +424,7 @@ impl Status {
             wispy_sweep_count: 0,
             wispy_samples: [0; wispy::SAMPLE_COUNT],
             bleuio_catalog: bleuio::Catalog::new(),
+            bleuio_filter: bleuio::Filter::all(),
             unexpected_toggle_count: 0,
             accepted_zlp_count: 0,
             latest_expected_pid: None,
@@ -727,6 +731,32 @@ pub(crate) async fn status() -> Status {
 
 pub(crate) async fn enumeration_diagnostic() -> EnumerationDiagnostic {
     HOST_STATE.lock().await.enumeration_diagnostic
+}
+
+pub(crate) async fn bleuio_catalog() -> Result<bleuio::Catalog, Error> {
+    let state = HOST_STATE.lock().await;
+    if state.phase == Phase::BleuioReady && bleuio::is_bleuio(state.vendor_id, state.product_id) {
+        Ok(state.bleuio_catalog)
+    } else {
+        Err(Error::NotReady)
+    }
+}
+
+pub(crate) async fn bleuio_filter() -> bleuio::Filter {
+    HOST_STATE.lock().await.bleuio_filter
+}
+
+pub(crate) async fn bleuio_set_filter(filter: bleuio::Filter) {
+    let mut state = HOST_STATE.lock().await;
+    state.bleuio_filter = filter;
+    state.bleuio_catalog.retain_filter(filter);
+}
+
+pub(crate) async fn bleuio_sensor(board_id: u32) -> Result<bleuio::Sensor, Error> {
+    bleuio_catalog()
+        .await?
+        .find(board_id)
+        .ok_or(Error::DataStale)
 }
 
 fn pipe_enumeration_error(error: PipeError) -> EnumerationErrorKind {
@@ -1120,9 +1150,10 @@ async fn publish_bleuio_reading_if_current(
     if state.generation != generation || state.phase != expected {
         return false;
     }
+    let filter = state.bleuio_filter;
     state
         .bleuio_catalog
-        .update(reading, Instant::now().as_millis());
+        .update(reading, Instant::now().as_millis(), filter);
     true
 }
 
@@ -1787,10 +1818,23 @@ where
     Ok(())
 }
 
+async fn stop_bleuio_scan_bulk<O>(bulk_out: &mut O, generation: u32) -> Result<(), PipeError>
+where
+    O: UsbPipe<pipe::Bulk, pipe::Out>,
+{
+    // BleuIO uses the Ctrl-C byte as the documented stop shortcut for
+    // AT+FINDSCANDATA. Keep it out of the raw TCP session and discard the
+    // resulting acknowledgement during the quiesce interval.
+    bulk_out.request_out(&[0x03], false).await?;
+    let _ = record_tx_if_current(generation, Phase::BleuioReady, 1).await;
+    Ok(())
+}
+
 async fn bleuio_usb_in<I>(
     bulk_in: &mut I,
     parser: &mut bleuio::Parser,
     active_session: &AtomicU32,
+    parser_epoch: &AtomicU32,
     generation: u32,
     packet_size: usize,
 ) -> Result<(), ()>
@@ -1798,19 +1842,29 @@ where
     I: UsbPipe<pipe::Bulk, pipe::In>,
 {
     let mut packet = [0_u8; CDC_MAX_TRANSFER];
+    let mut seen_parser_epoch = parser_epoch.load(Ordering::Acquire);
     loop {
         let count = bulk_in
             .request_in(&mut packet[..packet_size])
             .await
             .map_err(|_| ())?;
-        if !record_rx_if_current(generation, Phase::BleuioReady, count).await
-            || !ingest_bleuio_bytes(parser, generation, Phase::BleuioReady, &packet[..count]).await
-        {
+        if !record_rx_if_current(generation, Phase::BleuioReady, count).await {
             return Err(());
         }
 
+        let epoch = parser_epoch.load(Ordering::Acquire);
+        if epoch != seen_parser_epoch {
+            parser.reset();
+            seen_parser_epoch = epoch;
+        }
+
         let session = active_session.load(Ordering::Acquire);
-        if session != 0 && count != 0 {
+        if session == 0 {
+            if !ingest_bleuio_bytes(parser, generation, Phase::BleuioReady, &packet[..count]).await
+            {
+                return Err(());
+            }
+        } else if session != BLEUIO_BRIDGE_QUIESCING && count != 0 {
             let mut data = CdcData::empty();
             data.bytes[..count].copy_from_slice(&packet[..count]);
             data.len = count as u8;
@@ -1822,6 +1876,7 @@ where
 async fn bleuio_commands_and_out<O>(
     bulk_out: &mut O,
     active_session: &AtomicU32,
+    parser_epoch: &AtomicU32,
     generation: u32,
     next_bridge_session: &mut u32,
 ) -> Result<(), ()>
@@ -1848,7 +1903,24 @@ where
                     reject_command(command, Error::ResourceBusy);
                     continue;
                 }
+                active_session.store(BLEUIO_BRIDGE_QUIESCING, Ordering::Release);
+                parser_epoch.fetch_add(1, Ordering::AcqRel);
+                if !matches!(
+                    with_timeout(
+                        CLASS_CONTROL_TIMEOUT,
+                        stop_bleuio_scan_bulk(bulk_out, generation),
+                    )
+                    .await,
+                    Ok(Ok(()))
+                ) {
+                    reject_command(command, Error::Transfer);
+                    return Err(());
+                }
+                Timer::after(BLEUIO_BRIDGE_QUIESCE).await;
                 *next_bridge_session = next_bridge_session.wrapping_add(1);
+                if *next_bridge_session == 0 || *next_bridge_session == BLEUIO_BRIDGE_QUIESCING {
+                    *next_bridge_session = 1;
+                }
                 let session = *next_bridge_session;
                 active_session.store(session, Ordering::Release);
                 send_reply(Reply {
@@ -1862,28 +1934,36 @@ where
                 operation: Operation::BridgeClose { session },
                 ..
             }) if session == active_session.load(Ordering::Acquire) => {
-                active_session.store(0, Ordering::Release);
+                active_session.store(BLEUIO_BRIDGE_QUIESCING, Ordering::Release);
+                parser_epoch.fetch_add(1, Ordering::AcqRel);
                 let released =
                     set_bridge_connected_if_current(generation, Phase::BleuioReady, true, false)
                         .await;
-                send_reply(Reply {
-                    sequence,
-                    result: ReplyResult::BridgeClose(if released {
-                        Ok(())
-                    } else {
-                        Err(Error::NotReady)
-                    }),
-                });
-                if !released
-                    || !matches!(
+                let restarted = released
+                    && matches!(
                         with_timeout(
                             CLASS_CONTROL_TIMEOUT,
                             initialize_bleuio_bulk(bulk_out, generation),
                         )
                         .await,
                         Ok(Ok(()))
-                    )
-                {
+                    );
+                if restarted {
+                    Timer::after(BLEUIO_BRIDGE_QUIESCE).await;
+                    parser_epoch.fetch_add(1, Ordering::AcqRel);
+                    active_session.store(0, Ordering::Release);
+                }
+                send_reply(Reply {
+                    sequence,
+                    result: ReplyResult::BridgeClose(if restarted {
+                        Ok(())
+                    } else if released {
+                        Err(Error::Transfer)
+                    } else {
+                        Err(Error::NotReady)
+                    }),
+                });
+                if !restarted {
                     return Err(());
                 }
                 info!("raw BleuIO serial bridge released; managed scan resumed");
@@ -1945,18 +2025,21 @@ async fn manage_bleuio<'d, H, C, I, O>(
     let packet_size = usize::from(cdc.function().bulk_in_endpoint.max_packet_size);
     let (function, control, mut bulk_in, mut bulk_out) = cdc.into_parts();
     let active_session = AtomicU32::new(0);
+    let parser_epoch = AtomicU32::new(0);
     let result = select3(
         bridge_wait_for_disconnect(controller),
         bleuio_usb_in(
             &mut bulk_in,
             &mut parser,
             &active_session,
+            &parser_epoch,
             generation,
             packet_size,
         ),
         bleuio_commands_and_out(
             &mut bulk_out,
             &active_session,
+            &parser_epoch,
             generation,
             next_bridge_session,
         ),

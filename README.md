@@ -361,6 +361,14 @@ Initial command set:
 | `SYST:RES:CAUS?` | Reset cause captured at boot |
 | `SYST:USB:HOST:STAT?` | PIO USB host state and transfer counters; USB-host profile only |
 | `SYST:USB:HOST:ENUM:DIAG?` | Enumeration attempts and most recent failure details; USB-host profile only |
+| `SYST:USB:HOST:BLEU:SENS:CAT?` | Cached HibouAir sensor IDs, or `NONE` |
+| `SYST:USB:HOST:BLEU:SENS:FILT "<id,...>"` | Whitelist up to eight six-digit HibouAir sensor IDs |
+| `SYST:USB:HOST:BLEU:SENS:FILT?` | Current whitelist, or `ALL` for automatic discovery |
+| `SYST:USB:HOST:BLEU:SENS:FILT:CLE` | Restore automatic discovery of the eight most recently active sensors |
+| `SYST:USB:HOST:BLEU:SENS:SEL "<id>"` | Select a sensor for the following queries |
+| `SYST:USB:HOST:BLEU:SENS:SEL?` | Selected sensor ID |
+| `SYST:USB:HOST:BLEU:SENS:DATA?` | Stable CSV snapshot of the selected sensor |
+| `SYST:USB:HOST:BLEU:SENS:{TEMP\|HUM\|PRES\|CO2\|VOC\|NOIS\|PM1\|PM25\|PM10\|LIGH\|AGE\|COUN}?` | One value from the selected sensor |
 | `SYST:USB:HOST:FTDI:BAUD <300-3000000>` | Set the active FTDI UART baud rate; rejected while TCP port 7000 is in use |
 | `SYST:USB:HOST:FTDI:BAUD?` | Read the active FTDI UART baud rate |
 | `SYST:USB:HOST:CDC:WRITE:HEX "<hex>"` | Write 1-64 bytes to the enumerated CDC-ACM stream; USB-host profile only |
@@ -516,6 +524,48 @@ query, remain available. Closing the TCP connection releases the stream, and
 detaching the USB device closes the active TCP connection. A new client can
 connect after the same USB serial device is reattached without rebooting the
 bridge.
+
+When the attached device is a BleuIO dongle, opening port 7000 first sends the
+documented Ctrl-C scan-stop byte and drains pending scan reports before handing
+the raw stream to the TCP client. The managed HibouAir panel remains visible
+with its last cached readings while the client owns the stream. Closing the TCP
+connection restores verbose mode and the managed HibouAir scan automatically.
+
+### HibouAir sensors over SCPI
+
+A connected BleuIO dongle continuously decodes HibouAir manufacturer data into
+an eight-entry RAM catalog. With no whitelist configured, a new sensor uses an
+empty slot or replaces the least recently seen sensor. The optional whitelist
+reserves the catalog for the specified label IDs; unknown IDs may be configured
+before their first advertisement. The whitelist survives a dongle replug but
+not a bridge reboot.
+
+For example:
+
+```text
+SYST:USB:HOST:BLEU:SENS:FILT "22005A,22008C,22026A"
+SYST:USB:HOST:BLEU:SENS:CAT?
+SYST:USB:HOST:BLEU:SENS:SEL "22005A"
+SYST:USB:HOST:BLEU:SENS:TEMP?
+SYST:USB:HOST:BLEU:SENS:CO2?
+SYST:USB:HOST:BLEU:SENS:AGE?
+SYST:USB:HOST:BLEU:SENS:DATA?
+```
+
+`DATA?` returns
+`id,type,age_ms,reports,temp_c,humidity_percent,pressure_hpa,co2_ppm,voc_raw,voc_type,noise_db_spl,pm1,pm25,pm10,ambient_light_lx`.
+Measurements which the selected HibouAir model does not provide are returned
+as `NAN`. Individual unsupported measurement queries report a settings
+conflict. `FILT:CLE` restores the default automatic catalog policy.
+
+The standard-library-only example can inspect all cached sensors or configure
+the whitelist directly:
+
+```sh
+python3 examples/hibouair_scpi.py
+python3 examples/hibouair_scpi.py --filter 22005A,22008C,22026A
+python3 examples/hibouair_scpi.py --clear-filter
+```
 
 CDC-ACM and FTDI's vendor-specific UART protocol are supported behind port
 7000. Both are opened at a fixed 115200 baud, 8 data bits, no parity, and one

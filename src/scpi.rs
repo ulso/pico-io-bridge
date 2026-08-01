@@ -62,6 +62,13 @@ struct UsbHostDataResponse {
     length: u8,
     data: [u8; crate::USB_HOST_CDC_MAX_TRANSFER],
 }
+struct BleuioCatalogResponse(crate::bleuio::Catalog);
+struct BleuioFilterResponse(crate::bleuio::Filter);
+struct BleuioSensorIdResponse(u32);
+struct BleuioSensorDataResponse {
+    sensor: crate::bleuio::Sensor,
+    now_ms: u64,
+}
 struct P8055InputResponse {
     digital_inputs: u8,
     analog_input_1: u8,
@@ -235,6 +242,97 @@ impl UsbHostDataResponse {
         };
         response.data[..data.as_bytes().len()].copy_from_slice(data.as_bytes());
         response
+    }
+}
+
+impl scpi::Response for BleuioCatalogResponse {
+    fn write_response(&self, output: &mut impl scpi::Write) -> Result<(), scpi::Error> {
+        let mut first = true;
+        for sensor in self.0.sensors.iter().flatten() {
+            if !first {
+                output.write_char(',')?;
+            }
+            first = false;
+            output.write_fmt(format_args!("{:06X}", sensor.reading.board_id))?;
+        }
+        if first {
+            output.write_str("NONE")?;
+        }
+        Ok(())
+    }
+}
+
+impl scpi::Response for BleuioFilterResponse {
+    fn write_response(&self, output: &mut impl scpi::Write) -> Result<(), scpi::Error> {
+        if self.0.is_all() {
+            return output.write_str("ALL");
+        }
+        let mut first = true;
+        for board_id in self.0.ids.iter().flatten() {
+            if !first {
+                output.write_char(',')?;
+            }
+            first = false;
+            output.write_fmt(format_args!("{board_id:06X}"))?;
+        }
+        Ok(())
+    }
+}
+
+impl scpi::Response for BleuioSensorIdResponse {
+    fn write_response(&self, output: &mut impl scpi::Write) -> Result<(), scpi::Error> {
+        output.write_fmt(format_args!("{:06X}", self.0))
+    }
+}
+
+fn write_bleuio_optional(
+    output: &mut impl scpi::Write,
+    value: Option<f32>,
+) -> Result<(), scpi::Error> {
+    match value {
+        Some(value) => value.write_response(output),
+        None => output.write_str("NAN"),
+    }
+}
+
+impl scpi::Response for BleuioSensorDataResponse {
+    fn write_response(&self, output: &mut impl scpi::Write) -> Result<(), scpi::Error> {
+        let reading = self.sensor.reading;
+        let sensor_type = reading.sensor_type;
+        output.write_fmt(format_args!(
+            "{:06X},{},{},{}",
+            reading.board_id,
+            sensor_type.token(),
+            self.now_ms.saturating_sub(self.sensor.last_seen_ms),
+            self.sensor.reports,
+        ))?;
+        for value in [
+            Some(f32::from(reading.temperature_tenths_c) / 10.0),
+            Some(f32::from(reading.humidity_tenths_percent) / 10.0),
+            Some(f32::from(reading.pressure_tenths_hpa) / 10.0),
+            sensor_type.has_co2().then_some(f32::from(reading.co2_ppm)),
+            Some(f32::from(reading.voc_raw)),
+            Some(f32::from(reading.voc_type)),
+            sensor_type
+                .has_noise()
+                .then_some(f32::from(reading.noise_db_spl)),
+            sensor_type
+                .has_particulate()
+                .then_some(f32::from(reading.pm1_tenths) / 10.0),
+            sensor_type
+                .has_particulate()
+                .then_some(f32::from(reading.pm25_tenths) / 10.0),
+            sensor_type
+                .has_particulate()
+                .then_some(f32::from(reading.pm10_tenths) / 10.0),
+            sensor_type
+                .has_ambient_light()
+                .then_some(f32::from(reading.ambient_light)),
+        ] {
+            output.write_char(',')?;
+            write_bleuio_optional(output, value)?;
+        }
+        Ok(())
     }
 }
 
@@ -440,6 +538,7 @@ struct ScpiInstrument {
     serial: &'static str,
     errors: StaticErrorQueue<8>,
     registers: StatusRegisters,
+    selected_bleuio_sensor: Option<u32>,
 }
 
 impl ScpiInstrument {
@@ -457,6 +556,62 @@ impl ScpiInstrument {
             serial,
             errors: StaticErrorQueue::new(),
             registers: StatusRegisters::default(),
+            selected_bleuio_sensor: None,
+        }
+    }
+
+    async fn bleuio_selected(&self) -> Result<crate::bleuio::Sensor, scpi::Error> {
+        #[cfg(feature = "board-adafruit-rp2040-usb-host")]
+        {
+            let board_id = self
+                .selected_bleuio_sensor
+                .ok_or(scpi::Error::SettingsConflict)?;
+            crate::usb_host::bleuio_sensor(board_id)
+                .await
+                .map_err(usb_host_error)
+        }
+        #[cfg(not(feature = "board-adafruit-rp2040-usb-host"))]
+        {
+            Err(scpi::Error::SettingsConflict)
+        }
+    }
+
+    async fn bleuio_catalog_response(&self) -> Result<BleuioCatalogResponse, scpi::Error> {
+        #[cfg(feature = "board-adafruit-rp2040-usb-host")]
+        {
+            crate::usb_host::bleuio_catalog()
+                .await
+                .map(BleuioCatalogResponse)
+                .map_err(usb_host_error)
+        }
+        #[cfg(not(feature = "board-adafruit-rp2040-usb-host"))]
+        {
+            Err(scpi::Error::SettingsConflict)
+        }
+    }
+
+    async fn bleuio_set_filter(&self, ids: &str) -> Result<(), scpi::Error> {
+        let filter = crate::bleuio::Filter::parse(ids).ok_or(scpi::Error::DataOutOfRange)?;
+        #[cfg(feature = "board-adafruit-rp2040-usb-host")]
+        {
+            crate::usb_host::bleuio_set_filter(filter).await;
+            Ok(())
+        }
+        #[cfg(not(feature = "board-adafruit-rp2040-usb-host"))]
+        {
+            let _ = filter;
+            Err(scpi::Error::SettingsConflict)
+        }
+    }
+
+    async fn bleuio_filter_response(&self) -> Result<BleuioFilterResponse, scpi::Error> {
+        #[cfg(feature = "board-adafruit-rp2040-usb-host")]
+        {
+            Ok(BleuioFilterResponse(crate::usb_host::bleuio_filter().await))
+        }
+        #[cfg(not(feature = "board-adafruit-rp2040-usb-host"))]
+        {
+            Err(scpi::Error::SettingsConflict)
         }
     }
 
@@ -570,6 +725,7 @@ impl ScpiInstrument {
         self.errors.clear();
         self.registers = StatusRegisters::default();
         self.average_count = DEFAULT_AVERAGE_COUNT;
+        self.selected_bleuio_sensor = None;
         Ok(())
     }
 
@@ -620,6 +776,155 @@ impl ScpiInstrument {
         {
             Err(scpi::Error::SettingsConflict)
         }
+    }
+
+    #[scpi(cmd = "SYSTem:USB:HOST:BLEUio:SENSor:CATalog?")]
+    async fn usb_host_bleuio_sensor_catalog(
+        &mut self,
+    ) -> Result<BleuioCatalogResponse, scpi::Error> {
+        self.bleuio_catalog_response().await
+    }
+
+    #[scpi(cmd = "SYSTem:USB:HOST:BLEUio:SENSor:FILTer")]
+    async fn usb_host_bleuio_sensor_filter(&mut self, ids: &str) -> Result<(), scpi::Error> {
+        self.bleuio_set_filter(ids).await
+    }
+
+    #[scpi(cmd = "SYSTem:USB:HOST:BLEUio:SENSor:FILTer?")]
+    async fn usb_host_bleuio_sensor_filter_query(
+        &mut self,
+    ) -> Result<BleuioFilterResponse, scpi::Error> {
+        self.bleuio_filter_response().await
+    }
+
+    #[scpi(cmd = "SYSTem:USB:HOST:BLEUio:SENSor:FILTer:CLEar")]
+    async fn usb_host_bleuio_sensor_filter_clear(&mut self) -> Result<(), scpi::Error> {
+        self.bleuio_set_filter("ALL").await
+    }
+
+    #[scpi(cmd = "SYSTem:USB:HOST:BLEUio:SENSor:SELect")]
+    async fn usb_host_bleuio_sensor_select(&mut self, id: &str) -> Result<(), scpi::Error> {
+        self.selected_bleuio_sensor =
+            Some(crate::bleuio::parse_board_id(id).ok_or(scpi::Error::DataOutOfRange)?);
+        Ok(())
+    }
+
+    #[scpi(cmd = "SYSTem:USB:HOST:BLEUio:SENSor:SELect?")]
+    async fn usb_host_bleuio_sensor_select_query(
+        &mut self,
+    ) -> Result<BleuioSensorIdResponse, scpi::Error> {
+        self.selected_bleuio_sensor
+            .map(BleuioSensorIdResponse)
+            .ok_or(scpi::Error::SettingsConflict)
+    }
+
+    #[scpi(cmd = "SYSTem:USB:HOST:BLEUio:SENSor:DATA?")]
+    async fn usb_host_bleuio_sensor_data(
+        &mut self,
+    ) -> Result<BleuioSensorDataResponse, scpi::Error> {
+        Ok(BleuioSensorDataResponse {
+            sensor: self.bleuio_selected().await?,
+            now_ms: embassy_time::Instant::now().as_millis(),
+        })
+    }
+
+    #[scpi(cmd = "SYSTem:USB:HOST:BLEUio:SENSor:TEMPerature?")]
+    async fn usb_host_bleuio_sensor_temperature(&mut self) -> Result<f32, scpi::Error> {
+        Ok(f32::from(self.bleuio_selected().await?.reading.temperature_tenths_c) / 10.0)
+    }
+
+    #[scpi(cmd = "SYSTem:USB:HOST:BLEUio:SENSor:HUMidity?")]
+    async fn usb_host_bleuio_sensor_humidity(&mut self) -> Result<f32, scpi::Error> {
+        Ok(f32::from(
+            self.bleuio_selected()
+                .await?
+                .reading
+                .humidity_tenths_percent,
+        ) / 10.0)
+    }
+
+    #[scpi(cmd = "SYSTem:USB:HOST:BLEUio:SENSor:PRESsure?")]
+    async fn usb_host_bleuio_sensor_pressure(&mut self) -> Result<f32, scpi::Error> {
+        Ok(f32::from(self.bleuio_selected().await?.reading.pressure_tenths_hpa) / 10.0)
+    }
+
+    #[scpi(cmd = "SYSTem:USB:HOST:BLEUio:SENSor:CO2?")]
+    async fn usb_host_bleuio_sensor_co2(&mut self) -> Result<u16, scpi::Error> {
+        let reading = self.bleuio_selected().await?.reading;
+        reading
+            .sensor_type
+            .has_co2()
+            .then_some(reading.co2_ppm)
+            .ok_or(scpi::Error::SettingsConflict)
+    }
+
+    #[scpi(cmd = "SYSTem:USB:HOST:BLEUio:SENSor:VOC?")]
+    async fn usb_host_bleuio_sensor_voc(&mut self) -> Result<u16, scpi::Error> {
+        Ok(self.bleuio_selected().await?.reading.voc_raw)
+    }
+
+    #[scpi(cmd = "SYSTem:USB:HOST:BLEUio:SENSor:NOISe?")]
+    async fn usb_host_bleuio_sensor_noise(&mut self) -> Result<u16, scpi::Error> {
+        let reading = self.bleuio_selected().await?.reading;
+        reading
+            .sensor_type
+            .has_noise()
+            .then_some(reading.noise_db_spl)
+            .ok_or(scpi::Error::SettingsConflict)
+    }
+
+    #[scpi(cmd = "SYSTem:USB:HOST:BLEUio:SENSor:PM1?")]
+    async fn usb_host_bleuio_sensor_pm1(&mut self) -> Result<f32, scpi::Error> {
+        let reading = self.bleuio_selected().await?.reading;
+        reading
+            .sensor_type
+            .has_particulate()
+            .then_some(f32::from(reading.pm1_tenths) / 10.0)
+            .ok_or(scpi::Error::SettingsConflict)
+    }
+
+    #[scpi(cmd = "SYSTem:USB:HOST:BLEUio:SENSor:PM25?")]
+    async fn usb_host_bleuio_sensor_pm25(&mut self) -> Result<f32, scpi::Error> {
+        let reading = self.bleuio_selected().await?.reading;
+        reading
+            .sensor_type
+            .has_particulate()
+            .then_some(f32::from(reading.pm25_tenths) / 10.0)
+            .ok_or(scpi::Error::SettingsConflict)
+    }
+
+    #[scpi(cmd = "SYSTem:USB:HOST:BLEUio:SENSor:PM10?")]
+    async fn usb_host_bleuio_sensor_pm10(&mut self) -> Result<f32, scpi::Error> {
+        let reading = self.bleuio_selected().await?.reading;
+        reading
+            .sensor_type
+            .has_particulate()
+            .then_some(f32::from(reading.pm10_tenths) / 10.0)
+            .ok_or(scpi::Error::SettingsConflict)
+    }
+
+    #[scpi(cmd = "SYSTem:USB:HOST:BLEUio:SENSor:LIGHt?")]
+    async fn usb_host_bleuio_sensor_light(&mut self) -> Result<u16, scpi::Error> {
+        let reading = self.bleuio_selected().await?.reading;
+        reading
+            .sensor_type
+            .has_ambient_light()
+            .then_some(reading.ambient_light)
+            .ok_or(scpi::Error::SettingsConflict)
+    }
+
+    #[scpi(cmd = "SYSTem:USB:HOST:BLEUio:SENSor:AGE?")]
+    async fn usb_host_bleuio_sensor_age(&mut self) -> Result<u32, scpi::Error> {
+        let sensor = self.bleuio_selected().await?;
+        Ok(embassy_time::Instant::now()
+            .as_millis()
+            .saturating_sub(sensor.last_seen_ms)
+            .min(u64::from(u32::MAX)) as u32)
+    }
+
+    #[scpi(cmd = "SYSTem:USB:HOST:BLEUio:SENSor:COUNt?")]
+    async fn usb_host_bleuio_sensor_count(&mut self) -> Result<u32, scpi::Error> {
+        Ok(self.bleuio_selected().await?.reports)
     }
 
     #[scpi(cmd = "SYSTem:USB:HOST:CDC:WRITe:HEX")]
@@ -1202,6 +1507,8 @@ async fn scpi_task(stack: Stack<'static>, serial: &'static str, hardware: Hardwa
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "board-adafruit-rp2040-usb-host")]
+    use super::{BleuioFilterResponse, BleuioSensorIdResponse};
     use super::{SCPI_NODE_0, UsbHostEnumerationDiagnosticResponse};
     use microscpi::{self as scpi, Response as _};
 
@@ -1282,5 +1589,27 @@ mod tests {
 
         assert_eq!(short_query, long_query);
         assert_eq!(short_command, long_command);
+    }
+
+    #[cfg(feature = "board-adafruit-rp2040-usb-host")]
+    #[test]
+    fn usb_host_bleuio_sensor_headers_and_responses_are_stable() {
+        let short_query = query_id(b"SYST:USB:HOST:BLEU:SENS:CAT?\n");
+        let long_query = query_id(b"SYSTEM:USB:HOST:BLEUIO:SENSOR:CATALOG?\n");
+        let short_command = command_id(b"SYST:USB:HOST:BLEU:SENS:FILT \"22005A,22008C\"\n");
+        let long_command = command_id(b"SYSTEM:USB:HOST:BLEUIO:SENSOR:FILTER \"22005A,22008C\"\n");
+        assert_eq!(short_query, long_query);
+        assert_eq!(short_command, long_command);
+
+        let mut output = heapless::Vec::<u8, 64>::new();
+        BleuioFilterResponse(crate::bleuio::Filter::parse("22005A,22008C").unwrap())
+            .write_response(&mut output)
+            .unwrap();
+        assert_eq!(output.as_slice(), b"22005A,22008C");
+        output.clear();
+        BleuioSensorIdResponse(0x22005a)
+            .write_response(&mut output)
+            .unwrap();
+        assert_eq!(output.as_slice(), b"22005A");
     }
 }

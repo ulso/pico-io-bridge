@@ -167,7 +167,7 @@ let lastPhase=null;
 let refreshing=false;
 let events=[];
 let technicalPreference=null;try{const saved=localStorage.getItem("usbHostShowTechnical");if(saved!==null)technicalPreference=saved==="true"}catch(_){ }
-function phaseLabel(value){return String(value||"-").toLowerCase().split("_").map(word=>word.charAt(0).toUpperCase()+word.slice(1)).join(" ")}
+function phaseLabel(value){return String(value||"-").toLowerCase().split("_").map(word=>word==="bleuio"?"BleuIO":word.charAt(0).toUpperCase()+word.slice(1)).join(" ")}
 function resetCauseLabel(value){
  const labels={POWER_ON_OR_BROWNOUT:"Power-on / brownout",RUN_PIN:"RUN pin",DEBUG_RESTART:"Debug restart",CDC_NCM_HOST_SILENCE_RECOVERY:"CDC-NCM host-silence recovery",CDC_NCM_LINK_WATCHDOG_RECOVERY:"CDC-NCM link-watchdog recovery",WATCHDOG_FORCE:"Watchdog force",WATCHDOG_TIMEOUT:"Watchdog timeout",UNKNOWN:"Unknown"};
  return labels[value]||phaseLabel(value)
@@ -220,7 +220,8 @@ function fixed(value,scale,digits=1){return (Number(value||0)/scale).toFixed(dig
 function drawBleuio(info){
  const data=info.bleuio;if(!data){bleuioPanel.classList.add("hidden");return}
  bleuioPanel.classList.remove("hidden");
- bleuioState.textContent=data.scanning?"Managed HibouAir scan active":info.serialBridge&&info.serialBridge.clientConnected?"Raw TCP client owns the BleuIO stream":"Scanner unavailable";
+ const filter=Array.isArray(data.filter)?data.filter:[];
+ bleuioState.textContent=data.scanning?(data.filterAll?"Managed HibouAir scan active":"Managed scan · whitelist: "+filter.map(id=>"#"+id).join(", ")):info.serialBridge&&info.serialBridge.clientConnected?"Managed scan paused · raw TCP client owns BleuIO":"Scanner unavailable";
  const sensors=Array.isArray(data.sensors)?data.sensors:[];bleuioCount.textContent=sensors.length+" sensor"+(sensors.length===1?"":"s")+" discovered";
  sensorGrid.textContent="";
  if(!sensors.length){const empty=document.createElement("p");empty.className="emptyState";empty.textContent="Waiting for HibouAir advertisements.";sensorGrid.appendChild(empty);return}
@@ -271,6 +272,7 @@ function showPhase(phase){
 }
 function updateHost(info){
  showPhase(info.phase);
+ if(info.phase==="BLEUIO_READY"&&info.serialBridge&&info.serialBridge.clientConnected)statusText.textContent="BleuIO raw TCP session active";
  speedEl.textContent=info.speed==="FULL"?"Full speed":info.speed==="LOW"?"Low speed":"-";
  rxBytesEl.textContent=Number(info.rxBytes||0).toLocaleString();
  txBytesEl.textContent=Number(info.txBytes||0).toLocaleString();

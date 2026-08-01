@@ -11,6 +11,61 @@ pub(crate) const fn is_bleuio(vendor_id: u16, product_id: u16) -> bool {
     vendor_id == VENDOR_ID && product_id == PRODUCT_ID
 }
 
+pub(crate) fn parse_board_id(value: &str) -> Option<u32> {
+    let value = value.strip_prefix('#').unwrap_or(value);
+    if value.len() != 6 {
+        return None;
+    }
+    let mut board_id = 0_u32;
+    for byte in value.bytes() {
+        board_id = (board_id << 4) | u32::from(hex_digit(byte)?);
+    }
+    Some(board_id)
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct Filter {
+    pub(crate) ids: [Option<u32>; MAX_SENSORS],
+}
+
+impl Filter {
+    pub(crate) const fn all() -> Self {
+        Self {
+            ids: [None; MAX_SENSORS],
+        }
+    }
+
+    pub(crate) fn parse(value: &str) -> Option<Self> {
+        let value = value.trim();
+        if value.eq_ignore_ascii_case("ALL") || value.is_empty() {
+            return Some(Self::all());
+        }
+
+        let mut filter = Self::all();
+        let mut count = 0;
+        for token in value.split(',') {
+            let board_id = parse_board_id(token.trim())?;
+            if filter.ids[..count].contains(&Some(board_id)) {
+                continue;
+            }
+            if count == filter.ids.len() {
+                return None;
+            }
+            filter.ids[count] = Some(board_id);
+            count += 1;
+        }
+        (count != 0).then_some(filter)
+    }
+
+    pub(crate) fn is_all(self) -> bool {
+        self.ids[0].is_none()
+    }
+
+    pub(crate) fn contains(self, board_id: u32) -> bool {
+        self.is_all() || self.ids.contains(&Some(board_id))
+    }
+}
+
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub(crate) enum SensorType {
     TemperatureHumidity,
@@ -43,6 +98,42 @@ impl SensorType {
             Self::Matrix => "Matrix",
             Self::Unknown(_) => "HibouAir sensor",
         }
+    }
+
+    pub(crate) const fn token(self) -> &'static str {
+        match self {
+            Self::TemperatureHumidity => "TEMP_HUM",
+            Self::ParticulateMatter => "PARTICULATE",
+            Self::Co2 => "CO2",
+            Self::No2OutdoorWifi => "NO2_WIFI",
+            Self::Co2Battery => "CO2_BATTERY",
+            Self::No2OutdoorLte => "NO2_LTE",
+            Self::Pir => "PIR",
+            Self::Co2Noise => "CO2_NOISE",
+            Self::DuoMaster => "DUO_MASTER",
+            Self::DuoSlave => "DUO_SLAVE",
+            Self::Matrix => "MATRIX",
+            Self::Unknown(_) => "UNKNOWN",
+        }
+    }
+
+    pub(crate) const fn has_particulate(self) -> bool {
+        matches!(self, Self::ParticulateMatter)
+    }
+
+    pub(crate) const fn has_co2(self) -> bool {
+        matches!(
+            self,
+            Self::Co2 | Self::Co2Battery | Self::Co2Noise | Self::DuoMaster | Self::DuoSlave
+        )
+    }
+
+    pub(crate) const fn has_noise(self) -> bool {
+        matches!(self, Self::Co2Noise)
+    }
+
+    pub(crate) const fn has_ambient_light(self) -> bool {
+        !self.has_noise()
     }
 }
 
@@ -103,7 +194,10 @@ impl Catalog {
         }
     }
 
-    pub(crate) fn update(&mut self, reading: Reading, now_ms: u64) {
+    pub(crate) fn update(&mut self, reading: Reading, now_ms: u64, filter: Filter) {
+        if !filter.contains(reading.board_id) {
+            return;
+        }
         let mut empty = None;
         let mut oldest = 0;
         for (index, sensor) in self.sensors.iter().enumerate() {
@@ -137,6 +231,24 @@ impl Catalog {
             reports: 1,
         });
         self.update_count = self.update_count.wrapping_add(1);
+    }
+
+    pub(crate) fn retain_filter(&mut self, filter: Filter) {
+        if filter.is_all() {
+            return;
+        }
+        for sensor in &mut self.sensors {
+            if sensor.is_some_and(|sensor| !filter.contains(sensor.reading.board_id)) {
+                *sensor = None;
+            }
+        }
+    }
+
+    pub(crate) fn find(self, board_id: u32) -> Option<Sensor> {
+        self.sensors
+            .into_iter()
+            .flatten()
+            .find(|sensor| sensor.reading.board_id == board_id)
     }
 }
 
@@ -283,8 +395,8 @@ mod tests {
         )
         .unwrap();
         let mut catalog = Catalog::new();
-        catalog.update(reading, 10);
-        catalog.update(reading, 20);
+        catalog.update(reading, 10, Filter::all());
+        catalog.update(reading, 20, Filter::all());
         let sensor = catalog.sensors[0].unwrap();
         assert_eq!(sensor.reports, 2);
         assert_eq!(sensor.last_seen_ms, 20);
@@ -299,5 +411,40 @@ mod tests {
         payload[7..9].copy_from_slice(&83_u16.swap_bytes().to_le_bytes());
         let reading = parse_hibouair(&payload).unwrap();
         assert_eq!(reading.noise_db_spl, 37);
+    }
+
+    #[test]
+    fn parses_and_applies_sensor_filter() {
+        let filter = Filter::parse("22005a,#22008C,22005A").unwrap();
+        assert_eq!(filter.ids[0], Some(0x22005a));
+        assert_eq!(filter.ids[1], Some(0x22008c));
+        assert!(filter.ids[2].is_none());
+        assert!(filter.contains(0x22005a));
+        assert!(!filter.contains(0x22026a));
+        assert!(Filter::parse("22005").is_none());
+        assert!(Filter::parse("ALL").unwrap().is_all());
+    }
+
+    #[test]
+    fn filtered_catalog_retains_only_whitelisted_sensors() {
+        let mut first = parse_advertisement_hex(
+            b"0201061BFF5B07050422005A0000BA27C60017013E0000000000000001C002",
+        )
+        .unwrap();
+        let mut second = first;
+        second.board_id = 0x22008c;
+        let mut catalog = Catalog::new();
+        catalog.update(first, 10, Filter::all());
+        catalog.update(second, 20, Filter::all());
+
+        let filter = Filter::parse("22008C").unwrap();
+        catalog.retain_filter(filter);
+        catalog.update(first, 30, filter);
+
+        assert!(catalog.find(0x22005a).is_none());
+        assert_eq!(catalog.find(0x22008c).unwrap().last_seen_ms, 20);
+        first.board_id = 0x22026a;
+        catalog.update(first, 40, filter);
+        assert!(catalog.find(0x22026a).is_none());
     }
 }
