@@ -82,6 +82,25 @@ of separate adapters:
 - Compile-time profiles for four Adafruit RP2040 boards
 - Board status indication while the USB network is not ready, where available
 
+## Hardware-tested USB devices
+
+The following devices have been exercised on the Feather RP2040 USB Host
+profile. This is an acceptance-test list rather than an exhaustive compatibility
+list; the generic CDC-ACM, FTDI, HID, USBTMC, and UAC1 paths may accept other
+descriptor-compatible devices.
+
+| Device | VID:PID | Verified path |
+| --- | --- | --- |
+| BleuIO USB dongle | `2DCF:6002` | CDC-ACM, raw TCP, HibouAir panel and SCPI catalog |
+| Waveshare USB-TO-LoRa-xF | `1A86:55D3` | CDC-ACM raw TCP |
+| FTDI FT232R breakout | `0403:6001` | FTDI UART raw TCP and loopback |
+| DLP Design DLP-IOR4 | `0403:6001` | FTDI UART raw TCP at 9600 baud |
+| Velleman K8055/P8055 | `10CF:5500`–`10CF:5503` | Low-speed HID and SCPI |
+| Keysight 34450A | `2A8D:B318` | USBTMC/USB488 and SCPI TCP |
+| Keysight MSO-X 3054A | `0957:17A2` | USBTMC/USB488 and SCPI TCP |
+| MetaGeek Wi-Spy Original | `1781:083E` | Low-speed HID spectrum panel |
+| NAD room-correction microphone | `17AE:000E` | UAC1 capture and browser FFT |
+
 ## Hardware
 
 Supported board profiles:
@@ -166,7 +185,7 @@ These settings are intentionally repeated here because Cargo does not inherit a
 dependency crate's release profile.
 
 ```sh
-cargo build --release
+cargo build --locked --release
 ```
 
 The default feature is:
@@ -191,19 +210,19 @@ discovery still comes from mDNS.
 For the regular Adafruit Feather RP2040:
 
 ```sh
-cargo build --release --no-default-features --features board-adafruit-feather-rp2040
+cargo build --locked --release --no-default-features --features board-adafruit-feather-rp2040
 ```
 
 For the Adafruit KB2040:
 
 ```sh
-cargo build --release --no-default-features --features board-adafruit-kb2040
+cargo build --locked --release --no-default-features --features board-adafruit-kb2040
 ```
 
 For the Adafruit Feather RP2040 USB Host:
 
 ```sh
-cargo build --release --no-default-features --features board-adafruit-rp2040-usb-host
+cargo build --locked --release --no-default-features --features board-adafruit-rp2040-usb-host
 ```
 
 The three non-CAN profiles exclude the `mcp25xx` dependency, CAN task, CAN HTTP
@@ -211,7 +230,7 @@ page and `/can` WebSocket endpoint from the resulting firmware. The USB-host
 profile adds
 [`embassy-rp-pio-usb-host`](https://github.com/ulso/embassy-rp-pio-usb-host)
 as an optional Git dependency pinned to commit
-`53e03cd490894f26b601bdfc165972dd472a27d2`.
+`2fa4136ae9a9e0ec2714052069488c27b031b529`.
 
 ## Flash
 
@@ -224,13 +243,13 @@ runner = "elf2uf2-rs --deploy --serial --verbose"
 With the Pico in BOOTSEL mode, this should usually be enough:
 
 ```sh
-cargo run --release
+cargo run --locked --release
 ```
 
 Select a different board while flashing in the same way as while building:
 
 ```sh
-cargo run --release --no-default-features --features board-adafruit-kb2040
+cargo run --locked --release --no-default-features --features board-adafruit-kb2040
 ```
 
 ## Firmware releases

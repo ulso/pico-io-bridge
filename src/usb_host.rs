@@ -2259,29 +2259,33 @@ async fn root_port_monitor<'d>(host_state: &PioHostState<Rp2040PioEngine<'d>>) {
         }
 
         if Instant::now() >= next_diagnostic_snapshot {
-            let diagnostics = host_state.snapshot_in_transaction_diagnostics().await;
-            let mut status = HOST_STATE.lock().await;
-            status.wire_in_attempts = diagnostics.attempt_count;
-            status.wire_in_data_accepted = diagnostics.accepted_data_count;
-            status.wire_in_nak = diagnostics.nak_count;
-            status.wire_in_no_response = diagnostics.no_response_count;
-            status.wire_in_invalid_or_stall = diagnostics.invalid_or_stall_count;
-            status.unexpected_toggle_count = diagnostics.unexpected_toggle_count;
-            status.accepted_zlp_count = diagnostics.accepted_zlp_count;
-            match diagnostics.latest_unexpected_toggle {
-                Some(latest) => {
-                    status.latest_expected_pid = Some(latest.expected_pid);
-                    status.latest_actual_pid = Some(latest.actual_pid);
-                    status.latest_payload_len = Some(latest.payload_len);
-                    status.latest_payload_prefix_len = latest.payload_prefix_len;
-                    status.latest_payload_prefix = latest.payload_prefix;
-                }
-                None => {
-                    status.latest_expected_pid = None;
-                    status.latest_actual_pid = None;
-                    status.latest_payload_len = None;
-                    status.latest_payload_prefix_len = 0;
-                    status.latest_payload_prefix = [0; DIAGNOSTIC_PAYLOAD_PREFIX_CAPACITY];
+            // Optional diagnostics must never block the 1 ms root-port line
+            // monitor behind a continuously active isochronous pipe. Missing
+            // one snapshot is harmless; missing detach samples is not.
+            if let Some(diagnostics) = host_state.try_snapshot_in_transaction_diagnostics() {
+                let mut status = HOST_STATE.lock().await;
+                status.wire_in_attempts = diagnostics.attempt_count;
+                status.wire_in_data_accepted = diagnostics.accepted_data_count;
+                status.wire_in_nak = diagnostics.nak_count;
+                status.wire_in_no_response = diagnostics.no_response_count;
+                status.wire_in_invalid_or_stall = diagnostics.invalid_or_stall_count;
+                status.unexpected_toggle_count = diagnostics.unexpected_toggle_count;
+                status.accepted_zlp_count = diagnostics.accepted_zlp_count;
+                match diagnostics.latest_unexpected_toggle {
+                    Some(latest) => {
+                        status.latest_expected_pid = Some(latest.expected_pid);
+                        status.latest_actual_pid = Some(latest.actual_pid);
+                        status.latest_payload_len = Some(latest.payload_len);
+                        status.latest_payload_prefix_len = latest.payload_prefix_len;
+                        status.latest_payload_prefix = latest.payload_prefix;
+                    }
+                    None => {
+                        status.latest_expected_pid = None;
+                        status.latest_actual_pid = None;
+                        status.latest_payload_len = None;
+                        status.latest_payload_prefix_len = 0;
+                        status.latest_payload_prefix = [0; DIAGNOSTIC_PAYLOAD_PREFIX_CAPACITY];
+                    }
                 }
             }
             next_diagnostic_snapshot = Instant::now() + DIAGNOSTIC_SNAPSHOT_INTERVAL;

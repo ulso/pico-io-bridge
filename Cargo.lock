@@ -596,7 +596,7 @@ dependencies = [
 [[package]]
 name = "embassy-rp-pio-usb-host"
 version = "0.3.0"
-source = "git+https://github.com/ulso/embassy-rp-pio-usb-host?rev=53e03cd490894f26b601bdfc165972dd472a27d2#53e03cd490894f26b601bdfc165972dd472a27d2"
+source = "git+https://github.com/ulso/embassy-rp-pio-usb-host?rev=2fa4136ae9a9e0ec2714052069488c27b031b529#2fa4136ae9a9e0ec2714052069488c27b031b529"
 dependencies = [
  "cortex-m",
  "cortex-m-rt",
