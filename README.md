@@ -1,7 +1,8 @@
-# Pico I/O Bridge for RP2040
+# Pico I/O Bridge for RP2040/RP2350
 
-Rust firmware for supported RP2040 boards that exposes their hardware
-interfaces over USB CDC-NCM. The board appears as a small USB Ethernet device,
+Rust firmware for supported RP2040 and RP2350 boards that exposes their
+hardware interfaces over USB CDC-NCM. The board appears as a small USB
+Ethernet device,
 advertises a board-specific `.local` hostname, serves browser consoles, and
 accepts bus commands over WebSocket and instrument commands over SCPI-RAW.
 
@@ -16,8 +17,9 @@ RP2040 PIO blocks while the native USB controller remains the CDC-NCM device.
 
 ## Why Pico I/O Bridge?
 
-Pico I/O Bridge turns inexpensive RP2040 hardware into a compact, open network
-gateway for instruments, sensors, and laboratory I/O. It provides several
+Pico I/O Bridge turns inexpensive RP2040 and RP2350 hardware into a compact,
+open network gateway for instruments, sensors, and laboratory I/O. It provides
+several
 capabilities that would otherwise require a PC, vendor software, or a collection
 of separate adapters:
 
