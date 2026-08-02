@@ -2,7 +2,7 @@
 edition = "2024"
 rust-version = "1.96.0"
 name = "pico-io-bridge"
-version = "0.1.0"
+version = "0.2.0"
 license = "MIT"
 repository = "https://github.com/ulso/pico-io-bridge"
 resolver = "2"
