@@ -55,6 +55,12 @@ jobs:
           rustup toolchain install 1.96.0 --profile minimal --target ${{ matrix.target }}
           rustup default 1.96.0
 
+      - name: Install Arm embedded C compiler
+        if: matrix.target == 'thumbv6m-none-eabi'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends gcc-arm-none-eabi
+
       - name: Install UF2 converter
         if: matrix.converter == 'elf2uf2'
         run: cargo install elf2uf2-rs --version 2.2.0 --locked --no-default-features
