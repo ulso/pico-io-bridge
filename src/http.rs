@@ -26,17 +26,62 @@ enum WebSocketEndpoint {
     I2c,
 }
 
-#[cfg(feature = "pio-usb-host")]
+#[cfg(all(feature = "pio-usb-host", feature = "local-apps"))]
+const API_STATUS_CAPABILITIES: &str = r#","interfaces":["usb-host","usb-serial","usbtmc","i2c","scpi","local-apps"],"usbSerial":{"protocol":"RAW","port":7000,"service":"_usbserial._tcp"},"usbtmc":{"protocol":"SCPI-RAW","port":5026,"service":"_usbtmc._tcp"},"websocket":"/i2c","websockets":["/i2c","/audio"],"audio":{"protocol":"PCM_S16LE","sampleRateHz":48000,"channels":1,"websocket":"/audio"},"pages":{"i2c":"/","usb":"/usb-host.html","scpi":"/scpi.html","apps":"/apps.html"}"#;
+#[cfg(all(feature = "pio-usb-host", not(feature = "local-apps")))]
 const API_STATUS_CAPABILITIES: &str = r#","interfaces":["usb-host","usb-serial","usbtmc","i2c","scpi"],"usbSerial":{"protocol":"RAW","port":7000,"service":"_usbserial._tcp"},"usbtmc":{"protocol":"SCPI-RAW","port":5026,"service":"_usbtmc._tcp"},"websocket":"/i2c","websockets":["/i2c","/audio"],"audio":{"protocol":"PCM_S16LE","sampleRateHz":48000,"channels":1,"websocket":"/audio"},"pages":{"i2c":"/","usb":"/usb-host.html","scpi":"/scpi.html"}"#;
-#[cfg(all(not(feature = "pio-usb-host"), feature = "can", feature = "i2c"))]
+#[cfg(all(
+    not(feature = "pio-usb-host"),
+    feature = "can",
+    feature = "i2c",
+    feature = "local-apps"
+))]
+const API_STATUS_CAPABILITIES: &str = r#","interfaces":["can","i2c","scpi","local-apps"],"websocket":"/can","websockets":["/can","/i2c"],"pages":{"can":"/","i2c":"/i2c.html","scpi":"/scpi.html","apps":"/apps.html"}"#;
+#[cfg(all(
+    not(feature = "pio-usb-host"),
+    feature = "can",
+    feature = "i2c",
+    not(feature = "local-apps")
+))]
 const API_STATUS_CAPABILITIES: &str = r#","interfaces":["can","i2c","scpi"],"websocket":"/can","websockets":["/can","/i2c"],"pages":{"can":"/","i2c":"/i2c.html","scpi":"/scpi.html"}"#;
-#[cfg(all(not(feature = "pio-usb-host"), feature = "can", not(feature = "i2c")))]
+#[cfg(all(
+    not(feature = "pio-usb-host"),
+    feature = "can",
+    not(feature = "i2c"),
+    feature = "local-apps"
+))]
+const API_STATUS_CAPABILITIES: &str = r#","interfaces":["can","scpi","local-apps"],"websocket":"/can","websockets":["/can"],"pages":{"can":"/","scpi":"/scpi.html","apps":"/apps.html"}"#;
+#[cfg(all(
+    not(feature = "pio-usb-host"),
+    feature = "can",
+    not(feature = "i2c"),
+    not(feature = "local-apps")
+))]
 const API_STATUS_CAPABILITIES: &str = r#","interfaces":["can","scpi"],"websocket":"/can","websockets":["/can"],"pages":{"can":"/","scpi":"/scpi.html"}"#;
-#[cfg(all(not(feature = "pio-usb-host"), not(feature = "can"), feature = "i2c"))]
+#[cfg(all(
+    not(feature = "pio-usb-host"),
+    not(feature = "can"),
+    feature = "i2c",
+    feature = "local-apps"
+))]
+const API_STATUS_CAPABILITIES: &str = r#","interfaces":["i2c","scpi","local-apps"],"websocket":"/i2c","websockets":["/i2c"],"pages":{"i2c":"/","scpi":"/scpi.html","apps":"/apps.html"}"#;
+#[cfg(all(
+    not(feature = "pio-usb-host"),
+    not(feature = "can"),
+    feature = "i2c",
+    not(feature = "local-apps")
+))]
 const API_STATUS_CAPABILITIES: &str = r#","interfaces":["i2c","scpi"],"websocket":"/i2c","websockets":["/i2c"],"pages":{"i2c":"/","scpi":"/scpi.html"}"#;
 #[cfg(all(
     not(feature = "pio-usb-host"),
-    not(any(feature = "can", feature = "i2c"))
+    not(any(feature = "can", feature = "i2c")),
+    feature = "local-apps"
+))]
+const API_STATUS_CAPABILITIES: &str = r#","interfaces":["scpi","local-apps"],"websockets":[],"pages":{"scpi":"/scpi.html","apps":"/apps.html"}"#;
+#[cfg(all(
+    not(feature = "pio-usb-host"),
+    not(any(feature = "can", feature = "i2c")),
+    not(feature = "local-apps")
 ))]
 const API_STATUS_CAPABILITIES: &str =
     r#","interfaces":["scpi"],"websockets":[],"pages":{"scpi":"/scpi.html"}"#;
@@ -220,6 +265,124 @@ async fn write_http_response(
     );
     write_all(socket, header.as_bytes()).await?;
     write_all(socket, body).await
+}
+
+#[cfg(feature = "local-apps")]
+fn request_target(request: &str) -> Option<&str> {
+    request.lines().next()?.split_ascii_whitespace().nth(1)
+}
+
+#[cfg(feature = "local-apps")]
+fn query_value<'a>(target: &'a str, key: &str) -> Option<&'a str> {
+    let (_, query) = target.split_once('?')?;
+    query.split('&').find_map(|part| {
+        let (name, value) = part.split_once('=')?;
+        (name == key).then_some(value)
+    })
+}
+
+#[cfg(feature = "local-apps")]
+async fn apps_write_allowed() -> bool {
+    #[cfg(feature = "pio-usb-host")]
+    {
+        let status = crate::usb_host::status().await;
+        status.phase == crate::usb_host::Phase::Waiting && status.address == 0
+    }
+    #[cfg(not(feature = "pio-usb-host"))]
+    {
+        true
+    }
+}
+
+#[cfg(feature = "local-apps")]
+async fn write_apps_status_response(
+    socket: &mut TcpSocket<'_>,
+) -> Result<(), embassy_net::tcp::Error> {
+    let safe = apps_write_allowed().await;
+    let mut body = String::<4096>::new();
+    match crate::local_apps::status() {
+        Ok(status) => {
+            write!(
+                body,
+                "{{\"available\":true,\"formatted\":{},\"writeAllowed\":{},\"totalBytes\":{},\"freeBytes\":{},\"files\":[",
+                status.formatted, safe, status.total, status.available
+            )
+            .unwrap();
+            for (index, file) in status.files.iter().enumerate() {
+                if index != 0 {
+                    body.push(',').unwrap();
+                }
+                write!(
+                    body,
+                    "{{\"name\":\"{}\",\"size\":{},\"url\":\"/apps/{}\"}}",
+                    file.name, file.size, file.name
+                )
+                .unwrap();
+            }
+            body.push_str("]}").unwrap();
+            write_http_response(socket, "application/json", body.as_bytes()).await
+        }
+        Err(_) => {
+            write_http_response(
+                socket,
+                "application/json",
+                b"{\"available\":true,\"error\":\"filesystem\"}",
+            )
+            .await
+        }
+    }
+}
+
+#[cfg(feature = "local-apps")]
+async fn write_apps_result(
+    socket: &mut TcpSocket<'_>,
+    result: Result<(), littlefs2::io::Error>,
+) -> Result<(), embassy_net::tcp::Error> {
+    match result {
+        Ok(()) => {
+            write_all(
+                socket,
+                b"HTTP/1.1 204 No Content\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
+            )
+            .await
+        }
+        Err(error) if error == littlefs2::io::Error::NO_SPACE => {
+            write_empty_response(socket, "507 Insufficient Storage").await
+        }
+        Err(error) if error == littlefs2::io::Error::INVALID => {
+            write_empty_response(socket, "400 Bad Request").await
+        }
+        Err(error) if error == littlefs2::io::Error::NO_SUCH_ENTRY => write_not_found(socket).await,
+        Err(_) => write_empty_response(socket, "500 Internal Server Error").await,
+    }
+}
+
+#[cfg(feature = "local-apps")]
+async fn serve_app_file(
+    socket: &mut TcpSocket<'_>,
+    name: &str,
+) -> Result<(), embassy_net::tcp::Error> {
+    const CHUNK: usize = 1024;
+    let Ok((first, total)) = crate::local_apps::read_chunk::<CHUNK>(name, 0) else {
+        write_not_found(socket).await?;
+        return Ok(());
+    };
+    let mut header = String::<192>::new();
+    write!(header, "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Security-Policy: default-src 'self' 'unsafe-inline'; connect-src 'self' ws: wss:\r\nConnection: close\r\nContent-Length: {}\r\n\r\n", total).unwrap();
+    write_all(socket, header.as_bytes()).await?;
+    write_all(socket, &first).await?;
+    let mut offset = first.len();
+    while offset < total {
+        let Ok((chunk, _)) = crate::local_apps::read_chunk::<CHUNK>(name, offset) else {
+            break;
+        };
+        if chunk.is_empty() {
+            break;
+        }
+        offset += chunk.len();
+        write_all(socket, &chunk).await?;
+    }
+    Ok(())
 }
 
 async fn write_api_status_response(
@@ -498,7 +661,15 @@ async fn serve_http_connection(
         }
     }
 
-    let Ok(request) = core::str::from_utf8(&rx_buf[..len]) else {
+    let Some(header_end) = rx_buf[..len]
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .map(|p| p + 4)
+    else {
+        write_empty_response(socket, "431 Request Header Fields Too Large").await?;
+        return Ok(());
+    };
+    let Ok(request) = core::str::from_utf8(&rx_buf[..header_end]) else {
         write_all(
             socket,
             b"HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
@@ -522,6 +693,13 @@ async fn serve_http_connection(
         return Ok(());
     }
 
+    #[cfg(feature = "local-apps")]
+    if request.starts_with("GET /apps.html ") {
+        const BODY: &[u8] = include_bytes!("apps.html");
+        write_http_response(socket, "text/html", BODY).await?;
+        return Ok(());
+    }
+
     #[cfg(feature = "pio-usb-host")]
     {
         if request.starts_with("GET /usb-host.html ") {
@@ -529,6 +707,96 @@ async fn serve_http_connection(
             write_http_response(socket, "text/html", BODY).await?;
             return Ok(());
         }
+    }
+
+    #[cfg(feature = "local-apps")]
+    if request.starts_with("GET /api/apps/status ") {
+        write_apps_status_response(socket).await?;
+        return Ok(());
+    }
+
+    #[cfg(feature = "local-apps")]
+    if request.starts_with("POST /api/apps/format ") {
+        if !apps_write_allowed().await {
+            write_empty_response(socket, "409 Conflict").await?;
+        } else {
+            write_apps_result(socket, crate::local_apps::format()).await?;
+        }
+        return Ok(());
+    }
+
+    #[cfg(feature = "local-apps")]
+    if request.starts_with("DELETE /api/apps/file?") {
+        let name = request_target(request)
+            .and_then(|target| query_value(target, "name"))
+            .and_then(|value| String::<64>::try_from(value).ok());
+        if !apps_write_allowed().await {
+            write_empty_response(socket, "409 Conflict").await?;
+        } else if let Some(name) = name {
+            write_apps_result(socket, crate::local_apps::remove(&name)).await?;
+        } else {
+            write_empty_response(socket, "400 Bad Request").await?;
+        }
+        return Ok(());
+    }
+
+    #[cfg(feature = "local-apps")]
+    if request.starts_with("PUT /api/apps/file?") {
+        let target = request_target(request);
+        let name = target
+            .and_then(|target| query_value(target, "name"))
+            .and_then(|value| String::<64>::try_from(value).ok());
+        let offset = target
+            .and_then(|target| query_value(target, "offset"))
+            .and_then(|value| value.parse::<usize>().ok());
+        let content_length =
+            header_value(request, "Content-Length").and_then(|value| value.parse::<usize>().ok());
+
+        if !apps_write_allowed().await {
+            write_empty_response(socket, "409 Conflict").await?;
+            return Ok(());
+        }
+        let (Some(name), Some(offset), Some(content_length)) = (name, offset, content_length)
+        else {
+            write_empty_response(socket, "400 Bad Request").await?;
+            return Ok(());
+        };
+        if content_length > crate::local_apps::MAX_UPLOAD_CHUNK {
+            write_empty_response(socket, "413 Content Too Large").await?;
+            return Ok(());
+        }
+
+        let mut body = [0u8; crate::local_apps::MAX_UPLOAD_CHUNK];
+        let already_read = (len - header_end).min(content_length);
+        body[..already_read].copy_from_slice(&rx_buf[header_end..header_end + already_read]);
+        let mut body_len = already_read;
+        while body_len < content_length {
+            let n = socket.read(&mut body[body_len..content_length]).await?;
+            if n == 0 {
+                write_empty_response(socket, "400 Bad Request").await?;
+                return Ok(());
+            }
+            body_len += n;
+        }
+        write_apps_result(
+            socket,
+            crate::local_apps::write_chunk(&name, offset, &body[..content_length]),
+        )
+        .await?;
+        return Ok(());
+    }
+
+    #[cfg(feature = "local-apps")]
+    if request.starts_with("GET /apps/") {
+        let name = request_target(request)
+            .and_then(|target| target.strip_prefix("/apps/"))
+            .and_then(|value| String::<64>::try_from(value).ok());
+        if let Some(name) = name {
+            serve_app_file(socket, &name).await?;
+        } else {
+            write_not_found(socket).await?;
+        }
+        return Ok(());
     }
 
     let websocket_endpoint = websocket_endpoint(request);

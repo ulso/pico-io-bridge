@@ -35,6 +35,8 @@ mod i2c;
 mod json;
 #[cfg(feature = "i2c")]
 mod lc709203f;
+#[cfg(feature = "local-apps")]
+mod local_apps;
 #[cfg(feature = "mdns")]
 mod mdns;
 mod network;
@@ -195,6 +197,13 @@ async fn main(spawner: Spawner) {
         flash_uid = *b"pico-io!";
         warn!("flash unique ID read failed, using fallback identity seed");
     }
+    #[cfg(feature = "local-apps")]
+    local_apps::init(flash).await;
+    #[cfg(all(
+        not(feature = "local-apps"),
+        not(feature = "board-waveshare-rp2350-usb-a")
+    ))]
+    let _ = flash;
     #[cfg(feature = "board-waveshare-rp2350-usb-a")]
     let flash_uid = match embassy_rp::otp::get_chipid() {
         Ok(chip_id) => chip_id.to_be_bytes(),

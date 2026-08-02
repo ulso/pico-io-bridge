@@ -70,6 +70,8 @@ of separate adapters:
 - PCT2075 external temperature measurements over SCPI
 - Adafruit seesaw rotary encoder position, delta, and push-button state over SCPI
 - Built-in browser CAN and I2C consoles
+- A 2 MB LittleFS app partition and browser-based App Kit for installing
+  self-contained local HTML tools on supported 8 MB Adafruit RP2040 boards
 - WebSocket CAN API at `/can`
 - WebSocket I2C API at `/i2c`
 - MCP25625 CAN support via the `mcp25xx` crate
@@ -961,8 +963,45 @@ and `DEV:CLEAR` disable the button pull-up.
 
 ## Local HTML Apps
 
-Custom control pages do not have to be uploaded to the Pico. A standalone HTML
-file on the host can connect directly to any endpoint enabled in the firmware:
+The four 8 MB Adafruit RP2040 profiles reserve the final 2 MB of flash for a
+LittleFS app partition. Open the **Apps** tab to format that partition, upload
+self-contained `.html` files, launch installed apps, or delete them. Installed
+pages are served at stable board-relative URLs such as:
+
+```text
+http://pico-io-usb-host-635b2c.local/apps/environment.html
+```
+
+Uploads are written in 512-byte chunks, so even relatively large pages do not
+need to fit in firmware RAM. Apps should keep their HTML, CSS, and JavaScript in
+one file and use relative endpoints such as `/api/status`, `/can`, `/i2c`, or
+the board's other documented APIs. This makes the same app work on any board
+without embedding its UID-suffixed hostname.
+
+Flash maintenance is deliberately locked while a PIO USB-host device is
+attached. Disconnect the hosted device and wait for the USB page to report
+`Waiting` before formatting, uploading, or deleting apps. HTTP returns
+`409 Conflict` if this safety condition is not met. Reads and app execution do
+not require maintenance mode.
+
+The Apps page uses these HTTP endpoints:
+
+| Endpoint | Purpose |
+| --- | --- |
+| `GET /api/apps/status` | Filesystem state, free space, write lock, and installed files |
+| `POST /api/apps/format` | Format the dedicated app partition |
+| `PUT /api/apps/file?name=NAME.html&offset=N` | Write one binary chunk at an explicit offset |
+| `DELETE /api/apps/file?name=NAME.html` | Delete an installed app |
+| `GET /apps/NAME.html` | Run or download an installed app |
+
+Each `PUT` body is limited to 512 bytes. An offset of zero creates or truncates
+the file; later chunks extend it.
+
+The 2 MB Waveshare RP2350-USB-A profile has no app partition and therefore does
+not expose the Apps tab. Its entire flash remains available to firmware.
+
+A standalone HTML file on the host can still connect directly to any endpoint
+enabled in the firmware:
 
 ```text
 ws://pico-io-can-feather-635b2c.local/can
@@ -971,8 +1010,8 @@ ws://pico-io-can-feather-635b2c.local/i2c
 
 For example, `examples/led_control.html` can be opened directly in Safari and
 prompts for the UID-suffixed board hostname before switching a CAN-connected
-LED node on and off. When served by the board, it uses the current host. This
-keeps the firmware simple while still allowing project-specific browser tools.
+LED node on and off. Uploading a self-contained version through App Kit removes
+that hostname prompt because the page can use its current host.
 
 ## CAN WebSocket API
 
@@ -1118,8 +1157,10 @@ Example:
   therefore probes each address with a one-byte read, which may affect devices
   whose reads have side effects.
 - I2C transactions currently have no automatic stuck-bus recovery.
-- There is no flash filesystem or custom page upload support in this Rust
-  version yet. The firmware serves the built-in consoles selected at build time.
+- Local HTML apps are currently single-file `.html` documents. App directories,
+  multi-file bundles, atomic package installation, and cryptographic signing are
+  not implemented. The filesystem is available only on the 8 MB Adafruit RP2040
+  profiles, and flash writes are rejected while a PIO USB-host device is active.
 
 ## Notes
 

@@ -9,18 +9,19 @@ resolver = "2"
 
 [features]
 default = ["board-adafruit-rp2040-can"]
-board-adafruit-rp2040-can = ["mdns", "dhcp-server", "mcp25625", "i2c", "embassy-rp/rp2040"]
-board-adafruit-feather-rp2040 = ["mdns", "dhcp-server", "i2c", "embassy-rp/rp2040", "embassy-rp/boot2-generic-03h"]
+board-adafruit-rp2040-can = ["mdns", "dhcp-server", "mcp25625", "i2c", "local-apps", "embassy-rp/rp2040"]
+board-adafruit-feather-rp2040 = ["mdns", "dhcp-server", "i2c", "local-apps", "embassy-rp/rp2040", "embassy-rp/boot2-generic-03h"]
 board-adafruit-rp2040-usb-host = [
     "mdns",
     "dhcp-server",
     "i2c",
+    "local-apps",
     "pio-usb-host",
     "embassy-rp-pio-usb-host/rp2040",
     "embassy-rp/rp2040",
     "embassy-rp/boot2-generic-03h",
 ]
-board-adafruit-kb2040 = ["mdns", "dhcp-server", "i2c", "embassy-rp/rp2040"]
+board-adafruit-kb2040 = ["mdns", "dhcp-server", "i2c", "local-apps", "embassy-rp/rp2040"]
 board-waveshare-rp2350-usb-a = [
     "mdns",
     "dhcp-server",
@@ -38,6 +39,7 @@ mdns = ["dep:embedded-alloc", "dep:hick-embassy", "dep:mdns-proto", "hick-embass
 dhcp-server = ["dep:leasehund", "leasehund/defmt", "embassy-net/dhcpv4"]
 can = ["dep:embedded-hal-1", "dep:embedded-hal-bus", "dep:mcp25xx", "dep:nb"]
 i2c = ["dep:vl53l4cd"]
+local-apps = ["dep:delog", "dep:littlefs2", "dep:littlefs2-sys"]
 mcp2515 = ["can", "mcp25xx/mcp2515"]
 mcp25625 = ["can", "mcp25xx/mcp25625"]
 
@@ -76,6 +78,9 @@ embedded-hal-async = "1.0.0"
 embedded-hal-bus = { version = "0.3.0", features = ["async"], optional = true }
 embedded-io-async = { version = "0.7.0", features = ["defmt"] }
 embedded-storage = { version = "0.3.1" }
+delog = { version = "0.1.8", features = ["portable-atomic"], optional = true }
+littlefs2 = { version = "0.8.0", default-features = false, features = ["c-stubs"], optional = true }
+littlefs2-sys = { version = "0.4.0", features = ["tinyrlibc"], optional = true }
 static_cell = "2.1.1"
 smart-leds = "0.4.0"
 portable-atomic = { version = "1.13.1", features = ["critical-section"] }

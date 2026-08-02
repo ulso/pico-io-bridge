@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Pico I/O Bridge · Apps</title>
+<link rel="icon" href="data:,">
+<style>
+:root{color-scheme:light dark;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+body{margin:0;background:#f3f5f7;color:#17202a}main{max-width:1120px;margin:0 auto;padding:20px}
+header{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;margin-bottom:16px}h1{font-size:24px;margin:0 0 4px}.sub,.hint{color:#65717d}.status{display:flex;align-items:center;gap:8px;font-weight:650}.dot{width:10px;height:10px;border-radius:50%;background:#d99a22}.ok .dot{background:#1f9d55}.bad .dot{background:#d64545}
+.toolbar{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-bottom:16px}.navlink,button{box-sizing:border-box;display:inline-flex;align-items:center;border:1px solid #9aa7b2;background:#fff;color:#17202a;border-radius:6px;padding:8px 12px;text-decoration:none;font:inherit;font-weight:650;min-height:38px}.navlink.active,.primary{background:#17202a;color:#fff;border-color:#17202a}button:disabled{opacity:.45}.danger{color:#b42318}
+.grid{display:grid;grid-template-columns:minmax(300px,380px) 1fr;gap:16px}.panel{border:1px solid #c7d0da;background:#fff;border-radius:8px;padding:16px}h2{font-size:17px;margin:0 0 12px}.metric{display:flex;justify-content:space-between;gap:12px;padding:9px 0;border-bottom:1px solid #e4e9ee}.metric:last-child{border:0}.metric span{color:#65717d}.metric strong{font-weight:700}
+input[type=file]{box-sizing:border-box;width:100%;border:1px solid #bdc7d1;border-radius:6px;padding:10px;background:#fff;margin:8px 0 12px}.notice{border:1px solid #e5bd72;background:#fff7e6;border-radius:7px;padding:10px 12px;margin:12px 0;font-size:13px}.notice.ok{border-color:#92d1ae;background:#edf9f2}.progress{height:7px;border-radius:5px;background:#e4e9ee;overflow:hidden;margin:10px 0}.progress span{display:block;height:100%;width:0;background:#1f9d55;transition:width .1s}
+.files{display:grid;gap:8px}.file{display:grid;grid-template-columns:1fr auto auto;gap:10px;align-items:center;border:1px solid #d7dee6;border-radius:7px;padding:10px}.file a{font-weight:700;color:#285ea8;text-decoration:none}.file small{color:#65717d}.empty{color:#65717d;padding:20px 0;text-align:center}
+@media(max-width:760px){main{padding:14px}.grid{grid-template-columns:1fr}header{flex-direction:column}.file{grid-template-columns:1fr auto}.file small{grid-column:1}}
+@media(prefers-color-scheme:dark){body{background:#111820;color:#edf2f7}.panel,.navlink,button,input[type=file]{background:#17212b;color:#edf2f7;border-color:#3b4b5c}.navlink.active,.primary{background:#edf2f7;color:#111820}.sub,.hint,.metric span,.file small,.empty{color:#b9c3cf}.metric{border-bottom-color:#273544}.file{border-color:#3b4b5c}.notice{background:#332a18;border-color:#806327}.notice.ok{background:#163525;border-color:#347751}}
+</style>
+</head>
+<body><main>
+<header><div><h1 id="title">Pico I/O Bridge</h1><div class="sub">Local HTML App Kit</div></div><div id="state" class="status"><span class="dot"></span><span id="stateText">loading</span></div></header>
+<nav id="nav" class="toolbar"><a class="navlink active" href="/apps.html">Apps</a></nav>
+<div class="grid">
+<section class="panel">
+<h2>App storage</h2>
+<div class="metric"><span>Filesystem</span><strong id="formatted">-</strong></div>
+<div class="metric"><span>Capacity</span><strong id="capacity">-</strong></div>
+<div class="metric"><span>Free</span><strong id="free">-</strong></div>
+<div id="safety" class="notice">Checking whether flash maintenance is safe…</div>
+<button id="format" class="danger" disabled>Format app storage</button>
+<p class="hint">Formatting erases only the dedicated 2 MB app partition. Firmware and settings are not changed.</p>
+</section>
+<section class="panel">
+<h2>Install an app</h2>
+<p class="hint">Choose one self-contained <code>.html</code> file. It is uploaded in 512-byte chunks and becomes available below.</p>
+<input id="file" type="file" accept=".html,text/html">
+<button id="upload" class="primary" disabled>Upload app</button>
+<div class="progress"><span id="bar"></span></div><div id="message" class="hint"></div>
+</section>
+</div>
+<section class="panel" style="margin-top:16px"><h2>Installed apps</h2><div id="files" class="files"><div class="empty">No apps installed</div></div></section>
+</main>
+<script>
+const state=document.getElementById("state"),stateText=document.getElementById("stateText"),formatted=document.getElementById("formatted"),capacity=document.getElementById("capacity"),free=document.getElementById("free"),safety=document.getElementById("safety"),formatBtn=document.getElementById("format"),fileEl=document.getElementById("file"),uploadBtn=document.getElementById("upload"),filesEl=document.getElementById("files"),bar=document.getElementById("bar"),message=document.getElementById("message"),nav=document.getElementById("nav"),title=document.getElementById("title");
+let info=null,busy=false;const labels={can:"CAN",i2c:"I2C",usb:"USB",scpi:"SCPI",apps:"Apps"};
+function bytes(n){if(n==null)return"-";if(n>=1048576)return(n/1048576).toFixed(2)+" MB";if(n>=1024)return(n/1024).toFixed(1)+" kB";return n+" B"}
+function esc(s){return String(s).replace(/[&<>\"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]))}
+async function loadIdentity(){try{const r=await fetch("/api/status",{cache:"no-store"}),s=await r.json();title.textContent="Pico I/O Bridge - "+s.board;nav.textContent="";for(const [key,url] of Object.entries(s.pages||{})){const a=document.createElement("a");a.className="navlink"+(key==="apps"?" active":"");a.href=url;a.textContent=labels[key]||key.toUpperCase();nav.appendChild(a)}}catch(e){}}
+function render(){const ready=info&&info.formatted,allowed=info&&info.writeAllowed;state.className="status "+(ready?"ok":info?"":"bad");stateText.textContent=!info?"unavailable":ready?"app storage ready":"app storage not formatted";formatted.textContent=!info?"-":ready?"LittleFS ready":"Not formatted";capacity.textContent=info?bytes(info.totalBytes):"-";free.textContent=ready?bytes(info.freeBytes):"-";formatBtn.disabled=busy||!allowed;uploadBtn.disabled=busy||!ready||!allowed||!fileEl.files.length;safety.className="notice"+(allowed?" ok":"");safety.textContent=allowed?"Maintenance is safe. No USB-host device is active.":"Flash writes locked: disconnect the USB-host device first.";filesEl.textContent="";const files=info&&info.files||[];if(!files.length){filesEl.innerHTML='<div class="empty">No apps installed</div>';return}for(const f of files){const row=document.createElement("div");row.className="file";row.innerHTML='<a target="_blank" href="'+esc(f.url)+'">'+esc(f.name)+'</a><small>'+bytes(f.size)+'</small><button class="danger" data-name="'+esc(f.name)+'" '+(!allowed||busy?'disabled':'')+'>Delete</button>';filesEl.appendChild(row)}}
+async function refresh(){try{const r=await fetch("/api/apps/status",{cache:"no-store"});if(!r.ok)throw Error(r.status);info=await r.json();render()}catch(e){info=null;render();message.textContent="Status request failed: "+e}}
+async function action(url,options){busy=true;render();try{const r=await fetch(url,options);if(!r.ok)throw Error("HTTP "+r.status);await refresh();return true}catch(e){message.textContent="Operation failed: "+e;return false}finally{busy=false;render()}}
+formatBtn.onclick=async()=>{if(!confirm("Erase all installed local apps?"))return;message.textContent="Formatting…";if(await action("/api/apps/format",{method:"POST"}))message.textContent="App storage formatted."};
+fileEl.onchange=render;
+uploadBtn.onclick=async()=>{const file=fileEl.files[0];if(!file)return;if(!/^[A-Za-z0-9_-][A-Za-z0-9_.-]*\.html$/.test(file.name)||file.name.length>63){message.textContent="Use a simple .html filename (letters, digits, dash, underscore and dot).";return}busy=true;render();message.textContent="Uploading "+file.name+"…";bar.style.width="0%";try{for(let offset=0;offset<file.size||offset===0;offset+=512){const chunk=file.slice(offset,Math.min(offset+512,file.size));const r=await fetch("/api/apps/file?name="+file.name+"&offset="+offset,{method:"PUT",headers:{"Content-Type":"application/octet-stream"},body:chunk});if(!r.ok)throw Error("HTTP "+r.status);bar.style.width=(file.size?Math.min(100,(offset+chunk.size)*100/file.size):100)+"%"}message.textContent="Installed "+file.name;fileEl.value="";await refresh()}catch(e){message.textContent="Upload failed: "+e}finally{busy=false;render()}};
+filesEl.onclick=async e=>{const b=e.target.closest("button[data-name]");if(!b)return;const name=b.dataset.name;if(confirm("Delete "+name+"?")){message.textContent="Deleting…";if(await action("/api/apps/file?name="+name,{method:"DELETE"}))message.textContent="Deleted "+name}};
+loadIdentity();refresh();setInterval(()=>{if(!busy)refresh()},3000);
+</script></body></html>
