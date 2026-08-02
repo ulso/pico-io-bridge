@@ -57,7 +57,7 @@ of separate adapters:
 - IPv6 link-local address derived from the device MAC
 - mDNS/DNS-SD advertisement for `_http._tcp` and `_scpi-raw._tcp`, plus
   `_usbserial._tcp` on the USB-host profile
-- Predictable board-specific hostnames with a flash-UID fallback on conflict
+- Stable board-specific hostnames and DNS-SD instances with a flash-UID suffix
 - SCPI-RAW instrument server on TCP port 5025 using `microscpi`
 - Four-channel 12-bit ADC measurements on A0-A3, plus internal temperature
 - Explicit SCPI configuration and ranging support for VL53L4CD I2C sensors
@@ -101,16 +101,19 @@ descriptor-compatible devices.
 | MetaGeek Wi-Spy Original | `1781:083E` | Low-speed HID spectrum panel |
 | NAD room-correction microphone | `17AE:000E` | UAC1 capture and browser FFT |
 
+A BleuIO/HibouAir configuration has also completed a continuous test of more
+than nine hours while its browser panel remained live and updating.
+
 ## Hardware
 
 Supported board profiles:
 
 | Cargo feature | Interfaces | STEMMA QT | mDNS hostname |
 | --- | --- | --- | --- |
-| `board-adafruit-rp2040-can` | CAN, I2C, ADC | I2C1, SDA GP2, SCL GP3 | `pico-io-can-feather.local` |
-| `board-adafruit-feather-rp2040` | I2C, ADC | I2C1, SDA GP2, SCL GP3 | `pico-io-feather.local` |
-| `board-adafruit-rp2040-usb-host` | PIO USB host, I2C, ADC | I2C1, SDA GP2, SCL GP3 | `pico-io-usb-host.local` |
-| `board-adafruit-kb2040` | I2C, ADC | I2C0, SDA GP12, SCL GP13 | `pico-io-kb2040.local` |
+| `board-adafruit-rp2040-can` | CAN, I2C, ADC | I2C1, SDA GP2, SCL GP3 | `pico-io-can-feather-<uid6>.local` |
+| `board-adafruit-feather-rp2040` | I2C, ADC | I2C1, SDA GP2, SCL GP3 | `pico-io-feather-<uid6>.local` |
+| `board-adafruit-rp2040-usb-host` | PIO USB host, I2C, ADC | I2C1, SDA GP2, SCL GP3 | `pico-io-usb-host-<uid6>.local` |
+| `board-adafruit-kb2040` | I2C, ADC | I2C0, SDA GP12, SCL GP13 | `pico-io-kb2040-<uid6>.local` |
 
 The regular Feather RP2040 and Feather RP2040 USB Host profiles select
 Embassy's generic `03h` second-stage flash bootloader. Adafruit boards of these
@@ -283,44 +286,46 @@ boards that run the same profile. The current development VID/PID remains
 firmware is distributed as a USB product.
 
 Each profile advertises its hostname from the hardware table and matching,
-board-specific `_http._tcp` and `_scpi-raw._tcp` service instances. The HTTP
-TXT record includes `path=/`. The SCPI TXT record includes the manufacturer,
-board model, full flash-UID serial number, and firmware version, matching the
-fields returned by `*IDN?`. For example, the default profile advertises:
+board-specific `_http._tcp` and `_scpi-raw._tcp` service instances. Both the
+hostname and every service instance always end in the final three flash-UID
+bytes as six lowercase hexadecimal characters. For example, a board whose USB
+serial number ends in `635B2C` advertises:
 
 ```text
-pico-io-can-feather.local
+pico-io-can-feather-635b2c.local
 _http._tcp
 _scpi-raw._tcp
 ```
 
-If another board has already claimed the same profile hostname, the conflicting
-firmware automatically registers again with the final three flash-UID bytes as
-a six-character suffix, for example `pico-io-kb2040-635b2c.local`. Its DNS-SD
-service instance receives the same suffix. Thus a single board keeps a short,
-predictable CLI name while multiple identical boards remain independently
-addressable. `dns-sd -B _http._tcp` and `dns-sd -B _scpi-raw._tcp` show the
-active instances. `dns-sd -L <instance> _scpi-raw._tcp local.` resolves an
-instrument to its hostname, port, and TXT metadata.
+The HTTP TXT record includes `path=/`. The SCPI TXT record includes the
+manufacturer, board model, full flash-UID serial number, and firmware version,
+matching the fields returned by `*IDN?`. Always using the suffix is important
+for multiple CDC-NCM boards: their point-to-point USB network links cannot hear
+one another's mDNS conflict probes, but macOS still observes all of their
+advertisements. Unique names therefore prevent Discovery and browsers from
+collapsing identical boards or alternating between them. `dns-sd -B _http._tcp`
+and `dns-sd -B _scpi-raw._tcp` show the active instances. `dns-sd -L <instance>
+_scpi-raw._tcp local.` resolves an instrument to its hostname, port, and TXT
+metadata.
 
 Useful checks for the default profile on macOS:
 
 ```sh
 dns-sd -B _http._tcp
 dns-sd -B _scpi-raw._tcp
-dns-sd -G v4v6 pico-io-can-feather.local
-ping pico-io-can-feather.local
-ping6 pico-io-can-feather.local
-curl http://pico-io-can-feather.local/api/status
+dns-sd -G v4v6 pico-io-can-feather-635b2c.local
+ping pico-io-can-feather-635b2c.local
+ping6 pico-io-can-feather-635b2c.local
+curl http://pico-io-can-feather-635b2c.local/api/status
 ```
 
 The built-in web UI is available at:
 
 ```text
-http://pico-io-can-feather.local/          CAN console
-http://pico-io-can-feather.local/i2c.html I2C console
-http://pico-io-can-feather.local/scpi.html SCPI instrument information
-http://pico-io-usb-host.local/usb-host.html USB host status
+http://pico-io-can-feather-635b2c.local/          CAN console
+http://pico-io-can-feather-635b2c.local/i2c.html I2C console
+http://pico-io-can-feather-635b2c.local/scpi.html SCPI instrument information
+http://pico-io-usb-host-635b2c.local/usb-host.html USB host status
 ```
 
 Only pages and WebSocket endpoints for interfaces in the selected board profile
@@ -377,7 +382,7 @@ import pyvisa
 
 rm = pyvisa.ResourceManager("@py")
 instrument = rm.open_resource(
-    "TCPIP0::pico-io-can-feather.local::5025::SOCKET",
+    "TCPIP0::pico-io-can-feather-635b2c.local::5025::SOCKET",
     read_termination="\n",
     write_termination="\n",
 )
@@ -395,7 +400,7 @@ instrument has answered:
 ```octave
 pkg load instrument-control;
 
-pico = tcpclient("pico-io-can-feather.local", 5025, "Timeout", 2);
+pico = tcpclient("pico-io-can-feather-635b2c.local", 5025, "Timeout", 2);
 configureTerminator(pico, "lf");
 
 identity = writeread(pico, "*IDN?");
@@ -524,9 +529,9 @@ The DLP-IOR4 example configures 9600 baud over SCPI before using the raw TCP
 bridge:
 
 ```sh
-python3 examples/dlp_ior4_tcp.py ping
-python3 examples/dlp_ior4_tcp.py set 1 A
-python3 examples/dlp_ior4_tcp.py cycle 1 --delay 2
+python3 examples/dlp_ior4_tcp.py --host pico-io-usb-host-635b2c.local ping
+python3 examples/dlp_ior4_tcp.py --host pico-io-usb-host-635b2c.local set 1 A
+python3 examples/dlp_ior4_tcp.py --host pico-io-usb-host-635b2c.local cycle 1 --delay 2
 ```
 
 The relay contacts can switch hazardous voltages. Develop and test with
@@ -565,8 +570,8 @@ A standard-library-only Python example performs the status, atomic exchange,
 error, hex-decoding, and text-decoding steps:
 
 ```sh
-python3 examples/scpi_usb_host_cdc.py
-python3 examples/scpi_usb_host_cdc.py ATI
+python3 examples/scpi_usb_host_cdc.py --host pico-io-usb-host-635b2c.local
+python3 examples/scpi_usb_host_cdc.py --host pico-io-usb-host-635b2c.local ATI
 ```
 
 ### Raw TCP USB-serial bridge
@@ -625,9 +630,9 @@ The standard-library-only example can inspect all cached sensors or configure
 the whitelist directly:
 
 ```sh
-python3 examples/hibouair_scpi.py
-python3 examples/hibouair_scpi.py --filter 22005A,22008C,22026A
-python3 examples/hibouair_scpi.py --clear-filter
+python3 examples/hibouair_scpi.py --host pico-io-usb-host-635b2c.local
+python3 examples/hibouair_scpi.py --host pico-io-usb-host-635b2c.local --filter 22005A,22008C,22026A
+python3 examples/hibouair_scpi.py --host pico-io-usb-host-635b2c.local --clear-filter
 ```
 
 CDC-ACM and FTDI's vendor-specific UART protocol are supported behind port
@@ -640,7 +645,7 @@ For the first FTDI acceptance test, connect TXD directly to RXD on the TTL
 breakout and run:
 
 ```sh
-python3 examples/ftdi_loopback_tcp.py
+python3 examples/ftdi_loopback_tcp.py --host pico-io-usb-host-635b2c.local
 ```
 
 The default test keeps one TCP session open for 100 exchanges of 257
@@ -654,7 +659,7 @@ For that exact probe it reassembles arbitrary USB/TCP fragments until the
 echoed `AT` and a complete CRLF-delimited BleuIO `OK` or `ERROR` line arrive:
 
 ```sh
-python3 examples/usb_serial_tcp.py
+python3 examples/usb_serial_tcp.py --host pico-io-usb-host-635b2c.local
 ```
 
 The packet-independent `AT` framing assumes BleuIO command echo is enabled, as
@@ -662,7 +667,7 @@ it is by default. With echo disabled (`ATE0`), select idle-delimited collection
 explicitly:
 
 ```sh
-python3 examples/usb_serial_tcp.py --idle-response
+python3 examples/usb_serial_tcp.py --host pico-io-usb-host-635b2c.local --idle-response
 ```
 
 Other text commands use idle-delimited collection because `OK` is not a
@@ -671,8 +676,8 @@ produce meaningful data after one. The idle timeout defaults to two seconds and
 is configurable:
 
 ```sh
-python3 examples/usb_serial_tcp.py ATI
-python3 examples/usb_serial_tcp.py --idle-timeout 5 ATI
+python3 examples/usb_serial_tcp.py --host pico-io-usb-host-635b2c.local ATI
+python3 examples/usb_serial_tcp.py --host pico-io-usb-host-635b2c.local --idle-timeout 5 ATI
 ```
 
 This response handling belongs only to the example client; the firmware bridge
@@ -681,7 +686,7 @@ supplied bytes, never appends a terminator, and uses the same idle-delimited
 collection:
 
 ```sh
-python3 examples/usb_serial_tcp.py --hex "00 FF 0D 0A"
+python3 examples/usb_serial_tcp.py --host pico-io-usb-host-635b2c.local --hex "00 FF 0D 0A"
 ```
 
 A native iOS or iPadOS app can use an ordinary TCP connection to port 7000 over
@@ -720,10 +725,10 @@ result line is emitted; retrieve the queued error with `SYST:ERR?`.
 The Python and Octave examples are read-only by default:
 
 ```sh
-python3 examples/scpi_usb_host_p8055.py
+python3 examples/scpi_usb_host_p8055.py --host pico-io-usb-host-635b2c.local
 
 octave --quiet --eval \
-  'addpath("examples"); scpi_usb_host_p8055'
+  'addpath("examples"); scpi_usb_host_p8055("pico-io-usb-host-635b2c.local")'
 ```
 
 Both print input snapshots and the confirmed output shadow. A digital output
@@ -731,10 +736,10 @@ pulse is deliberately opt-in; it preserves both analog outputs and every other
 digital output, then restores and verifies the original shadow:
 
 ```sh
-python3 examples/scpi_usb_host_p8055.py --pulse-output 1
+python3 examples/scpi_usb_host_p8055.py --host pico-io-usb-host-635b2c.local --pulse-output 1
 
 octave --quiet --eval \
-  'addpath("examples"); scpi_usb_host_p8055("pico-io-usb-host.local",5,1,0.5)'
+  'addpath("examples"); scpi_usb_host_p8055("pico-io-usb-host-635b2c.local",5,1,0.5)'
 ```
 
 The Octave example requires the `instrument-control` package. Never retry a
@@ -928,20 +933,21 @@ Custom control pages do not have to be uploaded to the Pico. A standalone HTML
 file on the host can connect directly to any endpoint enabled in the firmware:
 
 ```text
-ws://pico-io-can-feather.local/can
-ws://pico-io-can-feather.local/i2c
+ws://pico-io-can-feather-635b2c.local/can
+ws://pico-io-can-feather-635b2c.local/i2c
 ```
 
 For example, `examples/led_control.html` can be opened directly in Safari and
-uses the WebSocket API to switch a CAN-connected LED node on and off. This keeps
-the firmware simple while still allowing project-specific browser tools.
+prompts for the UID-suffixed board hostname before switching a CAN-connected
+LED node on and off. When served by the board, it uses the current host. This
+keeps the firmware simple while still allowing project-specific browser tools.
 
 ## CAN WebSocket API
 
 WebSocket endpoint:
 
 ```text
-ws://pico-io-can-feather.local/can
+ws://pico-io-can-feather-635b2c.local/can
 ```
 
 On connect, the device sends:
@@ -992,7 +998,7 @@ Examples:
 WebSocket endpoint:
 
 ```text
-ws://pico-io-can-feather.local/i2c
+ws://pico-io-can-feather-635b2c.local/i2c
 ```
 
 On connect, the device sends:
@@ -1093,8 +1099,8 @@ The USBTMC socket is advertised as `_usbtmc._tcp`. For example, query a
 Keysight 34450A connected to the host port with:
 
 ```sh
-printf '*IDN?\n' | nc -w 10 pico-io-usb-host.local 5026
-python3 examples/usbtmc_tcp.py
+printf '*IDN?\n' | nc -w 10 pico-io-usb-host-635b2c.local 5026
+python3 examples/usbtmc_tcp.py --host pico-io-usb-host-635b2c.local
 ```
 
 The initial implementation supports bounded textual program messages and

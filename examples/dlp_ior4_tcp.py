@@ -108,7 +108,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description="Control a DLP-IOR4 connected to pico-io-bridge; test only with safe low voltages"
     )
-    parser.add_argument("--host", default="pico-io-usb-host.local")
+    parser.add_argument("--host", required=True, help="UID-suffixed hostname or IP address")
     parser.add_argument("--port", type=int, default=7000)
     parser.add_argument("--scpi-port", type=int, default=5025)
     parser.add_argument("--timeout", type=float, default=3.0)

@@ -12,7 +12,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description="Query a USBTMC instrument connected to Pico I/O Bridge"
     )
-    parser.add_argument("--host", default="pico-io-usb-host.local")
+    parser.add_argument("--host", required=True, help="UID-suffixed hostname or IP address")
     parser.add_argument("--port", type=int, default=5026)
     parser.add_argument("--timeout", type=float, default=10.0)
     parser.add_argument("query", nargs="?", default="*IDN?")

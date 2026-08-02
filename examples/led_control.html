@@ -46,6 +46,7 @@ const canIdEl=document.getElementById('canId');
 const onBtn=document.getElementById('on');
 const offBtn=document.getElementById('off');
 let ws;
+let boardHost=location.hostname;
 function now(){return new Date().toLocaleTimeString()}
 function log(s){logEl.textContent+=now()+'  '+s+'\n';logEl.scrollTop=logEl.scrollHeight}
 function setStatus(kind,text){statusEl.className='status '+kind;statusText.textContent=text}
@@ -59,7 +60,12 @@ function send(value){
   log('> '+JSON.stringify(msg));
 }
 function connect(){
-  ws=new WebSocket('ws://pico-io-can-feather.local/can');
+  if (!boardHost) boardHost=prompt(
+    'Pico I/O Bridge hostname','pico-io-can-feather-<uid6>.local'
+  );
+  if (!boardHost) { setStatus('err','hostname required'); return; }
+  const scheme = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  ws=new WebSocket(`${scheme}//${boardHost}/can`);
   ws.onopen=()=>{setStatus('ok','connected');setEnabled(true);log('connected')};
   ws.onmessage=e=>log('< '+e.data);
   ws.onclose=e=>{setStatus('','disconnected');setEnabled(false);log('closed '+e.code);setTimeout(connect,1500)};

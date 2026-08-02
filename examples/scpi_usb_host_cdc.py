@@ -3,8 +3,8 @@
 No third-party Python packages are required.
 
 Examples:
-    python3 examples/scpi_usb_host_cdc.py
-    python3 examples/scpi_usb_host_cdc.py ATI
+    python3 examples/scpi_usb_host_cdc.py --host pico-io-usb-host-635b2c.local
+    python3 examples/scpi_usb_host_cdc.py --host pico-io-usb-host-635b2c.local ATI
     python3 examples/scpi_usb_host_cdc.py --host 10.120.39.1 AT
 """
 
@@ -14,7 +14,6 @@ import time
 
 from scpi_common import SCPI_PORT
 
-DEFAULT_HOST = "pico-io-usb-host.local"
 DEFAULT_READ_LENGTH = 64
 DEFAULT_TIMEOUT_SECONDS = 20.0
 TERMINATORS = {
@@ -73,7 +72,7 @@ def main() -> None:
         default="AT",
         help='text sent to the CDC device (default: "AT")',
     )
-    parser.add_argument("--host", default=DEFAULT_HOST)
+    parser.add_argument("--host", required=True, help="UID-suffixed hostname or IP address")
     parser.add_argument("--port", type=int, default=SCPI_PORT)
     parser.add_argument(
         "--terminator",

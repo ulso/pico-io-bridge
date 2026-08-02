@@ -8,9 +8,9 @@ unframed and end when the stream is idle. ``--idle-response`` also selects
 idle-delimited collection for ``AT`` when command echo is disabled.
 
 Examples:
-    python3 examples/usb_serial_tcp.py
-    python3 examples/usb_serial_tcp.py ATI
-    python3 examples/usb_serial_tcp.py --hex "00 FF 0D 0A"
+    python3 examples/usb_serial_tcp.py --host pico-io-usb-host-635b2c.local
+    python3 examples/usb_serial_tcp.py --host pico-io-usb-host-635b2c.local ATI
+    python3 examples/usb_serial_tcp.py --host pico-io-usb-host-635b2c.local --hex "00 FF 0D 0A"
 """
 
 import argparse
@@ -19,7 +19,6 @@ import time
 from typing import Optional, Union
 
 
-DEFAULT_HOST = "pico-io-usb-host.local"
 DEFAULT_PORT = 7000
 DEFAULT_CONNECT_TIMEOUT_SECONDS = 5.0
 DEFAULT_FIRST_RESPONSE_TIMEOUT_SECONDS = 10.0
@@ -179,7 +178,7 @@ def main() -> None:
             "terminator is appended"
         ),
     )
-    parser.add_argument("--host", default=DEFAULT_HOST)
+    parser.add_argument("--host", required=True, help="UID-suffixed hostname or IP address")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument(
         "--terminator",

@@ -1,13 +1,11 @@
 import asyncio
+import argparse
 import json
 import socket
 
 import websockets
 
-URL = "ws://pico-io-can-feather.local/i2c"
-
-
-async def connect_i2c(url=URL, attempts=5, delay=0.5):
+async def connect_i2c(url, attempts=5, delay=0.5):
     last_error = None
 
     for attempt in range(1, attempts + 1):
@@ -26,8 +24,8 @@ async def connect_i2c(url=URL, attempts=5, delay=0.5):
     raise last_error
 
 
-async def main():
-    async with await connect_i2c() as ws:
+async def main(url):
+    async with await connect_i2c(url) as ws:
         print("hello:", await ws.recv())
 
         await ws.send(json.dumps({"type": "i2c.status"}))
@@ -37,4 +35,7 @@ async def main():
         print("scan:", await ws.recv())
 
 
-asyncio.run(main())
+parser = argparse.ArgumentParser()
+parser.add_argument("--host", required=True, help="UID-suffixed hostname or IP address")
+args = parser.parse_args()
+asyncio.run(main(f"ws://{args.host}/i2c"))

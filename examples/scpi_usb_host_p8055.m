@@ -5,9 +5,11 @@ function scpi_usb_host_p8055(host, sample_count, pulse_output, pulse_seconds, po
   %   scpi_usb_host_p8055
   %
   % Explicitly toggle digital output 1 for half a second:
-  %   scpi_usb_host_p8055("pico-io-usb-host.local", 5, 1, 0.5)
+  %   scpi_usb_host_p8055("pico-io-usb-host-635b2c.local", 5, 1, 0.5)
 
-  if nargin < 1, host = "pico-io-usb-host.local"; endif
+  if nargin < 1
+    error("host is required; use the UID-suffixed mDNS hostname or IP address");
+  endif
   if nargin < 2, sample_count = 5; endif
   if nargin < 3, pulse_output = 0; endif
   if nargin < 4, pulse_seconds = 0.5; endif

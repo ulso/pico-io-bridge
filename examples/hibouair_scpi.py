@@ -59,7 +59,7 @@ class ScpiClient:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--host", default="pico-io-usb-host.local")
+    parser.add_argument("--host", required=True, help="UID-suffixed hostname or IP address")
     parser.add_argument("--port", type=int, default=5025)
     parser.add_argument("--timeout", type=float, default=4.0)
     parser.add_argument(

@@ -1,8 +1,11 @@
 % Load the instrument-control package.
 pkg load instrument-control;
 
-% Use the Pico's hostname on the virtual CDC-NCM network.
-pico_ip = "pico-io-can-feather.local";
+% Use the UID-suffixed hostname on the virtual CDC-NCM network.
+pico_ip = getenv("PICO_IO_HOST");
+if isempty(pico_ip)
+  error("Set PICO_IO_HOST to the board's UID-suffixed hostname or IP address");
+endif
 pico_port = 5025;
 
 % Open a TCP connection and use the SCPI line ending as the terminator.

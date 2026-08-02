@@ -112,13 +112,11 @@ pub(crate) fn encode_uid_suffix(uid: &[u8], suffix: &mut [u8; UID_SUFFIX_BYTES])
     }
 }
 
-fn label_with_optional_suffix(base: &str, uid_suffix: Option<&str>) -> String<DNS_LABEL_BYTES> {
+fn label_with_uid_suffix(base: &str, uid_suffix: &str) -> String<DNS_LABEL_BYTES> {
     let mut label = String::new();
     label.push_str(base).unwrap();
-    if let Some(uid_suffix) = uid_suffix {
-        label.push('-').unwrap();
-        label.push_str(uid_suffix).unwrap();
-    }
+    label.push('-').unwrap();
+    label.push_str(uid_suffix).unwrap();
     label
 }
 
@@ -126,12 +124,11 @@ fn build_mdns_records(
     ipv4: [u8; 4],
     ipv6: Ipv6Address,
     hostname: &str,
-    uid_suffix: Option<&str>,
+    uid_suffix: &str,
     service_type: &str,
     port: u16,
 ) -> ServiceRecords {
-    let service_instance =
-        label_with_optional_suffix(crate::board::MDNS_SERVICE_INSTANCE, uid_suffix);
+    let service_instance = label_with_uid_suffix(crate::board::MDNS_SERVICE_INSTANCE, uid_suffix);
 
     let mut instance_name: String<DNS_NAME_BYTES> = String::new();
     instance_name.push_str(&service_instance).unwrap();
@@ -167,9 +164,9 @@ pub(crate) fn register_services(
     ipv4: [u8; 4],
     ipv6: Ipv6Address,
     serial: &str,
-    uid_suffix: Option<&str>,
+    uid_suffix: &str,
 ) -> Result<Registration, RegisterServiceError> {
-    let hostname = label_with_optional_suffix(crate::board::MDNS_HOST_LABEL, uid_suffix);
+    let hostname = label_with_uid_suffix(crate::board::MDNS_HOST_LABEL, uid_suffix);
     let mut http_records = build_mdns_records(
         ipv4,
         ipv6,

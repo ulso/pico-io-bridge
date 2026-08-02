@@ -1,12 +1,10 @@
 import asyncio
+import argparse
 import websockets
 import socket
 import json
 
-URL = "ws://pico-io-can-feather.local/can"
-
-
-async def connect_can(url=URL, attempts=5, delay=0.5):
+async def connect_can(url, attempts=5, delay=0.5):
     last_error = None
 
     for attempt in range(1, attempts + 1):
@@ -38,8 +36,8 @@ async def set_other_led(sock, on):
     await sock.send(json.dumps(frame))
 
         
-async def main():
-    async with await connect_can() as ws:
+async def main(url):
+    async with await connect_can(url) as ws:
         print("hello:", await ws.recv())
         await ws.send('{"type":"can.status"}')
         print("status:", await ws.recv())
@@ -67,4 +65,7 @@ async def main():
                 print("rx:", res)
                 break
 
-asyncio.run(main())
+parser = argparse.ArgumentParser()
+parser.add_argument("--host", required=True, help="UID-suffixed hostname or IP address")
+args = parser.parse_args()
+asyncio.run(main(f"ws://{args.host}/can"))

@@ -3,9 +3,9 @@
 No third-party Python packages are required. The default run is read-only.
 
 Examples:
-    python3 examples/scpi_usb_host_p8055.py
-    python3 examples/scpi_usb_host_p8055.py --samples 20 --interval 0.2
-    python3 examples/scpi_usb_host_p8055.py --pulse-output 1
+    python3 examples/scpi_usb_host_p8055.py --host pico-io-usb-host-635b2c.local
+    python3 examples/scpi_usb_host_p8055.py --host pico-io-usb-host-635b2c.local --samples 20 --interval 0.2
+    python3 examples/scpi_usb_host_p8055.py --host pico-io-usb-host-635b2c.local --pulse-output 1
 """
 
 import argparse
@@ -16,7 +16,6 @@ from types import TracebackType
 
 from scpi_common import SCPI_PORT
 
-DEFAULT_HOST = "pico-io-usb-host.local"
 MAX_RESPONSE_BYTES = 512
 
 
@@ -203,7 +202,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Read a P8055 over Pico I/O Bridge SCPI."
     )
-    parser.add_argument("--host", default=DEFAULT_HOST)
+    parser.add_argument("--host", required=True, help="UID-suffixed hostname or IP address")
     parser.add_argument("--port", type=int, default=SCPI_PORT)
     parser.add_argument("--timeout", type=float, default=6.0)
     parser.add_argument("--samples", type=int, default=5)
