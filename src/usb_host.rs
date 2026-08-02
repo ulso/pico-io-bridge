@@ -1,4 +1,4 @@
-//! PIO USB root-port manager for the Feather RP2040 USB Host profile.
+//! PIO USB root-port manager for supported RP2040 and RP2350 board profiles.
 //!
 //! This task is the sole owner of enumeration, device addresses, CDC-ACM
 //! pipes, and product-specific HID pipes. SCPI exchanges and completed Wi-Spy
@@ -13,8 +13,13 @@ use embassy_net::tcp::{TcpReader, TcpSocket, TcpWriter};
 use embassy_rp::Peri;
 use embassy_rp::bind_interrupts;
 use embassy_rp::dma::InterruptHandler as DmaInterruptHandler;
+#[cfg(feature = "board-adafruit-rp2040-usb-host")]
 use embassy_rp::gpio::{Level, Output};
-use embassy_rp::peripherals::{DMA_CH0, PIN_16, PIN_17, PIN_18, PIO0, PIO1};
+use embassy_rp::peripherals::{DMA_CH0, PIO0, PIO1};
+#[cfg(feature = "board-waveshare-rp2350-usb-a")]
+use embassy_rp::peripherals::{PIN_12, PIN_13};
+#[cfg(feature = "board-adafruit-rp2040-usb-host")]
+use embassy_rp::peripherals::{PIN_16, PIN_17, PIN_18};
 use embassy_rp::pio::InterruptHandler as PioInterruptHandler;
 use embassy_rp_pio_usb_host::audio::{
     AudioError, AudioInputInterface, CAPTURE_PACKET_CAPACITY,
@@ -34,9 +39,14 @@ use embassy_rp_pio_usb_host::hid::{
 use embassy_rp_pio_usb_host::host::{
     DeviceEvent, PipeError, Speed, UsbHostController, UsbPipe, pipe,
 };
+#[cfg(feature = "board-adafruit-rp2040-usb-host")]
+use embassy_rp_pio_usb_host::pio_host::rp2040::Rp2040PioEngine as BoardPioEngine;
 use embassy_rp_pio_usb_host::pio_host::rp2040::{
-    BadResponseDiagnostic, BadResponseSite, HandshakeFailure, Rp2040PioEngine,
+    BadResponseDiagnostic, BadResponseSite, HandshakeFailure, RootLineDiagnostic,
+    root_line_diagnostic,
 };
+#[cfg(feature = "board-waveshare-rp2350-usb-a")]
+use embassy_rp_pio_usb_host::pio_host::rp2350::Rp2350PioEngine as BoardPioEngine;
 use embassy_rp_pio_usb_host::pio_host::{PioHostState, snapshot_in_pipe_progress_diagnostics};
 use embassy_rp_pio_usb_host::usb::{CdcLineCoding, ConfigurationError};
 use embassy_rp_pio_usb_host::usbtmc::{
@@ -86,6 +96,7 @@ bind_interrupts!(struct PioUsbHostIrqs {
     DMA_IRQ_0 => DmaInterruptHandler<DMA_CH0>;
 });
 
+#[cfg(feature = "board-adafruit-rp2040-usb-host")]
 pub(crate) struct Hardware {
     pio0: Peri<'static, PIO0>,
     pio1: Peri<'static, PIO1>,
@@ -95,6 +106,7 @@ pub(crate) struct Hardware {
     vbus_enable: Peri<'static, PIN_18>,
 }
 
+#[cfg(feature = "board-adafruit-rp2040-usb-host")]
 impl Hardware {
     pub(crate) fn new(
         pio0: Peri<'static, PIO0>,
@@ -111,6 +123,34 @@ impl Hardware {
             dp,
             dm,
             vbus_enable,
+        }
+    }
+}
+
+#[cfg(feature = "board-waveshare-rp2350-usb-a")]
+pub(crate) struct Hardware {
+    pio0: Peri<'static, PIO0>,
+    pio1: Peri<'static, PIO1>,
+    dma_ch0: Peri<'static, DMA_CH0>,
+    dp: Peri<'static, PIN_12>,
+    dm: Peri<'static, PIN_13>,
+}
+
+#[cfg(feature = "board-waveshare-rp2350-usb-a")]
+impl Hardware {
+    pub(crate) fn new(
+        pio0: Peri<'static, PIO0>,
+        pio1: Peri<'static, PIO1>,
+        dma_ch0: Peri<'static, DMA_CH0>,
+        dp: Peri<'static, PIN_12>,
+        dm: Peri<'static, PIN_13>,
+    ) -> Self {
+        Self {
+            pio0,
+            pio1,
+            dma_ch0,
+            dp,
+            dm,
         }
     }
 }
@@ -745,6 +785,10 @@ pub(crate) async fn status() -> Status {
 
 pub(crate) async fn enumeration_diagnostic() -> EnumerationDiagnostic {
     HOST_STATE.lock().await.enumeration_diagnostic
+}
+
+pub(crate) fn line_diagnostic() -> RootLineDiagnostic {
+    root_line_diagnostic()
 }
 
 pub(crate) async fn bleuio_catalog() -> Result<bleuio::Catalog, Error> {
@@ -2193,7 +2237,7 @@ where
     }
 }
 
-async fn root_port_monitor<'d>(host_state: &PioHostState<Rp2040PioEngine<'d>>) {
+async fn root_port_monitor<'d>(host_state: &PioHostState<BoardPioEngine<'d>>) {
     let mut detector = AttachDetector::new(ATTACH_DEBOUNCE_SAMPLES);
     let mut ticker = Ticker::every(Duration::from_millis(1));
     let mut next_diagnostic_snapshot = Instant::now() + DIAGNOSTIC_SNAPSHOT_INTERVAL;
@@ -2294,8 +2338,9 @@ async fn root_port_monitor<'d>(host_state: &PioHostState<Rp2040PioEngine<'d>>) {
 }
 
 async fn run(hardware: Hardware) {
+    #[cfg(feature = "board-adafruit-rp2040-usb-host")]
     let mut vbus_enable = Output::new(hardware.vbus_enable, Level::Low);
-    let engine = Rp2040PioEngine::new(
+    let engine = BoardPioEngine::new(
         hardware.pio0,
         hardware.pio1,
         hardware.dma_ch0,
@@ -2313,12 +2358,17 @@ async fn run(hardware: Hardware) {
     let (mut controller, bus_handle) = embassy_usb_host::bus(controller, &bus_state);
 
     Timer::after_millis(100).await;
+    #[cfg(feature = "board-adafruit-rp2040-usb-host")]
     vbus_enable.set_high();
     set_waiting().await;
+    #[cfg(feature = "board-adafruit-rp2040-usb-host")]
     info!("PIO USB host VBUS enabled");
+    #[cfg(feature = "board-waveshare-rp2350-usb-a")]
+    info!("PIO USB host ready; VBUS is permanently powered from VSYS");
 
     let application_host_state = &host_state;
     let application = async move {
+        #[cfg(feature = "board-adafruit-rp2040-usb-host")]
         let _vbus_enable = vbus_enable;
         let mut next_bridge_session = 0_u32;
 

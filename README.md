@@ -166,12 +166,13 @@ uses I2C1, so both hardware blocks run concurrently without a pin conflict.
 All profiles expose the MCU ADC inputs A0-A3 on GP26-GP29 through SCPI.
 Pins for interfaces absent from the selected board profile are left untouched.
 
-The initial Waveshare RP2350-USB-A profile uses the RP2350A ARM cores and the
-native USB controller for CDC-NCM. Its four external ADC channels and I2C bus
-are enabled; the USB-A host connector and its PIO host resources are reserved
-for a later profile revision. The onboard WS2812 on GP16 uses PIO2 SM0 and
-DMA_CH11: red means that the network is starting and green means that DHCP and
-mDNS are ready. PIO0, PIO1, and DMA_CH0 remain free for future host work.
+The Waveshare RP2350-USB-A profile uses the RP2350A ARM cores and the native
+USB controller for CDC-NCM. Its four external ADC channels and I2C bus are
+enabled, while the USB-A connector is driven by the PIO host on GP12/GP13.
+PIO0, PIO1, and DMA_CH0 are reserved by the host, which runs on core 1. VBUS is
+permanently powered from VSYS on this board. The onboard WS2812 is deliberately
+left unused because the current `embassy-rp` PIO ownership workaround reserves
+the PIO instances needed by the host.
 
 The CAN Feather, regular Feather RP2040, and Feather RP2040 USB Host use their
 red LED on GP13 as a startup indicator. The existing `StatusIndicator` remains
@@ -1093,6 +1094,15 @@ Example:
   exposes generic full-speed CDC-ACM, FTDI UART and USBTMC transports plus the
   original low-speed Velleman K8055/P8055 and MetaGeek Wi-Spy protocols; it is
   not yet a general-purpose HID or USB Audio API.
+- The tested Waveshare RP2350-USB-A board uses early RP2350 A2 silicon. Its
+  documented E9 GPIO high-impedance defect can leave a released USB data pad
+  reading high and produce an `SE1` indication. Full-speed CDC-ACM and FTDI
+  operation have worked in testing, but low-speed USB is therefore unsupported
+  on this A2 board. Low-speed validation is deferred until an RP2350 A4 board,
+  where E9 is fixed, is available.
+- USBTMC has not yet been validated on RP2350 A2. It remains supported and
+  hardware-tested on the Adafruit RP2040 USB Host profile; further RP2350
+  USBTMC investigation is deferred until A4 hardware is available.
 - A tested Keysight MSO-X 3054A running firmware `02.66.2024012316`
   intermittently times out on the first complete device-descriptor request
   after `SET_ADDRESS`. Automatic enumeration retries have recovered to

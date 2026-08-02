@@ -13,9 +13,9 @@ compile_error!("mcp2515 and mcp25625 are mutually exclusive");
 
 #[cfg(feature = "i2c")]
 mod amg8833;
-#[cfg(feature = "board-adafruit-rp2040-usb-host")]
+#[cfg(feature = "pio-usb-host")]
 mod audio_stream;
-#[cfg_attr(not(feature = "board-adafruit-rp2040-usb-host"), allow(dead_code))]
+#[cfg_attr(not(feature = "pio-usb-host"), allow(dead_code))]
 mod bleuio;
 #[cfg(feature = "i2c")]
 mod bme688;
@@ -38,22 +38,18 @@ mod lc709203f;
 #[cfg(feature = "mdns")]
 mod mdns;
 mod network;
-#[cfg(feature = "board-adafruit-rp2040-usb-host")]
+#[cfg(feature = "pio-usb-host")]
 mod p8055;
 #[cfg(feature = "i2c")]
 mod pct2075;
 mod scpi;
 #[cfg(feature = "i2c")]
 mod seesaw_encoder;
-#[cfg(feature = "board-adafruit-rp2040-usb-host")]
+#[cfg(feature = "pio-usb-host")]
 mod usb_host;
-#[cfg(any(
-    feature = "can",
-    feature = "i2c",
-    feature = "board-adafruit-rp2040-usb-host"
-))]
+#[cfg(any(feature = "can", feature = "i2c", feature = "pio-usb-host"))]
 mod websocket;
-#[cfg(feature = "board-adafruit-rp2040-usb-host")]
+#[cfg(feature = "pio-usb-host")]
 mod wispy;
 
 use defmt::*;
@@ -86,9 +82,9 @@ const USB_SERIAL_BYTES: usize = FLASH_UID_BYTES * 2;
 pub(crate) const HTTP_PORT: u16 = 80;
 pub(crate) const HTTP_SOCKETS: usize = 4;
 pub(crate) const SCPI_PORT: u16 = 5025;
-#[cfg(feature = "board-adafruit-rp2040-usb-host")]
+#[cfg(feature = "pio-usb-host")]
 pub(crate) const USB_SERIAL_PORT: u16 = 7000;
-#[cfg(feature = "board-adafruit-rp2040-usb-host")]
+#[cfg(feature = "pio-usb-host")]
 pub(crate) const USBTMC_PORT: u16 = 5026;
 pub(crate) const MANUFACTURER: &str = "Pico I/O Bridge Project";
 pub(crate) const FIRMWARE_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -171,7 +167,7 @@ async fn main(spawner: Spawner) {
     let board::Board {
         flash,
         usb,
-        #[cfg(feature = "board-adafruit-rp2040-usb-host")]
+        #[cfg(feature = "pio-usb-host")]
         core1,
         mut uart,
         mut status,
@@ -307,9 +303,9 @@ async fn main(spawner: Spawner) {
     for _ in 0..HTTP_SOCKETS {
         spawner.spawn(http::http_task(stack, usb_serial).unwrap());
     }
-    #[cfg(feature = "board-adafruit-rp2040-usb-host")]
+    #[cfg(feature = "pio-usb-host")]
     interfaces.spawn(spawner, stack, usb_serial, core1);
-    #[cfg(not(feature = "board-adafruit-rp2040-usb-host"))]
+    #[cfg(not(feature = "pio-usb-host"))]
     interfaces.spawn(spawner, stack, usb_serial);
 
     #[cfg(feature = "dhcp-server")]

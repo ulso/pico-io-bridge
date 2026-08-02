@@ -91,9 +91,9 @@ code{font:12px ui-monospace,SFMono-Regular,Menlo,monospace;color:#173f73}
 <section class="panel technicalPanel">
 <h2>Host Resources</h2>
 <dl class="facts">
-<dt>Controller</dt><dd>RP2040 PIO USB host</dd>
-<dt>Data pins</dt><dd><code>D+ GP16 / D− GP17</code></dd>
-<dt>VBUS enable</dt><dd><code>GP18</code></dd>
+<dt>Controller</dt><dd id="hostController">RP PIO USB host</dd>
+<dt>Data pins</dt><dd><code id="hostDataPins">-</code></dd>
+<dt>VBUS enable</dt><dd><code id="hostVbus">-</code></dd>
 <dt>PIO blocks</dt><dd><code>PIO0 + PIO1</code></dd>
 <dt>DMA</dt><dd><code>DMA_CH0</code></dd>
 <dt>System clock</dt><dd><code>120 MHz</code></dd>
@@ -154,6 +154,9 @@ const classEl=document.getElementById("deviceClass");
 const driverEl=document.getElementById("deviceDriver");
 const baudRateEl=document.getElementById("baudRate");
 const vbusEl=document.getElementById("vbus");
+const hostControllerEl=document.getElementById("hostController");
+const hostDataPinsEl=document.getElementById("hostDataPins");
+const hostVbusEl=document.getElementById("hostVbus");
 const resetCauseEl=document.getElementById("resetCause");
 const serialBridgeEl=document.getElementById("serialBridge");
 const serialServiceEl=document.getElementById("serialService");
@@ -183,6 +186,7 @@ let audioReconnect=null;
 let audioActive=false;
 let audioMeta=null;
 let audioSpectrumData=null;
+let waveshareHost=false;
 const audioWorkerSource=`
 const N=4096,SAMPLE_RATE=48000,FIRST_BIN=16,LAST_BIN=1536;
 const ring=new Int16Array(N),real=new Float64Array(N),imag=new Float64Array(N),smoothed=new Float32Array(LAST_BIN-FIRST_BIN+1);
@@ -377,7 +381,7 @@ function updateHost(info){
  classEl.textContent=deviceClass(info);
  driverEl.textContent=driverName(info);
  baudRateEl.textContent=isFtdi(info)&&Number(info.ftdiBaudRate)>0?Number(info.ftdiBaudRate).toLocaleString()+" baud":"-";
- vbusEl.textContent=info.phase==="POWER_OFF"?"Off":"Enabled (firmware output)";
+ vbusEl.textContent=waveshareHost?"Powered from VSYS":info.phase==="POWER_OFF"?"Off":"Enabled (firmware output)";
  resetCauseEl.textContent=resetCauseLabel(info.resetCause);
  resetCauseEl.className=info.resetCause==="POWER_ON_OR_BROWNOUT"?"stateWait":"";
  const bridge=info.serialBridge||(info.usbHost&&info.usbHost.serialBridge)||{};
@@ -411,6 +415,10 @@ refreshBtn.onclick=refresh;
 showTechnical.onchange=()=>{technicalPreference=showTechnical.checked;try{localStorage.setItem("usbHostShowTechnical",String(technicalPreference))}catch(_){ }setTechnicalVisibility(technicalPreference)};
 fetch("/api/status",{cache:"no-store"}).then(response=>response.json()).then(info=>{
  if(info.board){const title="Pico I/O Bridge - "+info.board;pageTitle.textContent=title;document.title=title+" - USB Host"}
+ waveshareHost=info.board==="Waveshare RP2350-USB-A";
+ hostControllerEl.textContent=waveshareHost?"RP2350 PIO USB host":"RP2040 PIO USB host";
+ hostDataPinsEl.textContent=waveshareHost?"D+ GP12 / D− GP13":"D+ GP16 / D− GP17";
+ hostVbusEl.textContent=waveshareHost?"Permanent (VSYS)":"GP18";
  nav.textContent="";
  for(const [name,path] of Object.entries(info.pages||{})){const link=document.createElement("a");link.href=path;link.textContent=name.toUpperCase();if(name==="usb")link.className="active";nav.appendChild(link)}
 }).catch(()=>{});

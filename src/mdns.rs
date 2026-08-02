@@ -12,17 +12,17 @@ use rand_core::TryRng;
 use static_cell::StaticCell;
 
 pub(crate) const UID_SUFFIX_BYTES: usize = 6;
-#[cfg(feature = "board-adafruit-rp2040-usb-host")]
+#[cfg(feature = "pio-usb-host")]
 pub(crate) const SERVICE_COUNT: usize = 4;
-#[cfg(not(feature = "board-adafruit-rp2040-usb-host"))]
+#[cfg(not(feature = "pio-usb-host"))]
 pub(crate) const SERVICE_COUNT: usize = 2;
 const DNS_LABEL_BYTES: usize = 63;
 const DNS_NAME_BYTES: usize = 128;
 const HTTP_SERVICE_TYPE: &str = "_http._tcp.local.";
 const SCPI_SERVICE_TYPE: &str = "_scpi-raw._tcp.local.";
-#[cfg(feature = "board-adafruit-rp2040-usb-host")]
+#[cfg(feature = "pio-usb-host")]
 const USB_SERIAL_SERVICE_TYPE: &str = "_usbserial._tcp.local.";
-#[cfg(feature = "board-adafruit-rp2040-usb-host")]
+#[cfg(feature = "pio-usb-host")]
 const USBTMC_SERVICE_TYPE: &str = "_usbtmc._tcp.local.";
 
 pub(crate) struct MdnsRng(u64);
@@ -30,15 +30,15 @@ pub(crate) struct MdnsRng(u64);
 pub(crate) struct Registration {
     http_handle: ServiceHandle,
     scpi_handle: ServiceHandle,
-    #[cfg(feature = "board-adafruit-rp2040-usb-host")]
+    #[cfg(feature = "pio-usb-host")]
     usb_serial_handle: ServiceHandle,
-    #[cfg(feature = "board-adafruit-rp2040-usb-host")]
+    #[cfg(feature = "pio-usb-host")]
     usbtmc_handle: ServiceHandle,
     pub(crate) hostname: String<DNS_LABEL_BYTES>,
 }
 
 impl Registration {
-    #[cfg(not(feature = "board-adafruit-rp2040-usb-host"))]
+    #[cfg(not(feature = "pio-usb-host"))]
     pub(crate) fn services(&self) -> [(&'static [u8], ServiceHandle); SERVICE_COUNT] {
         [
             (b"HTTP service", self.http_handle),
@@ -46,7 +46,7 @@ impl Registration {
         ]
     }
 
-    #[cfg(feature = "board-adafruit-rp2040-usb-host")]
+    #[cfg(feature = "pio-usb-host")]
     pub(crate) fn services(&self) -> [(&'static [u8], ServiceHandle); SERVICE_COUNT] {
         [
             (b"HTTP service", self.http_handle),
@@ -59,9 +59,9 @@ impl Registration {
     pub(crate) fn unregister(self, state: &MdnsState<MdnsRng>) {
         state.unregister_service(self.http_handle);
         state.unregister_service(self.scpi_handle);
-        #[cfg(feature = "board-adafruit-rp2040-usb-host")]
+        #[cfg(feature = "pio-usb-host")]
         state.unregister_service(self.usb_serial_handle);
-        #[cfg(feature = "board-adafruit-rp2040-usb-host")]
+        #[cfg(feature = "pio-usb-host")]
         state.unregister_service(self.usbtmc_handle);
     }
 }
@@ -200,7 +200,7 @@ pub(crate) fn register_services(
         }
     };
 
-    #[cfg(feature = "board-adafruit-rp2040-usb-host")]
+    #[cfg(feature = "pio-usb-host")]
     let usb_serial_handle = {
         let mut records = build_mdns_records(
             ipv4,
@@ -222,7 +222,7 @@ pub(crate) fn register_services(
         }
     };
 
-    #[cfg(feature = "board-adafruit-rp2040-usb-host")]
+    #[cfg(feature = "pio-usb-host")]
     let usbtmc_handle = {
         let mut records = build_mdns_records(
             ipv4,
@@ -248,9 +248,9 @@ pub(crate) fn register_services(
     Ok(Registration {
         http_handle,
         scpi_handle,
-        #[cfg(feature = "board-adafruit-rp2040-usb-host")]
+        #[cfg(feature = "pio-usb-host")]
         usb_serial_handle,
-        #[cfg(feature = "board-adafruit-rp2040-usb-host")]
+        #[cfg(feature = "pio-usb-host")]
         usbtmc_handle,
         hostname,
     })

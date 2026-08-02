@@ -14,6 +14,7 @@ Examples:
 """
 
 import argparse
+import json
 import socket
 import time
 from typing import Optional, Union
@@ -67,11 +68,33 @@ def line_response_complete(
     try:
         echo_index = complete_lines.index(expected_echo)
     except ValueError:
-        return False
-    return any(
+        echo_index = -1
+    if echo_index >= 0 and any(
         line in BLEUIO_TERMINAL_LINES
         for line in complete_lines[echo_index + 1 :]
-    )
+    ):
+        return True
+
+    # BleuIO managed scanning uses verbose JSON mode. A raw TCP client can
+    # arrive while that mode is still active, so accept the corresponding
+    # command/answer/end envelope as one complete AT response too.
+    command_id: Optional[int] = None
+    answer_ok = False
+    for line in complete_lines:
+        try:
+            message = json.loads(line)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            continue
+        if not isinstance(message, dict):
+            continue
+        if message.get("cmd") == expected_echo.decode("ascii", errors="ignore"):
+            command_id = message.get("C")
+            answer_ok = False
+        elif command_id is not None and message.get("A") == command_id:
+            answer_ok = message.get("err") == 0
+        elif command_id is not None and message.get("E") == command_id:
+            return answer_ok
+    return False
 
 
 def collect_response(

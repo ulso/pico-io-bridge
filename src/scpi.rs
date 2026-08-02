@@ -58,6 +58,13 @@ struct UsbHostEnumerationDiagnosticResponse {
     setup_attempts: u32,
     setup: [u8; 8],
 }
+struct UsbHostLineDiagnosticResponse {
+    in_from_pad: u8,
+    sio_input: u8,
+    input_override: u8,
+    pio_output: u8,
+    pio_output_enable: u8,
+}
 struct UsbHostDataResponse {
     length: u8,
     data: [u8; crate::USB_HOST_CDC_MAX_TRANSFER],
@@ -160,7 +167,7 @@ impl scpi::Response for UsbHostStatusResponse {
 }
 
 impl UsbHostStatusResponse {
-    #[cfg(feature = "board-adafruit-rp2040-usb-host")]
+    #[cfg(feature = "pio-usb-host")]
     fn from_status(status: crate::usb_host::Status) -> Self {
         Self {
             phase: status.phase.as_str(),
@@ -209,7 +216,7 @@ impl scpi::Response for UsbHostEnumerationDiagnosticResponse {
 }
 
 impl UsbHostEnumerationDiagnosticResponse {
-    #[cfg(feature = "board-adafruit-rp2040-usb-host")]
+    #[cfg(feature = "pio-usb-host")]
     fn from_diagnostic(diagnostic: crate::usb_host::EnumerationDiagnostic) -> Self {
         Self {
             attempts: diagnostic.attempts(),
@@ -224,6 +231,33 @@ impl UsbHostEnumerationDiagnosticResponse {
     }
 }
 
+impl scpi::Response for UsbHostLineDiagnosticResponse {
+    fn write_response(&self, output: &mut impl scpi::Write) -> Result<(), scpi::Error> {
+        output.write_fmt(format_args!(
+            "PAD={:02b},SIO={:02b},INOVER={:02X},PIO_OUT={:02b},PIO_OE={:02b}",
+            self.in_from_pad,
+            self.sio_input,
+            self.input_override,
+            self.pio_output,
+            self.pio_output_enable
+        ))
+    }
+}
+
+impl UsbHostLineDiagnosticResponse {
+    #[cfg(feature = "pio-usb-host")]
+    fn snapshot() -> Self {
+        let diagnostic = crate::usb_host::line_diagnostic();
+        Self {
+            in_from_pad: diagnostic.in_from_pad,
+            sio_input: diagnostic.sio_input,
+            input_override: diagnostic.input_override,
+            pio_output: diagnostic.pio_output,
+            pio_output_enable: diagnostic.pio_output_enable,
+        }
+    }
+}
+
 impl scpi::Response for UsbHostDataResponse {
     fn write_response(&self, output: &mut impl scpi::Write) -> Result<(), scpi::Error> {
         for byte in &self.data[..usize::from(self.length)] {
@@ -234,7 +268,7 @@ impl scpi::Response for UsbHostDataResponse {
 }
 
 impl UsbHostDataResponse {
-    #[cfg(feature = "board-adafruit-rp2040-usb-host")]
+    #[cfg(feature = "pio-usb-host")]
     fn from_cdc(data: crate::usb_host::CdcData) -> Self {
         let mut response = Self {
             length: data.as_bytes().len() as u8,
@@ -350,7 +384,7 @@ impl scpi::Response for P8055InputResponse {
 }
 
 impl P8055InputResponse {
-    #[cfg(feature = "board-adafruit-rp2040-usb-host")]
+    #[cfg(feature = "pio-usb-host")]
     fn from_input(input: crate::p8055::InputReport) -> Self {
         Self {
             digital_inputs: input.digital_inputs(),
@@ -372,7 +406,7 @@ impl scpi::Response for P8055OutputResponse {
 }
 
 impl P8055OutputResponse {
-    #[cfg(feature = "board-adafruit-rp2040-usb-host")]
+    #[cfg(feature = "pio-usb-host")]
     fn from_output(output: crate::p8055::OutputState) -> Self {
         Self {
             digital_outputs: output.digital_outputs,
@@ -477,7 +511,7 @@ fn imu_error(error: devices::DeviceError) -> scpi::Error {
     }
 }
 
-#[cfg(feature = "board-adafruit-rp2040-usb-host")]
+#[cfg(feature = "pio-usb-host")]
 fn usb_host_error(error: crate::usb_host::Error) -> scpi::Error {
     match error {
         crate::usb_host::Error::InvalidLength => scpi::Error::DataOutOfRange,
@@ -561,7 +595,7 @@ impl ScpiInstrument {
     }
 
     async fn bleuio_selected(&self) -> Result<crate::bleuio::Sensor, scpi::Error> {
-        #[cfg(feature = "board-adafruit-rp2040-usb-host")]
+        #[cfg(feature = "pio-usb-host")]
         {
             let board_id = self
                 .selected_bleuio_sensor
@@ -570,21 +604,21 @@ impl ScpiInstrument {
                 .await
                 .map_err(usb_host_error)
         }
-        #[cfg(not(feature = "board-adafruit-rp2040-usb-host"))]
+        #[cfg(not(feature = "pio-usb-host"))]
         {
             Err(scpi::Error::SettingsConflict)
         }
     }
 
     async fn bleuio_catalog_response(&self) -> Result<BleuioCatalogResponse, scpi::Error> {
-        #[cfg(feature = "board-adafruit-rp2040-usb-host")]
+        #[cfg(feature = "pio-usb-host")]
         {
             crate::usb_host::bleuio_catalog()
                 .await
                 .map(BleuioCatalogResponse)
                 .map_err(usb_host_error)
         }
-        #[cfg(not(feature = "board-adafruit-rp2040-usb-host"))]
+        #[cfg(not(feature = "pio-usb-host"))]
         {
             Err(scpi::Error::SettingsConflict)
         }
@@ -592,12 +626,12 @@ impl ScpiInstrument {
 
     async fn bleuio_set_filter(&self, ids: &str) -> Result<(), scpi::Error> {
         let filter = crate::bleuio::Filter::parse(ids).ok_or(scpi::Error::DataOutOfRange)?;
-        #[cfg(feature = "board-adafruit-rp2040-usb-host")]
+        #[cfg(feature = "pio-usb-host")]
         {
             crate::usb_host::bleuio_set_filter(filter).await;
             Ok(())
         }
-        #[cfg(not(feature = "board-adafruit-rp2040-usb-host"))]
+        #[cfg(not(feature = "pio-usb-host"))]
         {
             let _ = filter;
             Err(scpi::Error::SettingsConflict)
@@ -605,11 +639,11 @@ impl ScpiInstrument {
     }
 
     async fn bleuio_filter_response(&self) -> Result<BleuioFilterResponse, scpi::Error> {
-        #[cfg(feature = "board-adafruit-rp2040-usb-host")]
+        #[cfg(feature = "pio-usb-host")]
         {
             Ok(BleuioFilterResponse(crate::usb_host::bleuio_filter().await))
         }
-        #[cfg(not(feature = "board-adafruit-rp2040-usb-host"))]
+        #[cfg(not(feature = "pio-usb-host"))]
         {
             Err(scpi::Error::SettingsConflict)
         }
@@ -750,13 +784,13 @@ impl ScpiInstrument {
 
     #[scpi(cmd = "SYSTem:USB:HOST:STATus?")]
     async fn usb_host_status(&mut self) -> Result<UsbHostStatusResponse, scpi::Error> {
-        #[cfg(feature = "board-adafruit-rp2040-usb-host")]
+        #[cfg(feature = "pio-usb-host")]
         {
             Ok(UsbHostStatusResponse::from_status(
                 crate::usb_host::status().await,
             ))
         }
-        #[cfg(not(feature = "board-adafruit-rp2040-usb-host"))]
+        #[cfg(not(feature = "pio-usb-host"))]
         {
             Err(scpi::Error::SettingsConflict)
         }
@@ -766,13 +800,27 @@ impl ScpiInstrument {
     async fn usb_host_enumeration_diagnostic(
         &mut self,
     ) -> Result<UsbHostEnumerationDiagnosticResponse, scpi::Error> {
-        #[cfg(feature = "board-adafruit-rp2040-usb-host")]
+        #[cfg(feature = "pio-usb-host")]
         {
             Ok(UsbHostEnumerationDiagnosticResponse::from_diagnostic(
                 crate::usb_host::enumeration_diagnostic().await,
             ))
         }
-        #[cfg(not(feature = "board-adafruit-rp2040-usb-host"))]
+        #[cfg(not(feature = "pio-usb-host"))]
+        {
+            Err(scpi::Error::SettingsConflict)
+        }
+    }
+
+    #[scpi(cmd = "SYSTem:USB:HOST:LINE:DIAGnostic?")]
+    async fn usb_host_line_diagnostic(
+        &mut self,
+    ) -> Result<UsbHostLineDiagnosticResponse, scpi::Error> {
+        #[cfg(feature = "pio-usb-host")]
+        {
+            Ok(UsbHostLineDiagnosticResponse::snapshot())
+        }
+        #[cfg(not(feature = "pio-usb-host"))]
         {
             Err(scpi::Error::SettingsConflict)
         }
@@ -929,13 +977,13 @@ impl ScpiInstrument {
 
     #[scpi(cmd = "SYSTem:USB:HOST:CDC:WRITe:HEX")]
     async fn usb_host_cdc_write_hex(&mut self, data: &str) -> Result<u8, scpi::Error> {
-        #[cfg(feature = "board-adafruit-rp2040-usb-host")]
+        #[cfg(feature = "pio-usb-host")]
         {
             crate::usb_host::cdc_write_hex(data)
                 .await
                 .map_err(usb_host_error)
         }
-        #[cfg(not(feature = "board-adafruit-rp2040-usb-host"))]
+        #[cfg(not(feature = "pio-usb-host"))]
         {
             let _ = data;
             Err(scpi::Error::SettingsConflict)
@@ -944,14 +992,14 @@ impl ScpiInstrument {
 
     #[scpi(cmd = "SYSTem:USB:HOST:FTDI:BAUDrate")]
     async fn usb_host_ftdi_set_baud_rate(&mut self, baud_rate: u32) -> Result<(), scpi::Error> {
-        #[cfg(feature = "board-adafruit-rp2040-usb-host")]
+        #[cfg(feature = "pio-usb-host")]
         {
             crate::usb_host::ftdi_set_baud_rate(baud_rate)
                 .await
                 .map(|_| ())
                 .map_err(usb_host_error)
         }
-        #[cfg(not(feature = "board-adafruit-rp2040-usb-host"))]
+        #[cfg(not(feature = "pio-usb-host"))]
         {
             let _ = baud_rate;
             Err(scpi::Error::SettingsConflict)
@@ -960,13 +1008,13 @@ impl ScpiInstrument {
 
     #[scpi(cmd = "SYSTem:USB:HOST:FTDI:BAUDrate?")]
     async fn usb_host_ftdi_baud_rate(&mut self) -> Result<u32, scpi::Error> {
-        #[cfg(feature = "board-adafruit-rp2040-usb-host")]
+        #[cfg(feature = "pio-usb-host")]
         {
             crate::usb_host::ftdi_baud_rate()
                 .await
                 .map_err(usb_host_error)
         }
-        #[cfg(not(feature = "board-adafruit-rp2040-usb-host"))]
+        #[cfg(not(feature = "pio-usb-host"))]
         {
             Err(scpi::Error::SettingsConflict)
         }
@@ -977,14 +1025,14 @@ impl ScpiInstrument {
         &mut self,
         length: u8,
     ) -> Result<UsbHostDataResponse, scpi::Error> {
-        #[cfg(feature = "board-adafruit-rp2040-usb-host")]
+        #[cfg(feature = "pio-usb-host")]
         {
             crate::usb_host::cdc_read(length)
                 .await
                 .map(UsbHostDataResponse::from_cdc)
                 .map_err(usb_host_error)
         }
-        #[cfg(not(feature = "board-adafruit-rp2040-usb-host"))]
+        #[cfg(not(feature = "pio-usb-host"))]
         {
             let _ = length;
             Err(scpi::Error::SettingsConflict)
@@ -997,14 +1045,14 @@ impl ScpiInstrument {
         data: &str,
         read_length: u8,
     ) -> Result<UsbHostDataResponse, scpi::Error> {
-        #[cfg(feature = "board-adafruit-rp2040-usb-host")]
+        #[cfg(feature = "pio-usb-host")]
         {
             crate::usb_host::cdc_exchange_hex(data, read_length)
                 .await
                 .map(UsbHostDataResponse::from_cdc)
                 .map_err(usb_host_error)
         }
-        #[cfg(not(feature = "board-adafruit-rp2040-usb-host"))]
+        #[cfg(not(feature = "pio-usb-host"))]
         {
             let _ = (data, read_length);
             Err(scpi::Error::SettingsConflict)
@@ -1013,14 +1061,14 @@ impl ScpiInstrument {
 
     #[scpi(cmd = "SYSTem:USB:HOST:P8055:INPut?")]
     async fn usb_host_p8055_input(&mut self) -> Result<P8055InputResponse, scpi::Error> {
-        #[cfg(feature = "board-adafruit-rp2040-usb-host")]
+        #[cfg(feature = "pio-usb-host")]
         {
             crate::usb_host::p8055_read_input()
                 .await
                 .map(P8055InputResponse::from_input)
                 .map_err(usb_host_error)
         }
-        #[cfg(not(feature = "board-adafruit-rp2040-usb-host"))]
+        #[cfg(not(feature = "pio-usb-host"))]
         {
             Err(scpi::Error::SettingsConflict)
         }
@@ -1028,14 +1076,14 @@ impl ScpiInstrument {
 
     #[scpi(cmd = "SYSTem:USB:HOST:P8055:OUTPut?")]
     async fn usb_host_p8055_output(&mut self) -> Result<P8055OutputResponse, scpi::Error> {
-        #[cfg(feature = "board-adafruit-rp2040-usb-host")]
+        #[cfg(feature = "pio-usb-host")]
         {
             crate::usb_host::p8055_get_output()
                 .await
                 .map(P8055OutputResponse::from_output)
                 .map_err(usb_host_error)
         }
-        #[cfg(not(feature = "board-adafruit-rp2040-usb-host"))]
+        #[cfg(not(feature = "pio-usb-host"))]
         {
             Err(scpi::Error::SettingsConflict)
         }
@@ -1048,7 +1096,7 @@ impl ScpiInstrument {
         analog_output_1: u16,
         analog_output_2: u16,
     ) -> Result<(), scpi::Error> {
-        #[cfg(feature = "board-adafruit-rp2040-usb-host")]
+        #[cfg(feature = "pio-usb-host")]
         {
             let digital_outputs =
                 u8::try_from(digital_outputs).map_err(|_| scpi::Error::DataOutOfRange)?;
@@ -1060,7 +1108,7 @@ impl ScpiInstrument {
                 .await
                 .map_err(usb_host_error)
         }
-        #[cfg(not(feature = "board-adafruit-rp2040-usb-host"))]
+        #[cfg(not(feature = "pio-usb-host"))]
         {
             let _ = (digital_outputs, analog_output_1, analog_output_2);
             Err(scpi::Error::SettingsConflict)
@@ -1069,14 +1117,14 @@ impl ScpiInstrument {
 
     #[scpi(cmd = "SYSTem:USB:HOST:P8055:COUNter:RESet")]
     async fn usb_host_p8055_reset_counter(&mut self, channel: u16) -> Result<(), scpi::Error> {
-        #[cfg(feature = "board-adafruit-rp2040-usb-host")]
+        #[cfg(feature = "pio-usb-host")]
         {
             let channel = u8::try_from(channel).map_err(|_| scpi::Error::DataOutOfRange)?;
             crate::usb_host::p8055_reset_counter(channel)
                 .await
                 .map_err(usb_host_error)
         }
-        #[cfg(not(feature = "board-adafruit-rp2040-usb-host"))]
+        #[cfg(not(feature = "pio-usb-host"))]
         {
             let _ = channel;
             Err(scpi::Error::SettingsConflict)
@@ -1089,14 +1137,14 @@ impl ScpiInstrument {
         channel: u16,
         microseconds: u32,
     ) -> Result<(), scpi::Error> {
-        #[cfg(feature = "board-adafruit-rp2040-usb-host")]
+        #[cfg(feature = "pio-usb-host")]
         {
             let channel = u8::try_from(channel).map_err(|_| scpi::Error::DataOutOfRange)?;
             crate::usb_host::p8055_set_debounce(channel, microseconds)
                 .await
                 .map_err(usb_host_error)
         }
-        #[cfg(not(feature = "board-adafruit-rp2040-usb-host"))]
+        #[cfg(not(feature = "pio-usb-host"))]
         {
             let _ = (channel, microseconds);
             Err(scpi::Error::SettingsConflict)
@@ -1105,14 +1153,14 @@ impl ScpiInstrument {
 
     #[scpi(cmd = "SYSTem:USB:HOST:P8055:COUNter:DEBounce?")]
     async fn usb_host_p8055_debounce(&mut self, channel: u16) -> Result<u32, scpi::Error> {
-        #[cfg(feature = "board-adafruit-rp2040-usb-host")]
+        #[cfg(feature = "pio-usb-host")]
         {
             let channel = u8::try_from(channel).map_err(|_| scpi::Error::DataOutOfRange)?;
             crate::usb_host::p8055_get_debounce(channel)
                 .await
                 .map_err(usb_host_error)
         }
-        #[cfg(not(feature = "board-adafruit-rp2040-usb-host"))]
+        #[cfg(not(feature = "pio-usb-host"))]
         {
             let _ = channel;
             Err(scpi::Error::SettingsConflict)
@@ -1507,7 +1555,7 @@ async fn scpi_task(stack: Stack<'static>, serial: &'static str, hardware: Hardwa
 
 #[cfg(test)]
 mod tests {
-    #[cfg(feature = "board-adafruit-rp2040-usb-host")]
+    #[cfg(feature = "pio-usb-host")]
     use super::{BleuioFilterResponse, BleuioSensorIdResponse};
     use super::{SCPI_NODE_0, UsbHostEnumerationDiagnosticResponse};
     use microscpi::{self as scpi, Response as _};
@@ -1591,7 +1639,7 @@ mod tests {
         assert_eq!(short_command, long_command);
     }
 
-    #[cfg(feature = "board-adafruit-rp2040-usb-host")]
+    #[cfg(feature = "pio-usb-host")]
     #[test]
     fn usb_host_bleuio_sensor_headers_and_responses_are_stable() {
         let short_query = query_id(b"SYST:USB:HOST:BLEU:SENS:CAT?\n");

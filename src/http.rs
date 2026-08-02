@@ -1,6 +1,6 @@
 use core::fmt::Write;
 
-#[cfg(any(feature = "can", feature = "board-adafruit-rp2040-usb-host"))]
+#[cfg(any(feature = "can", feature = "pio-usb-host"))]
 use embassy_futures::select::Either;
 use embassy_futures::select::select;
 use embassy_net::tcp::TcpSocket;
@@ -11,18 +11,14 @@ use heapless::String;
 use crate::can::{CAN_EVENTS, CanEvent, handle_can_ws_text, write_can_frame_json};
 #[cfg(feature = "i2c")]
 use crate::i2c::handle_i2c_ws_text;
-#[cfg(any(
-    feature = "can",
-    feature = "i2c",
-    feature = "board-adafruit-rp2040-usb-host"
-))]
+#[cfg(any(feature = "can", feature = "i2c", feature = "pio-usb-host"))]
 use crate::websocket::{self, Frame};
 
 const HTTP_SOCKETS: usize = crate::HTTP_SOCKETS;
 const HTTP_PEER_CLOSE_TIMEOUT: Duration = Duration::from_secs(2);
 
 enum WebSocketEndpoint {
-    #[cfg(feature = "board-adafruit-rp2040-usb-host")]
+    #[cfg(feature = "pio-usb-host")]
     Audio,
     #[cfg(feature = "can")]
     Can,
@@ -30,35 +26,23 @@ enum WebSocketEndpoint {
     I2c,
 }
 
-#[cfg(feature = "board-adafruit-rp2040-usb-host")]
+#[cfg(feature = "pio-usb-host")]
 const API_STATUS_CAPABILITIES: &str = r#","interfaces":["usb-host","usb-serial","usbtmc","i2c","scpi"],"usbSerial":{"protocol":"RAW","port":7000,"service":"_usbserial._tcp"},"usbtmc":{"protocol":"SCPI-RAW","port":5026,"service":"_usbtmc._tcp"},"websocket":"/i2c","websockets":["/i2c","/audio"],"audio":{"protocol":"PCM_S16LE","sampleRateHz":48000,"channels":1,"websocket":"/audio"},"pages":{"i2c":"/","usb":"/usb-host.html","scpi":"/scpi.html"}"#;
-#[cfg(all(
-    not(feature = "board-adafruit-rp2040-usb-host"),
-    feature = "can",
-    feature = "i2c"
-))]
+#[cfg(all(not(feature = "pio-usb-host"), feature = "can", feature = "i2c"))]
 const API_STATUS_CAPABILITIES: &str = r#","interfaces":["can","i2c","scpi"],"websocket":"/can","websockets":["/can","/i2c"],"pages":{"can":"/","i2c":"/i2c.html","scpi":"/scpi.html"}"#;
-#[cfg(all(
-    not(feature = "board-adafruit-rp2040-usb-host"),
-    feature = "can",
-    not(feature = "i2c")
-))]
+#[cfg(all(not(feature = "pio-usb-host"), feature = "can", not(feature = "i2c")))]
 const API_STATUS_CAPABILITIES: &str = r#","interfaces":["can","scpi"],"websocket":"/can","websockets":["/can"],"pages":{"can":"/","scpi":"/scpi.html"}"#;
-#[cfg(all(
-    not(feature = "board-adafruit-rp2040-usb-host"),
-    not(feature = "can"),
-    feature = "i2c"
-))]
+#[cfg(all(not(feature = "pio-usb-host"), not(feature = "can"), feature = "i2c"))]
 const API_STATUS_CAPABILITIES: &str = r#","interfaces":["i2c","scpi"],"websocket":"/i2c","websockets":["/i2c"],"pages":{"i2c":"/","scpi":"/scpi.html"}"#;
 #[cfg(all(
-    not(feature = "board-adafruit-rp2040-usb-host"),
+    not(feature = "pio-usb-host"),
     not(any(feature = "can", feature = "i2c"))
 ))]
 const API_STATUS_CAPABILITIES: &str =
     r#","interfaces":["scpi"],"websockets":[],"pages":{"scpi":"/scpi.html"}"#;
 
 fn websocket_endpoint(request: &str) -> Option<WebSocketEndpoint> {
-    #[cfg(feature = "board-adafruit-rp2040-usb-host")]
+    #[cfg(feature = "pio-usb-host")]
     if request.starts_with("GET /audio ") {
         return Some(WebSocketEndpoint::Audio);
     }
@@ -257,7 +241,7 @@ async fn write_api_status_response(
     write_http_response(socket, "application/json", body.as_bytes()).await
 }
 
-#[cfg(feature = "board-adafruit-rp2040-usb-host")]
+#[cfg(feature = "pio-usb-host")]
 async fn write_usb_host_status_response(
     socket: &mut TcpSocket<'_>,
 ) -> Result<(), embassy_net::tcp::Error> {
@@ -538,7 +522,7 @@ async fn serve_http_connection(
         return Ok(());
     }
 
-    #[cfg(feature = "board-adafruit-rp2040-usb-host")]
+    #[cfg(feature = "pio-usb-host")]
     {
         if request.starts_with("GET /usb-host.html ") {
             const BODY: &[u8] = include_bytes!("usb_host.html");
@@ -560,7 +544,7 @@ async fn serve_http_connection(
             socket.set_timeout(Some(crate::WS_TIMEOUT));
             socket.set_keep_alive(Some(crate::WS_KEEPALIVE));
             match endpoint {
-                #[cfg(feature = "board-adafruit-rp2040-usb-host")]
+                #[cfg(feature = "pio-usb-host")]
                 WebSocketEndpoint::Audio => audio_websocket_loop(socket, rx_buf).await?,
                 #[cfg(feature = "can")]
                 WebSocketEndpoint::Can => can_websocket_loop(socket, rx_buf).await?,
@@ -573,11 +557,11 @@ async fn serve_http_connection(
     } else if request.starts_with("GET /api/status ") {
         write_api_status_response(socket, serial).await?;
     } else if request.starts_with("GET /api/usb-host/status ") {
-        #[cfg(feature = "board-adafruit-rp2040-usb-host")]
+        #[cfg(feature = "pio-usb-host")]
         {
             write_usb_host_status_response(socket).await?;
         }
-        #[cfg(not(feature = "board-adafruit-rp2040-usb-host"))]
+        #[cfg(not(feature = "pio-usb-host"))]
         {
             write_not_found(socket).await?;
         }
@@ -818,7 +802,7 @@ setTimeout(connect,100);
     Ok(())
 }
 
-#[cfg(feature = "board-adafruit-rp2040-usb-host")]
+#[cfg(feature = "pio-usb-host")]
 async fn audio_websocket_loop(
     socket: &mut TcpSocket<'_>,
     buf: &mut [u8],

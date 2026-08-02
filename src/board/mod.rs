@@ -176,7 +176,7 @@ mod waveshare_rp2350_usb_a;
 pub(crate) use waveshare_rp2350_usb_a::*;
 
 pub(crate) fn rp_config() -> embassy_rp::config::Config {
-    #[cfg(feature = "board-adafruit-rp2040-usb-host")]
+    #[cfg(feature = "pio-usb-host")]
     {
         const SYS_CLOCK_HZ: u32 = 120_000_000;
         let clocks = embassy_rp::clocks::ClockConfig::system_freq(SYS_CLOCK_HZ)
@@ -184,7 +184,7 @@ pub(crate) fn rp_config() -> embassy_rp::config::Config {
         embassy_rp::config::Config::new(clocks)
     }
 
-    #[cfg(not(feature = "board-adafruit-rp2040-usb-host"))]
+    #[cfg(not(feature = "pio-usb-host"))]
     {
         Default::default()
     }
