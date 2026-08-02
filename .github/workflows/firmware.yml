@@ -59,7 +59,8 @@ jobs:
         if: matrix.target == 'thumbv6m-none-eabi'
         run: |
           sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends gcc-arm-none-eabi
+          sudo apt-get install --yes --no-install-recommends \
+            gcc-arm-none-eabi libnewlib-arm-none-eabi
 
       - name: Install UF2 converter
         if: matrix.converter == 'elf2uf2'
