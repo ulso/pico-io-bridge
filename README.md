@@ -114,6 +114,7 @@ Supported board profiles:
 | `board-adafruit-feather-rp2040` | I2C, ADC | I2C1, SDA GP2, SCL GP3 | `pico-io-feather-<uid6>.local` |
 | `board-adafruit-rp2040-usb-host` | PIO USB host, I2C, ADC | I2C1, SDA GP2, SCL GP3 | `pico-io-usb-host-<uid6>.local` |
 | `board-adafruit-kb2040` | I2C, ADC | I2C0, SDA GP12, SCL GP13 | `pico-io-kb2040-<uid6>.local` |
+| `board-waveshare-rp2350-usb-a` | I2C, ADC | I2C0, SDA GP4, SCL GP5 | `pico-io-waveshare-rp2350-<uid6>.local` |
 
 The regular Feather RP2040 and Feather RP2040 USB Host profiles select
 Embassy's generic `03h` second-stage flash bootloader. Adafruit boards of these
@@ -160,8 +161,15 @@ The default CAN bitrate is 500 kbit/s.
 
 The I2C bus runs at 400 kHz. On the CAN Feather, CAN uses SPI1 while STEMMA QT
 uses I2C1, so both hardware blocks run concurrently without a pin conflict.
-All profiles expose the RP2040 ADC inputs A0-A3 on GP26-GP29 through SCPI.
+All profiles expose the MCU ADC inputs A0-A3 on GP26-GP29 through SCPI.
 Pins for interfaces absent from the selected board profile are left untouched.
+
+The initial Waveshare RP2350-USB-A profile uses the RP2350A ARM cores and the
+native USB controller for CDC-NCM. Its four external ADC channels and I2C bus
+are enabled; the USB-A host connector and its PIO host resources are reserved
+for a later profile revision. The onboard WS2812 on GP16 uses PIO2 SM0 and
+DMA_CH11: red means that the network is starting and green means that DHCP and
+mDNS are ready. PIO0, PIO1, and DMA_CH0 remain free for future host work.
 
 The CAN Feather, regular Feather RP2040, and Feather RP2040 USB Host use their
 red LED on GP13 as a startup indicator. The existing `StatusIndicator` remains
@@ -183,6 +191,8 @@ five seconds; a bus-powered device cannot remove VBUS from its own hub port.
 ## Build
 
 The project is configured for `thumbv6m-none-eabi` in `.cargo/config.toml`.
+The checked-in Rust toolchain configuration installs both that RP2040 target
+and the `thumbv8m.main-none-eabihf` target used by RP2350 board profiles.
 The root release profile uses `opt-level = "s"`, fat LTO, and one codegen unit.
 These settings are intentionally repeated here because Cargo does not inherit a
 dependency crate's release profile.
@@ -228,6 +238,13 @@ For the Adafruit Feather RP2040 USB Host:
 cargo build --locked --release --no-default-features --features board-adafruit-rp2040-usb-host
 ```
 
+For the Waveshare RP2350-USB-A, select the Cortex-M33 target explicitly:
+
+```sh
+cargo build --locked --release --target thumbv8m.main-none-eabihf \
+  --no-default-features --features board-waveshare-rp2350-usb-a
+```
+
 The three non-CAN profiles exclude the `mcp25xx` dependency, CAN task, CAN HTTP
 page and `/can` WebSocket endpoint from the resulting firmware. The USB-host
 profile adds
@@ -237,11 +254,16 @@ as an optional Git dependency pinned to commit
 
 ## Flash
 
-The cargo runner is configured for `elf2uf2-rs`:
+The Cargo runner selects the flashing path from the ELF target:
 
 ```toml
-runner = "elf2uf2-rs --deploy --serial --verbose"
+runner = "sh scripts/cargo-runner.sh"
 ```
+
+RP2040 images use `elf2uf2-rs`. RP2350 images are converted and loaded with
+`picotool`; the generated UF2 includes the RP2350-E10 absolute block required
+by early A2 silicon. Install both tools before flashing the corresponding MCU
+family.
 
 With the Pico in BOOTSEL mode, this should usually be enough:
 
@@ -255,13 +277,20 @@ Select a different board while flashing in the same way as while building:
 cargo run --locked --release --no-default-features --features board-adafruit-kb2040
 ```
 
+The Waveshare RP2350-USB-A uses the same command with its target and feature:
+
+```sh
+cargo run --locked --release --target thumbv8m.main-none-eabihf \
+  --no-default-features --features board-waveshare-rp2350-usb-a
+```
+
 ## Firmware releases
 
 GitHub Actions builds UF2 images for all supported board profiles on every push
 to `main`, on pull requests, and when run manually. These development builds are
 available as workflow artifacts for 30 days.
 
-Pushing a semantic-version tag publishes a GitHub Release after all four board
+Pushing a semantic-version tag publishes a GitHub Release after all five board
 builds have succeeded:
 
 ```sh

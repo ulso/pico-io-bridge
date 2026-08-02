@@ -9,8 +9,8 @@ resolver = "2"
 
 [features]
 default = ["board-adafruit-rp2040-can"]
-board-adafruit-rp2040-can = ["mdns", "dhcp-server", "mcp25625", "i2c"]
-board-adafruit-feather-rp2040 = ["mdns", "dhcp-server", "i2c", "embassy-rp/boot2-generic-03h"]
+board-adafruit-rp2040-can = ["mdns", "dhcp-server", "mcp25625", "i2c", "embassy-rp/rp2040"]
+board-adafruit-feather-rp2040 = ["mdns", "dhcp-server", "i2c", "embassy-rp/rp2040", "embassy-rp/boot2-generic-03h"]
 board-adafruit-rp2040-usb-host = [
     "mdns",
     "dhcp-server",
@@ -18,9 +18,11 @@ board-adafruit-rp2040-usb-host = [
     "dep:embassy-rp-pio-usb-host",
     "embassy-rp-pio-usb-host/embassy-usb-host",
     "dep:embassy-usb-host",
+    "embassy-rp/rp2040",
     "embassy-rp/boot2-generic-03h",
 ]
-board-adafruit-kb2040 = ["mdns", "dhcp-server", "i2c"]
+board-adafruit-kb2040 = ["mdns", "dhcp-server", "i2c", "embassy-rp/rp2040"]
+board-waveshare-rp2350-usb-a = ["mdns", "dhcp-server", "i2c", "embassy-rp/rp235xa"]
 mdns = ["dep:embedded-alloc", "dep:hick-embassy", "dep:mdns-proto", "hick-embassy/no-atomic", "mdns-proto/no-atomic", "embassy-net/mdns"]
 dhcp-server = ["dep:leasehund", "leasehund/defmt", "embassy-net/dhcpv4"]
 can = ["dep:embedded-hal-1", "dep:embedded-hal-bus", "dep:mcp25xx", "dep:nb"]
@@ -33,7 +35,7 @@ embassy-embedded-hal = { version = "0.6.0", features = ["defmt"] }
 embassy-sync = { version = "0.8.0", features = ["defmt"] }
 embassy-executor = {  version = "0.10.0", features = ["platform-cortex-m", "executor-thread", "executor-interrupt", "defmt"] }
 embassy-time = { version = "0.5.1", features = ["defmt", "defmt-timestamp-uptime"] }
-embassy-rp = { version = "0.10.0", features = ["defmt", "unstable-pac", "time-driver", "critical-section-impl", "rp2040"] }
+embassy-rp = { version = "0.10.0", features = ["defmt", "unstable-pac", "time-driver", "critical-section-impl"] }
 embassy-futures = { version = "0.1.2"}
 embassy-usb = { version = "0.6.0", default-features = false, features = ["defmt", "max-interface-count-4"] }
 embassy-usb-host = { version = "=0.1.0", default-features = false, optional = true }
@@ -64,6 +66,7 @@ embedded-hal-bus = { version = "0.3.0", features = ["async"], optional = true }
 embedded-io-async = { version = "0.7.0", features = ["defmt"] }
 embedded-storage = { version = "0.3.1" }
 static_cell = "2.1.1"
+smart-leds = "0.4.0"
 portable-atomic = { version = "1.13.1", features = ["critical-section"] }
 log = "0.4.32"
 pio-proc = "0.3.0"

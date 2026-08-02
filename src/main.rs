@@ -64,6 +64,7 @@ use embassy_net::{
     StaticConfigV6,
 };
 use embassy_rp::bind_interrupts;
+#[cfg(not(feature = "board-waveshare-rp2350-usb-a"))]
 use embassy_rp::flash::Flash;
 use embassy_rp::peripherals::USB;
 use embassy_rp::usb::{Driver, InterruptHandler};
@@ -189,12 +190,25 @@ async fn main(spawner: Spawner) {
 
     uart.blocking_write(b"pico-io-bridge boot\r\n").unwrap();
 
+    #[cfg(not(feature = "board-waveshare-rp2350-usb-a"))]
     let mut flash = Flash::<_, _, { board::FLASH_SIZE }>::new_blocking(flash);
+    #[cfg(not(feature = "board-waveshare-rp2350-usb-a"))]
     let mut flash_uid = [0; FLASH_UID_BYTES];
+    #[cfg(not(feature = "board-waveshare-rp2350-usb-a"))]
     if flash.blocking_unique_id(&mut flash_uid).is_err() {
         flash_uid = *b"pico-io!";
         warn!("flash unique ID read failed, using fallback identity seed");
     }
+    #[cfg(feature = "board-waveshare-rp2350-usb-a")]
+    let flash_uid = match embassy_rp::otp::get_chipid() {
+        Ok(chip_id) => chip_id.to_be_bytes(),
+        Err(_) => {
+            warn!("RP2350 chip ID read failed, using fallback identity seed");
+            *b"pico-io!"
+        }
+    };
+    #[cfg(feature = "board-waveshare-rp2350-usb-a")]
+    let _ = flash;
 
     static USB_SERIAL: StaticCell<[u8; USB_SERIAL_BYTES]> = StaticCell::new();
     let usb_serial_bytes = USB_SERIAL.init([0; USB_SERIAL_BYTES]);
@@ -323,10 +337,10 @@ async fn main(spawner: Spawner) {
         host_mac
     );
     #[cfg(feature = "dhcp-server")]
-    uart.blocking_write(b"USB CDC-NCM ready, DHCP IPv4 from flash UID\r\n")
+    uart.blocking_write(b"USB CDC-NCM ready, DHCP IPv4 from hardware UID\r\n")
         .unwrap();
     #[cfg(not(feature = "dhcp-server"))]
-    uart.blocking_write(b"USB CDC-NCM ready, IPv4 link-local from flash UID\r\n")
+    uart.blocking_write(b"USB CDC-NCM ready, IPv4 link-local from hardware UID\r\n")
         .unwrap();
     uart.blocking_write(board::INTERFACE_STARTUP_LOG).unwrap();
 

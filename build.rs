@@ -17,9 +17,14 @@ fn main() {
     // Put `memory.x` in our output directory and ensure it's
     // on the linker search path.
     let out = &PathBuf::from(env::var_os("OUT_DIR").unwrap());
+    let memory_x: &[u8] = if env::var_os("CARGO_FEATURE_BOARD_WAVESHARE_RP2350_USB_A").is_some() {
+        include_bytes!("memory-rp2350.x")
+    } else {
+        include_bytes!("memory-rp2040.x")
+    };
     File::create(out.join("memory.x"))
         .unwrap()
-        .write_all(include_bytes!("memory.x"))
+        .write_all(memory_x)
         .unwrap();
     println!("cargo:rustc-link-search={}", out.display());
 
@@ -27,10 +32,13 @@ fn main() {
     // any file in the project changes. By specifying `memory.x`
     // here, we ensure the build script is only re-run when
     // `memory.x` is changed.
-    println!("cargo:rerun-if-changed=memory.x");
+    println!("cargo:rerun-if-changed=memory-rp2040.x");
+    println!("cargo:rerun-if-changed=memory-rp2350.x");
 
     println!("cargo:rustc-link-arg-bins=--nmagic");
     println!("cargo:rustc-link-arg-bins=-Tlink.x");
-    println!("cargo:rustc-link-arg-bins=-Tlink-rp.x");
+    if env::var_os("CARGO_FEATURE_BOARD_WAVESHARE_RP2350_USB_A").is_none() {
+        println!("cargo:rustc-link-arg-bins=-Tlink-rp.x");
+    }
     println!("cargo:rustc-link-arg-bins=-Tdefmt.x");
 }

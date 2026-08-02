@@ -23,15 +23,28 @@ jobs:
           - label: Adafruit RP2040 CAN
             feature: board-adafruit-rp2040-can
             artifact: pico-io-bridge-adafruit-rp2040-can
+            target: thumbv6m-none-eabi
+            converter: elf2uf2
           - label: Adafruit Feather RP2040
             feature: board-adafruit-feather-rp2040
             artifact: pico-io-bridge-adafruit-feather-rp2040
+            target: thumbv6m-none-eabi
+            converter: elf2uf2
           - label: Adafruit Feather RP2040 USB Host
             feature: board-adafruit-rp2040-usb-host
             artifact: pico-io-bridge-adafruit-rp2040-usb-host
+            target: thumbv6m-none-eabi
+            converter: elf2uf2
           - label: Adafruit KB2040
             feature: board-adafruit-kb2040
             artifact: pico-io-bridge-adafruit-kb2040
+            target: thumbv6m-none-eabi
+            converter: elf2uf2
+          - label: Waveshare RP2350-USB-A
+            feature: board-waveshare-rp2350-usb-a
+            artifact: pico-io-bridge-waveshare-rp2350-usb-a
+            target: thumbv8m.main-none-eabihf
+            converter: picotool
 
     steps:
       - name: Check out source
@@ -39,23 +52,46 @@ jobs:
 
       - name: Install Rust toolchain
         run: |
-          rustup toolchain install 1.96.0 --profile minimal --target thumbv6m-none-eabi
+          rustup toolchain install 1.96.0 --profile minimal --target ${{ matrix.target }}
           rustup default 1.96.0
 
       - name: Install UF2 converter
+        if: matrix.converter == 'elf2uf2'
         run: cargo install elf2uf2-rs --version 2.2.0 --locked --no-default-features
+
+      - name: Install picotool
+        if: matrix.converter == 'picotool'
+        run: |
+          curl -L --fail --silent --show-error \
+            https://github.com/raspberrypi/pico-sdk-tools/releases/download/v2.3.0-0/picotool-2.3.0-x86_64-lin.tar.gz \
+            -o picotool.tar.gz
+          mkdir -p tools
+          tar -xzf picotool.tar.gz -C tools
+          echo "$PWD/tools/picotool" >> "$GITHUB_PATH"
 
       - name: Build firmware
         run: >-
           cargo build --locked --release --no-default-features
+          --target ${{ matrix.target }}
           --features ${{ matrix.feature }}
 
-      - name: Create UF2 image
+      - name: Create RP2040 UF2 image
+        if: matrix.converter == 'elf2uf2'
         run: |
           mkdir -p dist
           elf2uf2-rs \
-            target/thumbv6m-none-eabi/release/pico-io-bridge \
+            target/${{ matrix.target }}/release/pico-io-bridge \
             dist/${{ matrix.artifact }}.uf2
+
+      - name: Create RP2350 UF2 image
+        if: matrix.converter == 'picotool'
+        run: |
+          mkdir -p dist
+          picotool uf2 convert \
+            target/${{ matrix.target }}/release/pico-io-bridge -t elf \
+            dist/${{ matrix.artifact }}.uf2 -t uf2 \
+            --family rp2350-arm-s \
+            --abs-block
 
       - name: Upload firmware artifact
         uses: actions/upload-artifact@v7

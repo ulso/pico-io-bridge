@@ -1525,6 +1525,7 @@ dependencies = [
  "portable-atomic",
  "rand",
  "rand_core 0.10.1",
+ "smart-leds",
  "static_cell",
  "usbd-hid",
  "vl53l4cd",
