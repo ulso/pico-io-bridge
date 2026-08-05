@@ -22,6 +22,7 @@ button:disabled{opacity:.45}.primary{background:#17202a;color:#fff;border-color:
 .metric{border:1px solid #d7dee6;border-radius:6px;padding:8px;background:#f9fafb}.metric span{display:block;font-size:11px;color:#5d6975}.metric strong{font-size:18px}
 .grid{display:grid;grid-template-columns:minmax(300px,380px) 1fr;gap:16px;align-items:start}
 .panel{border:1px solid #c7d0da;background:#fff;border-radius:8px;padding:14px}
+.hidden{display:none!important}.thermal{margin-top:16px}.thermalHead{display:flex;justify-content:space-between;align-items:end;gap:12px;margin-bottom:10px}.thermalMeta{display:flex;gap:16px;color:#5d6975;font-size:13px}.thermalCanvasWrap{max-width:620px;margin:0 auto;border:1px solid #c7d0da;border-radius:8px;overflow:hidden;background:#111}.thermalCanvasWrap canvas{display:block;width:100%;height:auto;aspect-ratio:1;image-rendering:pixelated}
 .form{display:grid;grid-template-columns:1fr 1fr;gap:10px}.wide{grid-column:1/-1}
 label{display:block;font-size:12px;font-weight:700;margin:0 0 5px;color:#303b46}
 input{box-sizing:border-box;width:100%;border:1px solid #bdc7d1;border-radius:6px;background:#fff;color:#17202a;padding:8px;font:14px ui-monospace,SFMono-Regular,Menlo,monospace}
@@ -29,8 +30,8 @@ input{box-sizing:border-box;width:100%;border:1px solid #bdc7d1;border-radius:6p
 table{width:100%;border-collapse:collapse;font:13px ui-monospace,SFMono-Regular,Menlo,monospace}
 th,td{padding:8px;border-bottom:1px solid #edf0f3;text-align:left;white-space:nowrap}th{position:sticky;top:0;background:#f9fafb;font:12px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;font-weight:700;color:#303b46}
 pre{box-sizing:border-box;width:100%;min-height:140px;max-height:260px;overflow:auto;border:1px solid #c7d0da;border-radius:8px;background:#fff;color:#17202a;padding:10px;margin:16px 0 0;font:12px ui-monospace,SFMono-Regular,Menlo,monospace;white-space:pre-wrap}
-@media(max-width:720px){main{padding:14px}.grid{grid-template-columns:1fr}.metrics{grid-template-columns:repeat(2,1fr)}header{flex-direction:column}.form{grid-template-columns:1fr}}
-@media(prefers-color-scheme:dark){body{background:#111820;color:#edf2f7}.panel,.tableWrap,pre,input,button,.tabs a{background:#17212b;color:#edf2f7;border-color:#3b4b5c}.metric,th{background:#1d2a36;border-color:#3b4b5c}.primary,.tabs a.active{background:#edf2f7;color:#111820}.metric span,label{color:#b9c3cf}td,th{border-bottom-color:#273544}}
+@media(max-width:720px){main{padding:14px}.grid{grid-template-columns:1fr}.metrics{grid-template-columns:repeat(2,1fr)}header{flex-direction:column}.form{grid-template-columns:1fr}.thermalHead{align-items:start;flex-direction:column}.thermalMeta{width:100%;justify-content:space-between}}
+@media(prefers-color-scheme:dark){body{background:#111820;color:#edf2f7}.panel,.tableWrap,pre,input,button,.tabs a{background:#17212b;color:#edf2f7;border-color:#3b4b5c}.metric,th{background:#1d2a36;border-color:#3b4b5c}.primary,.tabs a.active{background:#edf2f7;color:#111820}.metric span,label,.thermalMeta{color:#b9c3cf}td,th{border-bottom-color:#273544}.thermalCanvasWrap{border-color:#3b4b5c}}
 </style>
 </head>
 <body>
@@ -71,6 +72,13 @@ pre{box-sizing:border-box;width:100%;min-height:140px;max-height:260px;overflow:
 </div>
 </div>
 </section>
+<section id="thermalPanel" class="panel thermal hidden">
+<div class="thermalHead">
+<div><h2>AMG8833 Thermal Camera</h2><span id="thermalState" class="thermalMeta">Initializing 8x8 thermal array</span></div>
+<div class="thermalMeta"><span>Min <strong id="thermalMin">-</strong></span><span>Average <strong id="thermalAverage">-</strong></span><span>Max <strong id="thermalMax">-</strong></span></div>
+</div>
+<div class="thermalCanvasWrap"><canvas id="thermalCanvas" width="640" height="640" aria-label="AMG8833 8 by 8 thermal image"></canvas></div>
+</section>
 <pre id="log"></pre>
 </main>
 <script>
@@ -95,9 +103,22 @@ const devicesEl=document.getElementById("devices");
 const logEl=document.getElementById("log");
 const interfaceNav=document.getElementById("interfaceNav");
 const pageTitle=document.getElementById("pageTitle");
+const thermalPanel=document.getElementById("thermalPanel");
+const thermalState=document.getElementById("thermalState");
+const thermalMin=document.getElementById("thermalMin");
+const thermalAverage=document.getElementById("thermalAverage");
+const thermalMax=document.getElementById("thermalMax");
+const thermalCanvas=document.getElementById("thermalCanvas");
+const thermalContext=thermalCanvas.getContext("2d");
 let ws=null;
 let connectWatch=null;
 let statusTimer=null;
+let discoveryTimer=null;
+let thermalTimer=null;
+let thermalStage="idle";
+let thermalLow=null;
+let thermalFailures=0;
+const thermalAddress=0x69;
 function now(){return new Date().toLocaleTimeString()}
 function log(line){logEl.textContent+=now()+"  "+line+"\n";logEl.scrollTop=logEl.scrollHeight}
 function setStatus(kind,text){statusEl.className="status "+kind;statusText.textContent=text}
@@ -108,18 +129,28 @@ function address(){const value=parseNumber(addressEl.value);if(!Number.isInteger
 function readLength(){const value=Number.parseInt(readLengthEl.value,10);if(!Number.isInteger(value)||value<1||value>64)throw new Error("Read length must be 1..64");return value}
 function writeData(){const data=parseBytes(writeDataEl.value);if(data.length<1||data.length>64||data.some(value=>!Number.isInteger(value)||value<0||value>255))throw new Error("Write data must contain 1..64 bytes");return data}
 function send(message){if(!ws||ws.readyState!==1)return;const text=JSON.stringify(message);ws.send(text);if(message.type!=="i2c.status")log("> "+text)}
+function sendQuiet(message){if(ws&&ws.readyState===1)ws.send(JSON.stringify(message))}
 function requestStatus(){send({type:"i2c.status"})}
 function updateStatus(message){frequencyEl.textContent=Math.round(message.frequency/1000)+" kHz";transactionsEl.textContent=message.transactionCount||0;errorsEl.textContent=message.errorCount||0}
-function showDevices(addresses){devicesEl.textContent="";for(const value of addresses){const row=document.createElement("tr");row.innerHTML="<td>0x"+Number(value).toString(16).toUpperCase().padStart(2,"0")+"</td><td>"+value+"</td>";devicesEl.appendChild(row)}deviceCountEl.textContent=addresses.length}
+function showDevices(addresses){devicesEl.textContent="";for(const value of addresses){const row=document.createElement("tr");row.innerHTML="<td>0x"+Number(value).toString(16).toUpperCase().padStart(2,"0")+"</td><td>"+value+"</td>";devicesEl.appendChild(row)}deviceCountEl.textContent=addresses.length;if(addresses.includes(thermalAddress)){if(thermalStage==="idle"&&thermalPanel.classList.contains("hidden"))startThermal()}else stopThermal()}
+function thermalWrite(register,value,stage,delay=0){thermalStage=stage;setTimeout(()=>sendQuiet({type:"i2c.write",bus:0,address:thermalAddress,data:[register,value]}),delay)}
+function startThermal(){clearTimeout(thermalTimer);thermalPanel.classList.remove("hidden");thermalState.textContent="Initializing 8x8 thermal array";thermalFailures=0;thermalWrite(0x00,0x00,"power")}
+function stopThermal(){clearTimeout(thermalTimer);thermalTimer=null;thermalStage="idle";thermalLow=null;thermalPanel.classList.add("hidden");thermalMin.textContent=thermalAverage.textContent=thermalMax.textContent="-"}
+function requestThermal(){if(!ws||ws.readyState!==1)return;thermalStage="low";sendQuiet({type:"i2c.write_read",bus:0,address:thermalAddress,write:[0x80],readLength:64})}
+function scheduleThermal(delay=150){clearTimeout(thermalTimer);thermalTimer=setTimeout(requestThermal,delay)}
+function thermalColor(value,min,max){const span=Math.max(max-min,2);const normalized=Math.max(0,Math.min(1,(value-min)/span));const hue=240-240*normalized;return `hsl(${hue} 90% ${35+normalized*20}%)`}
+function drawThermal(frame){const min=Math.min(...frame),max=Math.max(...frame),average=frame.reduce((sum,value)=>sum+value,0)/frame.length;thermalMin.textContent=min.toFixed(2)+" °C";thermalAverage.textContent=average.toFixed(2)+" °C";thermalMax.textContent=max.toFixed(2)+" °C";thermalState.textContent="Live · 10 Hz sensor · browser display";const size=thermalCanvas.width/8;thermalContext.textAlign="center";thermalContext.textBaseline="middle";thermalContext.font="bold 17px -apple-system,BlinkMacSystemFont,Segoe UI,sans-serif";for(let y=0;y<8;y++){for(let x=0;x<8;x++){const value=frame[y*8+x];thermalContext.fillStyle=thermalColor(value,min,max);thermalContext.fillRect(x*size,y*size,size,size);thermalContext.strokeStyle="rgba(255,255,255,.18)";thermalContext.strokeRect(x*size+.5,y*size+.5,size-1,size-1);thermalContext.fillStyle=value>(min+max)/2?"#111":"#fff";thermalContext.fillText(value.toFixed(1),x*size+size/2,y*size+size/2)}}}
+function thermalError(){thermalFailures++;thermalStage="idle";if(thermalFailures>=3){stopThermal();sendQuiet({type:"i2c.scan",bus:0})}else scheduleThermal(400)}
+function handleThermal(message){if(thermalStage==="idle")return false;if(message.type==="error"){thermalError();return true}if(thermalStage==="power"&&message.type==="i2c.write"){thermalWrite(0x01,0x3f,"reset",50);return true}if(thermalStage==="reset"&&message.type==="i2c.write"){thermalWrite(0x02,0x00,"rate",2);return true}if(thermalStage==="rate"&&message.type==="i2c.write"){thermalWrite(0x05,0x0e,"clear");return true}if(thermalStage==="clear"&&message.type==="i2c.write"){thermalStage="idle";scheduleThermal(100);return true}if(thermalStage==="low"&&message.type==="i2c.write_read"&&message.address===thermalAddress){thermalLow=message.data||[];thermalStage="high";sendQuiet({type:"i2c.write_read",bus:0,address:thermalAddress,write:[0xc0],readLength:64});return true}if(thermalStage==="high"&&message.type==="i2c.write_read"&&message.address===thermalAddress){const bytes=(thermalLow||[]).concat(message.data||[]);thermalLow=null;if(bytes.length!==128){thermalError();return true}const frame=[];for(let i=0;i<128;i+=2){let raw=(bytes[i]|bytes[i+1]<<8)&0x0fff;if(raw&0x0800)raw-=0x1000;frame.push(raw/4)}thermalFailures=0;thermalStage="idle";drawThermal(frame);scheduleThermal();return true}return false}
 function connect(){
  if(ws&&ws.readyState<2)return;
  setStatus("wait","connecting");connectBtn.disabled=true;disconnectBtn.disabled=false;
  const sock=new WebSocket("ws://"+location.host+"/i2c");ws=sock;
  if(connectWatch)clearTimeout(connectWatch);
  connectWatch=setTimeout(()=>{if(ws===sock&&sock.readyState===0){ws=null;setStatus("bad","disconnected");setConnected(false);sock.close();log("connect timeout")}},5000);
- sock.onopen=()=>{if(ws!==sock)return;clearTimeout(connectWatch);connectWatch=null;setStatus("ok","connected");setConnected(true);log("connected");requestStatus();statusTimer=setInterval(requestStatus,2000)};
- sock.onmessage=event=>{if(ws!==sock)return;try{const message=JSON.parse(event.data);if(message.type==="i2c.status")updateStatus(message);else log("< "+event.data);if(message.type==="i2c.scan")showDevices(message.addresses||[]);if(message.type==="error")errorsEl.textContent=Number(errorsEl.textContent||0)+1}catch(_){log("< "+event.data)}};
- sock.onclose=event=>{if(ws===sock)ws=null;if(connectWatch)clearTimeout(connectWatch);connectWatch=null;if(statusTimer)clearInterval(statusTimer);statusTimer=null;setStatus("bad","disconnected");setConnected(false);log("closed "+event.code)};
+ sock.onopen=()=>{if(ws!==sock)return;clearTimeout(connectWatch);connectWatch=null;setStatus("ok","connected");setConnected(true);log("connected");requestStatus();sendQuiet({type:"i2c.scan",bus:0});statusTimer=setInterval(requestStatus,2000);discoveryTimer=setInterval(()=>{if(thermalPanel.classList.contains("hidden"))sendQuiet({type:"i2c.scan",bus:0})},5000)};
+ sock.onmessage=event=>{if(ws!==sock)return;try{const message=JSON.parse(event.data);const thermalMessage=handleThermal(message);if(message.type==="i2c.status")updateStatus(message);else if(!thermalMessage&&message.type!=="i2c.scan")log("< "+event.data);if(message.type==="i2c.scan")showDevices(message.addresses||[]);if(message.type==="error"&&!thermalMessage)errorsEl.textContent=Number(errorsEl.textContent||0)+1}catch(_){log("< "+event.data)}};
+ sock.onclose=event=>{if(ws===sock)ws=null;if(connectWatch)clearTimeout(connectWatch);connectWatch=null;if(statusTimer)clearInterval(statusTimer);statusTimer=null;if(discoveryTimer)clearInterval(discoveryTimer);discoveryTimer=null;stopThermal();setStatus("bad","disconnected");setConnected(false);log("closed "+event.code)};
  sock.onerror=()=>{setStatus("bad","error");log("error")};
 }
 connectBtn.onclick=connect;

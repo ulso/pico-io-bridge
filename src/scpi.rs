@@ -6,7 +6,11 @@ use embassy_rp::Peri;
 use embassy_rp::adc::{Adc, Async, Channel, Config, InterruptHandler};
 use embassy_rp::bind_interrupts;
 use embassy_rp::gpio::Pull;
-use embassy_rp::peripherals::{ADC, ADC_TEMP_SENSOR, PIN_26, PIN_27, PIN_28, PIN_29};
+use embassy_rp::peripherals::{ADC, ADC_TEMP_SENSOR};
+#[cfg(not(feature = "board-adafruit-fruit-jam"))]
+use embassy_rp::peripherals::{PIN_26, PIN_27, PIN_28, PIN_29};
+#[cfg(feature = "board-adafruit-fruit-jam")]
+use embassy_rp::peripherals::{PIN_40, PIN_41, PIN_42, PIN_43};
 use embassy_time::{Duration, Timer};
 use microscpi::{
     self as scpi, Adapter, Characters, ErrorCommands, ErrorQueue, Interface, Response as _,
@@ -531,23 +535,40 @@ bind_interrupts!(struct AdcIrqs {
     ADC_IRQ_FIFO => InterruptHandler;
 });
 
+#[cfg(feature = "board-adafruit-fruit-jam")]
+type AdcPin0 = PIN_40;
+#[cfg(feature = "board-adafruit-fruit-jam")]
+type AdcPin1 = PIN_41;
+#[cfg(feature = "board-adafruit-fruit-jam")]
+type AdcPin2 = PIN_42;
+#[cfg(feature = "board-adafruit-fruit-jam")]
+type AdcPin3 = PIN_43;
+#[cfg(not(feature = "board-adafruit-fruit-jam"))]
+type AdcPin0 = PIN_26;
+#[cfg(not(feature = "board-adafruit-fruit-jam"))]
+type AdcPin1 = PIN_27;
+#[cfg(not(feature = "board-adafruit-fruit-jam"))]
+type AdcPin2 = PIN_28;
+#[cfg(not(feature = "board-adafruit-fruit-jam"))]
+type AdcPin3 = PIN_29;
+
 pub(crate) struct Hardware {
     adc: Peri<'static, ADC>,
     temp_sensor: Peri<'static, ADC_TEMP_SENSOR>,
-    a0: Peri<'static, PIN_26>,
-    a1: Peri<'static, PIN_27>,
-    a2: Peri<'static, PIN_28>,
-    a3: Peri<'static, PIN_29>,
+    a0: Peri<'static, AdcPin0>,
+    a1: Peri<'static, AdcPin1>,
+    a2: Peri<'static, AdcPin2>,
+    a3: Peri<'static, AdcPin3>,
 }
 
 impl Hardware {
     pub(crate) fn new(
         adc: Peri<'static, ADC>,
         temp_sensor: Peri<'static, ADC_TEMP_SENSOR>,
-        a0: Peri<'static, PIN_26>,
-        a1: Peri<'static, PIN_27>,
-        a2: Peri<'static, PIN_28>,
-        a3: Peri<'static, PIN_29>,
+        a0: Peri<'static, AdcPin0>,
+        a1: Peri<'static, AdcPin1>,
+        a2: Peri<'static, AdcPin2>,
+        a3: Peri<'static, AdcPin3>,
     ) -> Self {
         Self {
             adc,

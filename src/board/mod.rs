@@ -15,45 +15,51 @@ use embassy_rp::gpio::{Level, Pin};
     feature = "board-adafruit-feather-rp2040",
     feature = "board-adafruit-rp2040-usb-host",
     feature = "board-adafruit-kb2040",
-    feature = "board-waveshare-rp2350-usb-a"
+    feature = "board-waveshare-rp2350-usb-a",
+    feature = "board-adafruit-fruit-jam"
 )))]
 compile_error!(
-    "select one board feature: board-adafruit-rp2040-can, board-adafruit-feather-rp2040, board-adafruit-rp2040-usb-host, board-adafruit-kb2040, or board-waveshare-rp2350-usb-a"
+    "select one board feature: board-adafruit-rp2040-can, board-adafruit-feather-rp2040, board-adafruit-rp2040-usb-host, board-adafruit-kb2040, board-waveshare-rp2350-usb-a, or board-adafruit-fruit-jam"
 );
 
 #[cfg(any(
     all(
         feature = "board-adafruit-rp2040-can",
-        feature = "board-adafruit-feather-rp2040"
-    ),
-    all(
-        feature = "board-adafruit-rp2040-can",
-        feature = "board-adafruit-rp2040-usb-host"
-    ),
-    all(
-        feature = "board-adafruit-rp2040-can",
-        feature = "board-adafruit-kb2040"
-    ),
-    all(
-        feature = "board-adafruit-feather-rp2040",
-        feature = "board-adafruit-rp2040-usb-host"
+        any(
+            feature = "board-adafruit-feather-rp2040",
+            feature = "board-adafruit-rp2040-usb-host",
+            feature = "board-adafruit-kb2040",
+            feature = "board-waveshare-rp2350-usb-a",
+            feature = "board-adafruit-fruit-jam"
+        )
     ),
     all(
         feature = "board-adafruit-feather-rp2040",
-        feature = "board-adafruit-kb2040"
+        any(
+            feature = "board-adafruit-rp2040-usb-host",
+            feature = "board-adafruit-kb2040",
+            feature = "board-waveshare-rp2350-usb-a",
+            feature = "board-adafruit-fruit-jam"
+        )
     ),
     all(
         feature = "board-adafruit-rp2040-usb-host",
-        feature = "board-adafruit-kb2040"
+        any(
+            feature = "board-adafruit-kb2040",
+            feature = "board-waveshare-rp2350-usb-a",
+            feature = "board-adafruit-fruit-jam"
+        )
+    ),
+    all(
+        feature = "board-adafruit-kb2040",
+        any(
+            feature = "board-waveshare-rp2350-usb-a",
+            feature = "board-adafruit-fruit-jam"
+        )
     ),
     all(
         feature = "board-waveshare-rp2350-usb-a",
-        any(
-            feature = "board-adafruit-rp2040-can",
-            feature = "board-adafruit-feather-rp2040",
-            feature = "board-adafruit-rp2040-usb-host",
-            feature = "board-adafruit-kb2040"
-        )
+        feature = "board-adafruit-fruit-jam"
     )
 ))]
 compile_error!("board features are mutually exclusive; select exactly one board");
@@ -64,116 +70,42 @@ compile_error!("board features are mutually exclusive; select exactly one board"
         feature = "board-adafruit-feather-rp2040",
         feature = "board-adafruit-rp2040-usb-host",
         feature = "board-adafruit-kb2040",
-        feature = "board-waveshare-rp2350-usb-a"
+        feature = "board-waveshare-rp2350-usb-a",
+        feature = "board-adafruit-fruit-jam"
     ),
     feature = "can"
 ))]
 compile_error!("the selected board profile does not define CAN hardware");
 
-#[cfg(all(
-    feature = "board-adafruit-rp2040-can",
-    not(any(
-        feature = "board-adafruit-feather-rp2040",
-        feature = "board-adafruit-rp2040-usb-host",
-        feature = "board-adafruit-kb2040",
-        feature = "board-waveshare-rp2350-usb-a"
-    ))
-))]
+#[cfg(feature = "board-adafruit-rp2040-can")]
 mod adafruit_rp2040_can;
-#[cfg(all(
-    feature = "board-adafruit-rp2040-can",
-    not(any(
-        feature = "board-adafruit-feather-rp2040",
-        feature = "board-adafruit-rp2040-usb-host",
-        feature = "board-adafruit-kb2040",
-        feature = "board-waveshare-rp2350-usb-a"
-    ))
-))]
+#[cfg(feature = "board-adafruit-rp2040-can")]
 pub(crate) use adafruit_rp2040_can::*;
 
-#[cfg(all(
-    feature = "board-adafruit-feather-rp2040",
-    not(any(
-        feature = "board-adafruit-rp2040-can",
-        feature = "board-adafruit-rp2040-usb-host",
-        feature = "board-adafruit-kb2040",
-        feature = "board-waveshare-rp2350-usb-a"
-    ))
-))]
+#[cfg(feature = "board-adafruit-feather-rp2040")]
 mod adafruit_feather_rp2040;
-#[cfg(all(
-    feature = "board-adafruit-feather-rp2040",
-    not(any(
-        feature = "board-adafruit-rp2040-can",
-        feature = "board-adafruit-rp2040-usb-host",
-        feature = "board-adafruit-kb2040",
-        feature = "board-waveshare-rp2350-usb-a"
-    ))
-))]
+#[cfg(feature = "board-adafruit-feather-rp2040")]
 pub(crate) use adafruit_feather_rp2040::*;
 
-#[cfg(all(
-    feature = "board-adafruit-rp2040-usb-host",
-    not(any(
-        feature = "board-adafruit-rp2040-can",
-        feature = "board-adafruit-feather-rp2040",
-        feature = "board-adafruit-kb2040",
-        feature = "board-waveshare-rp2350-usb-a"
-    ))
-))]
+#[cfg(feature = "board-adafruit-rp2040-usb-host")]
 mod adafruit_rp2040_usb_host;
-#[cfg(all(
-    feature = "board-adafruit-rp2040-usb-host",
-    not(any(
-        feature = "board-adafruit-rp2040-can",
-        feature = "board-adafruit-feather-rp2040",
-        feature = "board-adafruit-kb2040",
-        feature = "board-waveshare-rp2350-usb-a"
-    ))
-))]
+#[cfg(feature = "board-adafruit-rp2040-usb-host")]
 pub(crate) use adafruit_rp2040_usb_host::*;
 
-#[cfg(all(
-    feature = "board-adafruit-kb2040",
-    not(any(
-        feature = "board-adafruit-rp2040-can",
-        feature = "board-adafruit-feather-rp2040",
-        feature = "board-adafruit-rp2040-usb-host",
-        feature = "board-waveshare-rp2350-usb-a"
-    ))
-))]
+#[cfg(feature = "board-adafruit-kb2040")]
 mod adafruit_kb2040;
-#[cfg(all(
-    feature = "board-adafruit-kb2040",
-    not(any(
-        feature = "board-adafruit-rp2040-can",
-        feature = "board-adafruit-feather-rp2040",
-        feature = "board-adafruit-rp2040-usb-host",
-        feature = "board-waveshare-rp2350-usb-a"
-    ))
-))]
+#[cfg(feature = "board-adafruit-kb2040")]
 pub(crate) use adafruit_kb2040::*;
 
-#[cfg(all(
-    feature = "board-waveshare-rp2350-usb-a",
-    not(any(
-        feature = "board-adafruit-rp2040-can",
-        feature = "board-adafruit-feather-rp2040",
-        feature = "board-adafruit-rp2040-usb-host",
-        feature = "board-adafruit-kb2040"
-    ))
-))]
+#[cfg(feature = "board-waveshare-rp2350-usb-a")]
 mod waveshare_rp2350_usb_a;
-#[cfg(all(
-    feature = "board-waveshare-rp2350-usb-a",
-    not(any(
-        feature = "board-adafruit-rp2040-can",
-        feature = "board-adafruit-feather-rp2040",
-        feature = "board-adafruit-rp2040-usb-host",
-        feature = "board-adafruit-kb2040"
-    ))
-))]
+#[cfg(feature = "board-waveshare-rp2350-usb-a")]
 pub(crate) use waveshare_rp2350_usb_a::*;
+
+#[cfg(feature = "board-adafruit-fruit-jam")]
+mod adafruit_fruit_jam;
+#[cfg(feature = "board-adafruit-fruit-jam")]
+pub(crate) use adafruit_fruit_jam::*;
 
 pub(crate) fn rp_config() -> embassy_rp::config::Config {
     #[cfg(feature = "pio-usb-host")]

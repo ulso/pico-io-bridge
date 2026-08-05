@@ -26,9 +26,9 @@ const LINK_WATCHDOG_RESET_MARKER: u32 = 0xC0DE_1A1C;
 /// recovery consumes the watchdog scratch registers.
 pub(crate) fn capture_reset_cause() {
     let watchdog = embassy_rp::pac::WATCHDOG.reason().read();
-    #[cfg(not(feature = "board-waveshare-rp2350-usb-a"))]
+    #[cfg(not(feature = "rp2350-board"))]
     let chip = embassy_rp::pac::VREG_AND_CHIP_RESET.chip_reset().read();
-    #[cfg(feature = "board-waveshare-rp2350-usb-a")]
+    #[cfg(feature = "rp2350-board")]
     let chip = embassy_rp::pac::POWMAN.chip_reset().read();
     let marker = embassy_rp::pac::WATCHDOG.scratch1().read();
     let mut cause = 0;
@@ -39,27 +39,27 @@ pub(crate) fn capture_reset_cause() {
     if watchdog.force() {
         cause |= RESET_CAUSE_WATCHDOG_FORCE;
     }
-    #[cfg(not(feature = "board-waveshare-rp2350-usb-a"))]
+    #[cfg(not(feature = "rp2350-board"))]
     if chip.had_por() {
         cause |= RESET_CAUSE_POWER_ON_OR_BROWNOUT;
     }
-    #[cfg(feature = "board-waveshare-rp2350-usb-a")]
+    #[cfg(feature = "rp2350-board")]
     if chip.had_por() || chip.had_bor() {
         cause |= RESET_CAUSE_POWER_ON_OR_BROWNOUT;
     }
-    #[cfg(not(feature = "board-waveshare-rp2350-usb-a"))]
+    #[cfg(not(feature = "rp2350-board"))]
     if chip.had_run() {
         cause |= RESET_CAUSE_RUN_PIN;
     }
-    #[cfg(feature = "board-waveshare-rp2350-usb-a")]
+    #[cfg(feature = "rp2350-board")]
     if chip.had_run_low() {
         cause |= RESET_CAUSE_RUN_PIN;
     }
-    #[cfg(not(feature = "board-waveshare-rp2350-usb-a"))]
+    #[cfg(not(feature = "rp2350-board"))]
     if chip.had_psm_restart() {
         cause |= RESET_CAUSE_DEBUG_RESTART;
     }
-    #[cfg(feature = "board-waveshare-rp2350-usb-a")]
+    #[cfg(feature = "rp2350-board")]
     if chip.had_dp_reset_req() || chip.had_rescue() {
         cause |= RESET_CAUSE_DEBUG_RESTART;
     }

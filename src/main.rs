@@ -62,7 +62,7 @@ use embassy_net::{
     StaticConfigV6,
 };
 use embassy_rp::bind_interrupts;
-#[cfg(not(feature = "board-waveshare-rp2350-usb-a"))]
+#[cfg(not(feature = "rp2350-board"))]
 use embassy_rp::flash::Flash;
 use embassy_rp::peripherals::USB;
 use embassy_rp::usb::{Driver, InterruptHandler};
@@ -188,23 +188,20 @@ async fn main(spawner: Spawner) {
 
     uart.blocking_write(b"pico-io-bridge boot\r\n").unwrap();
 
-    #[cfg(not(feature = "board-waveshare-rp2350-usb-a"))]
+    #[cfg(not(feature = "rp2350-board"))]
     let mut flash = Flash::<_, _, { board::FLASH_SIZE }>::new_blocking(flash);
-    #[cfg(not(feature = "board-waveshare-rp2350-usb-a"))]
+    #[cfg(not(feature = "rp2350-board"))]
     let mut flash_uid = [0; FLASH_UID_BYTES];
-    #[cfg(not(feature = "board-waveshare-rp2350-usb-a"))]
+    #[cfg(not(feature = "rp2350-board"))]
     if flash.blocking_unique_id(&mut flash_uid).is_err() {
         flash_uid = *b"pico-io!";
         warn!("flash unique ID read failed, using fallback identity seed");
     }
     #[cfg(feature = "local-apps")]
     local_apps::init(flash).await;
-    #[cfg(all(
-        not(feature = "local-apps"),
-        not(feature = "board-waveshare-rp2350-usb-a")
-    ))]
+    #[cfg(all(not(feature = "local-apps"), not(feature = "rp2350-board")))]
     let _ = flash;
-    #[cfg(feature = "board-waveshare-rp2350-usb-a")]
+    #[cfg(feature = "rp2350-board")]
     let flash_uid = match embassy_rp::otp::get_chipid() {
         Ok(chip_id) => chip_id.to_be_bytes(),
         Err(_) => {
@@ -212,7 +209,7 @@ async fn main(spawner: Spawner) {
             *b"pico-io!"
         }
     };
-    #[cfg(feature = "board-waveshare-rp2350-usb-a")]
+    #[cfg(feature = "rp2350-board")]
     let _ = flash;
 
     static USB_SERIAL: StaticCell<[u8; USB_SERIAL_BYTES]> = StaticCell::new();

@@ -5,7 +5,8 @@ use embassy_futures::select::{Either, select};
 use embassy_rp::i2c::{AbortReason, Async, Error as I2cError, I2c, Instance};
 #[cfg(any(
     feature = "board-adafruit-kb2040",
-    feature = "board-waveshare-rp2350-usb-a"
+    feature = "board-waveshare-rp2350-usb-a",
+    feature = "board-adafruit-fruit-jam"
 ))]
 use embassy_rp::peripherals::I2C0;
 #[cfg(any(
@@ -828,7 +829,8 @@ async fn run_i2c<T: Instance>(mut bus: I2c<'static, T, Async>) {
 
 #[cfg(any(
     feature = "board-adafruit-kb2040",
-    feature = "board-waveshare-rp2350-usb-a"
+    feature = "board-waveshare-rp2350-usb-a",
+    feature = "board-adafruit-fruit-jam"
 ))]
 #[embassy_executor::task]
 pub(crate) async fn i2c0_task(bus: I2c<'static, I2C0, Async>) {

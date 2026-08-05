@@ -28,8 +28,17 @@ board-waveshare-rp2350-usb-a = [
     "i2c",
     "pio-usb-host",
     "embassy-rp-pio-usb-host/rp235xa",
+    "rp2350-board",
     "embassy-rp/rp235xa",
 ]
+board-adafruit-fruit-jam = [
+    "mdns",
+    "dhcp-server",
+    "i2c",
+    "rp2350-board",
+    "embassy-rp/rp235xb",
+]
+rp2350-board = []
 pio-usb-host = [
     "dep:embassy-rp-pio-usb-host",
     "embassy-rp-pio-usb-host/embassy-usb-host",

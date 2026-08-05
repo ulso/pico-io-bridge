@@ -119,6 +119,13 @@ Supported board profiles:
 | `board-adafruit-rp2040-usb-host` | PIO USB host, I2C, ADC | I2C1, SDA GP2, SCL GP3 | `pico-io-usb-host-<uid6>.local` |
 | `board-adafruit-kb2040` | I2C, ADC | I2C0, SDA GP12, SCL GP13 | `pico-io-kb2040-<uid6>.local` |
 | `board-waveshare-rp2350-usb-a` | I2C, ADC | I2C0, SDA GP4, SCL GP5 | `pico-io-waveshare-rp2350-<uid6>.local` |
+| `board-adafruit-fruit-jam` | I2C, ADC | I2C0, SDA GP20, SCL GP21 | `pico-io-fruit-jam-<uid6>.local` |
+
+The initial Adafruit Fruit Jam profile supports native USB CDC-NCM, unique
+mDNS/DNS-SD identity, STEMMA QT I2C, ADC channels A0-A3 on GP40-GP43, and the
+active-low red status LED on GP29. It targets the RP2350B package and has been
+prepared for testing on A4 silicon. The CH334F hub and its USB host ports are
+deliberately not enabled in this first stage.
 
 The regular Feather RP2040 and Feather RP2040 USB Host profiles select
 Embassy's generic `03h` second-stage flash bootloader. Adafruit boards of these
@@ -250,6 +257,13 @@ cargo build --locked --release --target thumbv8m.main-none-eabihf \
   --no-default-features --features board-waveshare-rp2350-usb-a
 ```
 
+The Adafruit Fruit Jam also uses the Cortex-M33 target:
+
+```sh
+cargo build --locked --release --target thumbv8m.main-none-eabihf \
+  --no-default-features --features board-adafruit-fruit-jam
+```
+
 The three non-CAN profiles exclude the `mcp25xx` dependency, CAN task, CAN HTTP
 page and `/can` WebSocket endpoint from the resulting firmware. The USB-host
 profile adds
@@ -289,13 +303,20 @@ cargo run --locked --release --target thumbv8m.main-none-eabihf \
   --no-default-features --features board-waveshare-rp2350-usb-a
 ```
 
+For the Adafruit Fruit Jam:
+
+```sh
+cargo run --locked --release --target thumbv8m.main-none-eabihf \
+  --no-default-features --features board-adafruit-fruit-jam
+```
+
 ## Firmware releases
 
 GitHub Actions builds UF2 images for all supported board profiles on every push
 to `main`, on pull requests, and when run manually. These development builds are
 available as workflow artifacts for 30 days.
 
-Pushing a semantic-version tag publishes a GitHub Release after all five board
+Pushing a semantic-version tag publishes a GitHub Release after all board
 builds have succeeded:
 
 ```sh

@@ -17,7 +17,8 @@ fn main() {
     // Put `memory.x` in our output directory and ensure it's
     // on the linker search path.
     let out = &PathBuf::from(env::var_os("OUT_DIR").unwrap());
-    let memory_x: &[u8] = if env::var_os("CARGO_FEATURE_BOARD_WAVESHARE_RP2350_USB_A").is_some() {
+    let rp2350_board = env::var_os("CARGO_FEATURE_RP2350_BOARD").is_some();
+    let memory_x: &[u8] = if rp2350_board {
         include_bytes!("memory-rp2350.x")
     } else {
         include_bytes!("memory-rp2040.x")
@@ -37,7 +38,7 @@ fn main() {
 
     println!("cargo:rustc-link-arg-bins=--nmagic");
     println!("cargo:rustc-link-arg-bins=-Tlink.x");
-    if env::var_os("CARGO_FEATURE_BOARD_WAVESHARE_RP2350_USB_A").is_none() {
+    if !rp2350_board {
         println!("cargo:rustc-link-arg-bins=-Tlink-rp.x");
     }
     println!("cargo:rustc-link-arg-bins=-Tdefmt.x");
