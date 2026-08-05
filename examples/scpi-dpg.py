@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Discover Pico I/O Bridges and read ADC channel 0 with PyVISA."""
+"""Discover Pico I/O Bridges and read a selected ADC channel with PyVISA."""
 
 from __future__ import annotations
 
@@ -100,7 +100,7 @@ def close_instrument() -> None:
         resource_manager = None
 
 
-def connect_instrument(hostname: str) -> str:
+def connect_instrument(hostname: str) -> tuple[str, int]:
     """Open a PyVISA TCPIP-SOCKET session to a selected bridge."""
     global instrument, resource_manager
 
@@ -116,20 +116,23 @@ def connect_instrument(hostname: str) -> str:
         instrument = opened
         instrument.timeout = 5000
         identity = instrument.query("*IDN?").strip()
-        return f"Ansluten: {identity}"
+        channel_count = int(instrument.query("SYST:CHAN:COUN?").strip())
+        if channel_count < 1:
+            raise ValueError(f"Invalid channel count: {channel_count}")
+        return f"Connected: {identity}", channel_count
     except Exception as error:
         close_instrument()
-        return f"Anslutningsfel till {hostname}: {error}"
+        return f"Connection error for {hostname}: {error}", 0
 
 
 def blocking_visa_query(command: str) -> str:
     """Perform a blocking VISA query outside the GUI event loop."""
     if instrument is None:
-        return "Fel: inget instrument är anslutet"
+        return "Error: no instrument is connected"
     try:
         return instrument.query(command).strip()
     except Exception as error:
-        return f"Kommunikationsfel: {error}"
+        return f"Communication error: {error}"
 
 
 async def connect_selected(display: str) -> None:
@@ -140,26 +143,48 @@ async def connect_selected(display: str) -> None:
             None,
         )
     if bridge is None:
-        dpg.set_value("status_text", "Den valda enheten är inte längre tillgänglig")
+        dpg.set_value("status_text", "The selected device is no longer available")
         return
 
-    dpg.set_value("status_text", f"Ansluter till {bridge.hostname}...")
+    dpg.set_value("status_text", f"Connecting to {bridge.hostname}...")
     dpg.configure_item("measure_btn", enabled=False)
-    status = await asyncio.to_thread(connect_instrument, bridge.hostname)
+    status, channel_count = await asyncio.to_thread(connect_instrument, bridge.hostname)
     dpg.set_value("status_text", status)
-    dpg.configure_item("measure_btn", enabled=instrument is not None)
+    channels = [str(channel) for channel in range(channel_count)]
+    dpg.configure_item(
+        "channel_combo",
+        items=channels,
+        enabled=bool(channels),
+    )
+    if channels:
+        dpg.set_value("channel_combo", channels[0])
+        dpg.set_value("voltage_input", "0.00 V")
+    else:
+        dpg.set_value("channel_combo", "")
+    dpg.configure_item("measure_btn", enabled=bool(channels))
 
 
 async def measure_callback() -> None:
-    """Read ADC channel 0 without blocking Dear PyGui rendering."""
-    dpg.set_value("status_text", "Mäter...")
+    """Read the selected ADC channel without blocking Dear PyGui rendering."""
+    channel = dpg.get_value("channel_combo")
+    if channel == "":
+        dpg.set_value("status_text", "No channel is selected")
+        return
+
+    dpg.set_value("status_text", "Measuring...")
     dpg.configure_item("measure_btn", enabled=False)
 
-    result = await asyncio.to_thread(blocking_visa_query, ":MEAS:VOLT:DC? 0")
+    result = await asyncio.to_thread(
+        blocking_visa_query,
+        f":MEAS:VOLT:DC? {channel}",
+    )
 
-    if not result.lower().startswith(("fel:", "kommunikationsfel:")):
-        result = f"{result} V"
-        dpg.set_value("status_text", "Mätning klar")
+    if not result.lower().startswith(("error:", "communication error:")):
+        try:
+            result = f"{float(result):.2f} V"
+        except ValueError:
+            result = f"{result} V"
+        dpg.set_value("status_text", f"Measurement complete · channel {channel}")
     else:
         dpg.set_value("status_text", result)
     dpg.set_value("voltage_input", result)
@@ -196,9 +221,11 @@ def refresh_bridge_list() -> None:
 
     close_instrument()
     dpg.configure_item("measure_btn", enabled=False)
+    dpg.configure_item("channel_combo", items=[], enabled=False)
+    dpg.set_value("channel_combo", "")
     if not names:
         dpg.set_value("device_combo", "")
-        dpg.set_value("status_text", "Söker efter Pico I/O Bridge-enheter...")
+        dpg.set_value("status_text", "Searching for Pico I/O Bridge devices...")
         return
 
     selected = names[0]
@@ -210,7 +237,7 @@ def create_gui() -> None:
     dpg.create_context()
     dpg.create_viewport(title="Pico I/O Bridge · PyVISA", width=620, height=330)
 
-    with dpg.window(label="Instrumentpanel", width=600, height=290):
+    with dpg.window(label="Instrument Panel", width=600, height=290):
         dpg.add_combo(
             label="Pico I/O Bridge",
             tag="device_combo",
@@ -218,18 +245,25 @@ def create_gui() -> None:
             width=390,
             callback=trigger_connect,
         )
-        dpg.add_text("Söker efter Pico I/O Bridge-enheter...", tag="status_text")
+        dpg.add_text("Searching for Pico I/O Bridge devices...", tag="status_text")
         dpg.add_spacer(height=10)
+        dpg.add_combo(
+            label="ADC channel",
+            tag="channel_combo",
+            items=[],
+            width=100,
+            enabled=False,
+        )
         dpg.add_input_text(
-            label="Kanal 0",
+            label="Voltage",
             tag="voltage_input",
-            default_value="0.0 V",
+            default_value="0.00 V",
             readonly=True,
             width=200,
         )
         dpg.add_spacer(height=10)
         dpg.add_button(
-            label="Mät spänning",
+            label="Measure voltage",
             tag="measure_btn",
             callback=trigger_measure,
             enabled=False,
