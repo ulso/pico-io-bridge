@@ -15,6 +15,16 @@ compiling CAN support or configuring CAN/SPI pins. The Adafruit Feather RP2040
 USB Host profile additionally runs a directly connected USB host through the
 RP2040 PIO blocks while the native USB controller remains the CDC-NCM device.
 
+## Featured tutorial and project media
+
+BleuIO has published the tutorial
+[Turn an RP2040 or RP2350 Board into a HibouAir Gateway with BleuIO](https://www.bleuio.com/blog/turn-an-rp2040-or-rp2350-board-into-a-hibouair-gateway-with-bleuio/),
+which demonstrates Pico I/O Bridge as a network-accessible HibouAir sensor
+gateway using the BleuIO USB dongle.
+
+Screenshots, demonstrations, and videos from supported boards and peripherals
+are collected in the wiki's [Media Gallery](https://github.com/ulso/pico-io-bridge/wiki/Media-Gallery).
+
 ## Why Pico I/O Bridge?
 
 Pico I/O Bridge turns inexpensive RP2040 and RP2350 hardware into a compact,
