@@ -83,6 +83,12 @@ compile_error!("board features are mutually exclusive; select exactly one board"
 compile_error!("fruit-jam-pio-trace requires board-adafruit-fruit-jam");
 
 #[cfg(all(
+    feature = "fruit-jam-wasm-runtime",
+    not(feature = "board-adafruit-fruit-jam")
+))]
+compile_error!("fruit-jam-wasm-runtime requires board-adafruit-fruit-jam");
+
+#[cfg(all(
     not(feature = "board-adafruit-rp2040-can"),
     any(
         feature = "board-adafruit-feather-rp2040",

@@ -50,6 +50,7 @@ board-adafruit-fruit-jam = [
     "embassy-rp/rp235xb",
 ]
 fruit-jam-pio-trace = ["embassy-rp-pio-usb-host?/pio1-edge-trace"]
+fruit-jam-wasm-runtime = ["dep:wasmi"]
 rp2350-board = []
 pio-usb-host = [
     "dep:embassy-rp-pio-usb-host",
@@ -117,6 +118,7 @@ mcp25xx = { version = "0.4.0", optional = true }
 nb = { version = "1.1.0", optional = true }
 microscpi = { version = "0.6.0", features = ["defmt"] }
 vl53l4cd = { version = "0.4.0", default-features = false, optional = true }
+wasmi = { version = "=1.1.0", default-features = false, features = ["extra-checks", "prefer-btree-collections"], optional = true }
 
 [profile.release]
 debug = true

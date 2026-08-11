@@ -49,6 +49,8 @@ mod scpi;
 mod seesaw_encoder;
 #[cfg(feature = "pio-usb-host")]
 mod usb_host;
+#[cfg(feature = "fruit-jam-wasm-runtime")]
+mod wasm_runtime;
 #[cfg(any(feature = "can", feature = "i2c", feature = "pio-usb-host"))]
 mod websocket;
 #[cfg(feature = "pio-usb-host")]
@@ -110,8 +112,10 @@ const HOST_SILENCE_TIMEOUT: Duration = Duration::from_secs(8);
 pub(crate) const HOST_SILENCE_RESET_MAGIC: u32 = 0xCAFE_0000;
 pub(crate) const HOST_SILENCE_RESET_MARKER: u32 = 0xC0DE_CAFE;
 const HOST_SILENCE_RESET_LIMIT: u32 = 5;
-#[cfg(feature = "mdns")]
-const HEAP_SIZE: usize = 32768;
+#[cfg(all(feature = "mdns", not(feature = "fruit-jam-wasm-runtime")))]
+const HEAP_SIZE: usize = 32 * 1024;
+#[cfg(feature = "fruit-jam-wasm-runtime")]
+const HEAP_SIZE: usize = 160 * 1024;
 
 #[cfg(feature = "mdns")]
 #[global_allocator]
@@ -187,6 +191,17 @@ async fn main(spawner: Spawner) {
     }
 
     uart.blocking_write(b"pico-io-bridge boot\r\n").unwrap();
+
+    // The first WASM milestone runs synchronously before the core 1 USB-host
+    // executor is started. This proves parsing, linking, bounded execution and
+    // the host ABI without adding any runtime contention to the known-good USB
+    // path. A later milestone can add a cooperative core 0 app task.
+    #[cfg(feature = "fruit-jam-wasm-runtime")]
+    if wasm_runtime::run_smoke() {
+        uart.blocking_write(b"WASM smoke passed\r\n").unwrap();
+    } else {
+        uart.blocking_write(b"WASM smoke failed\r\n").unwrap();
+    }
 
     #[cfg(not(feature = "rp2350-board"))]
     let mut flash = Flash::<_, _, { board::FLASH_SIZE }>::new_blocking(flash);
