@@ -12,17 +12,16 @@ use static_cell::StaticCell;
 use super::StatusIndicator;
 use crate::{i2c, scpi, usb_host};
 
-pub(crate) const BOARD_NAME: &str = "Adafruit Fruit Jam";
-pub(crate) const USB_PRODUCT: &str = "Pico I/O Bridge - Adafruit Fruit Jam";
-pub(crate) const MDNS_HOST_LABEL: &str = "pico-io-fruit-jam";
-pub(crate) const MDNS_SERVICE_INSTANCE: &str = "Pico I/O Bridge - Adafruit Fruit Jam";
+pub(crate) const BOARD_NAME: &str = "Cytron MOTION 2350 Pro";
+pub(crate) const USB_PRODUCT: &str = "Pico I/O Bridge - Cytron MOTION 2350 Pro";
+pub(crate) const MDNS_HOST_LABEL: &str = "pico-io-cytron-motion-2350";
+pub(crate) const MDNS_SERVICE_INSTANCE: &str = "Pico I/O Bridge - Cytron MOTION 2350 Pro";
 pub(crate) const INTERFACE_STARTUP_LOG: &[u8] =
-    b"I2C task starting, I2C0 SCL GP21 SDA GP20 at 400 kHz\r\n\
-PIO USB host starting, D+ GP1 D- GP2 through onboard CH334F hub, VBUS enable GP11\r\n\
+    b"I2C task starting, I2C0 SCL GP17 SDA GP16 at 400 kHz\r\n\
+PIO USB host starting, D+ GP24 D- GP25, VBUS powered by board\r\n\
 Raw USB serial bridge starting, TCP port 7000\r\n\
 USBTMC SCPI bridge starting, TCP port 5026\r\n\
-SCPI server starting, ADC A0-A3 on GP40-GP43, TCP port 5025\r\n\
-Fruit Jam hub milestone supports downstream full-speed enumeration\r\n";
+SCPI server starting, ADC A0-A3 on GP26-GP29, TCP port 5025\r\n";
 
 bind_interrupts!(struct I2cIrqs {
     I2C0_IRQ => InterruptHandler<I2C0>;
@@ -87,32 +86,20 @@ pub(crate) fn init(p: Peripherals) -> Board {
         flash: p.FLASH,
         usb: p.USB,
         core1: p.CORE1,
-        // Analog pin A4 (GP44) is otherwise unused by this initial profile.
-        // Keeping diagnostics here avoids sending startup text to the
-        // ESP32-C6 on GP8/GP9.
-        uart: UartTx::new_blocking(p.UART0, p.PIN_44, UartConfig::default()),
-        // The red LED is active-low and shares GP29 with the IR receiver.
-        status: StatusIndicator::active_high(p.PIN_29),
+        // UART0 TX on GP0 leaves the four ADC inputs and Maker connectors free.
+        uart: UartTx::new_blocking(p.UART0, p.PIN_0, UartConfig::default()),
+        status: StatusIndicator::active_high(p.PIN_18),
         interfaces: Interfaces {
-            i2c: I2c::new_async(p.I2C0, p.PIN_21, p.PIN_20, I2cIrqs, i2c_config),
+            i2c: I2c::new_async(p.I2C0, p.PIN_17, p.PIN_16, I2cIrqs, i2c_config),
             scpi: scpi::Hardware::new(
                 p.ADC,
                 p.ADC_TEMP_SENSOR,
-                p.PIN_40,
-                p.PIN_41,
-                p.PIN_42,
-                p.PIN_43,
+                p.PIN_26,
+                p.PIN_27,
+                p.PIN_28,
+                p.PIN_29,
             ),
-            usb_host: usb_host::Hardware::new(
-                p.PIO0,
-                p.PIO1,
-                p.DMA_CH0,
-                p.PIN_1,
-                p.PIN_2,
-                #[cfg(feature = "fruit-jam-pio-trace")]
-                p.PIN_6,
-                p.PIN_11,
-            ),
+            usb_host: usb_host::Hardware::new(p.PIO0, p.PIO1, p.DMA_CH0, p.PIN_24, p.PIN_25),
         },
     }
 }

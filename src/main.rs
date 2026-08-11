@@ -451,7 +451,11 @@ async fn main(spawner: Spawner) {
 
                     let mdns: &'static mdns::MdnsState<mdns::MdnsRng> =
                         MDNS_STATE.init(mdns::MdnsState::new(
-                            mdns::EndpointConfig::new(),
+                            // This firmware only advertises and answers mDNS;
+                            // it never browses cached records. Keeping the
+                            // passive LAN cache enabled can otherwise exhaust
+                            // the small embedded heap during USB retry tests.
+                            mdns::EndpointConfig::new().with_populate_cache(false),
                             mdns::MdnsRng::new(0x7069_636f_6361_6e01),
                         ));
                     spawner.spawn(mdns::mdns_task(stack, mdns).unwrap());

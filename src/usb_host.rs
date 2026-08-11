@@ -5,6 +5,8 @@
 //! sweeps cross to core 0 through bounded state or messages; GP13 remains
 //! exclusively owned by the board's existing `StatusIndicator`.
 
+use core::future::Future;
+
 use defmt::{info, warn};
 use embassy_futures::join::join;
 use embassy_futures::select::{Either, Either3, select, select3};
@@ -13,13 +15,25 @@ use embassy_net::tcp::{TcpReader, TcpSocket, TcpWriter};
 use embassy_rp::Peri;
 use embassy_rp::bind_interrupts;
 use embassy_rp::dma::InterruptHandler as DmaInterruptHandler;
-#[cfg(feature = "board-adafruit-rp2040-usb-host")]
+#[cfg(any(
+    feature = "board-adafruit-rp2040-usb-host",
+    feature = "board-adafruit-fruit-jam"
+))]
 use embassy_rp::gpio::{Level, Output};
+use embassy_rp::interrupt::{self, InterruptExt, Priority};
+#[cfg(feature = "board-adafruit-fruit-jam")]
+use embassy_rp::pac;
+#[cfg(all(feature = "board-adafruit-fruit-jam", feature = "fruit-jam-pio-trace"))]
+use embassy_rp::peripherals::PIN_6;
 use embassy_rp::peripherals::{DMA_CH0, PIO0, PIO1};
+#[cfg(feature = "board-adafruit-fruit-jam")]
+use embassy_rp::peripherals::{PIN_1, PIN_2, PIN_11};
 #[cfg(feature = "board-waveshare-rp2350-usb-a")]
 use embassy_rp::peripherals::{PIN_12, PIN_13};
 #[cfg(feature = "board-adafruit-rp2040-usb-host")]
 use embassy_rp::peripherals::{PIN_16, PIN_17, PIN_18};
+#[cfg(feature = "board-cytron-motion-2350-pro")]
+use embassy_rp::peripherals::{PIN_24, PIN_25};
 use embassy_rp::pio::InterruptHandler as PioInterruptHandler;
 use embassy_rp_pio_usb_host::audio::{
     AudioError, AudioInputInterface, CAPTURE_PACKET_CAPACITY,
@@ -37,7 +51,8 @@ use embassy_rp_pio_usb_host::hid::{
     HidError, HidReportType, allocate_from_enumeration as allocate_hid_from_enumeration,
 };
 use embassy_rp_pio_usb_host::host::{
-    DeviceEvent, PipeError, Speed, UsbHostController, UsbPipe, pipe,
+    DeviceEvent, Direction, EndpointInfo, EndpointType, HostError, PipeError, Speed,
+    UsbHostAllocator, UsbHostController, UsbPipe, pipe,
 };
 #[cfg(feature = "board-adafruit-rp2040-usb-host")]
 use embassy_rp_pio_usb_host::pio_host::rp2040::Rp2040PioEngine as BoardPioEngine;
@@ -45,7 +60,11 @@ use embassy_rp_pio_usb_host::pio_host::rp2040::{
     BadResponseDiagnostic, BadResponseSite, HandshakeFailure, RootLineDiagnostic,
     root_line_diagnostic,
 };
-#[cfg(feature = "board-waveshare-rp2350-usb-a")]
+#[cfg(any(
+    feature = "board-waveshare-rp2350-usb-a",
+    feature = "board-cytron-motion-2350-pro",
+    feature = "board-adafruit-fruit-jam"
+))]
 use embassy_rp_pio_usb_host::pio_host::rp2350::Rp2350PioEngine as BoardPioEngine;
 use embassy_rp_pio_usb_host::pio_host::{PioHostState, snapshot_in_pipe_progress_diagnostics};
 use embassy_rp_pio_usb_host::usb::{CdcLineCoding, ConfigurationError};
@@ -58,6 +77,21 @@ use embassy_sync::channel::Channel;
 use embassy_sync::mutex::Mutex;
 use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Instant, Ticker, Timer, with_timeout};
+#[cfg(any(
+    feature = "board-adafruit-fruit-jam",
+    feature = "board-cytron-motion-2350-pro"
+))]
+use embassy_usb_host::class::hub::{HubEvent, HubHandler};
+#[cfg(any(
+    feature = "board-adafruit-fruit-jam",
+    feature = "board-cytron-motion-2350-pro"
+))]
+use embassy_usb_host::control::{ControlType, Recipient, RequestType, SetupPacket};
+#[cfg(any(
+    feature = "board-adafruit-fruit-jam",
+    feature = "board-cytron-motion-2350-pro"
+))]
+use embassy_usb_host::handler::{HandlerEvent, RegisterError};
 use embassy_usb_host::{BusController, BusRoute, BusState, EnumerationError};
 use portable_atomic::{AtomicU32, Ordering};
 
@@ -75,6 +109,175 @@ const BLEUIO_BRIDGE_QUIESCING: u32 = u32::MAX;
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(4);
 const EXCHANGE_COMMAND_TIMEOUT: Duration = Duration::from_secs(18);
 const CLASS_CONTROL_TIMEOUT: Duration = Duration::from_secs(2);
+
+#[cfg(any(
+    feature = "board-adafruit-fruit-jam",
+    feature = "board-cytron-motion-2350-pro"
+))]
+#[derive(Clone, Copy)]
+struct HubPortState {
+    connected: bool,
+    speed: Speed,
+    connection_changed: bool,
+    enabled: bool,
+    resetting: bool,
+    reset_changed: bool,
+    raw_status: u16,
+    raw_change: u16,
+}
+
+#[cfg(any(
+    feature = "board-adafruit-fruit-jam",
+    feature = "board-cytron-motion-2350-pro"
+))]
+async fn read_hub_port_state<P>(pipe: &mut P, port: u8) -> Result<HubPortState, HostError>
+where
+    P: UsbPipe<pipe::Control, pipe::InOut>,
+{
+    let setup = SetupPacket {
+        request_type: RequestType {
+            direction: Direction::In,
+            control_type: ControlType::Class,
+            recipient: Recipient::Other,
+        },
+        request: embassy_usb::control::Request::GET_STATUS,
+        value: 0,
+        index: u16::from(port + 1),
+        length: 4,
+    };
+    let mut bytes = [0_u8; 4];
+    pipe.control_in(&setup.to_bytes(), &mut bytes).await?;
+    let status = u16::from_le_bytes([bytes[0], bytes[1]]);
+    let change = u16::from_le_bytes([bytes[2], bytes[3]]);
+    let speed = if status & (1 << 9) != 0 {
+        Speed::Low
+    } else if status & (1 << 10) != 0 {
+        Speed::High
+    } else {
+        Speed::Full
+    };
+    Ok(HubPortState {
+        connected: status & 1 != 0,
+        speed,
+        connection_changed: change & 1 != 0,
+        enabled: status & (1 << 1) != 0,
+        resetting: status & (1 << 4) != 0,
+        reset_changed: change & (1 << 4) != 0,
+        raw_status: status,
+        raw_change: change,
+    })
+}
+
+#[cfg(any(
+    feature = "board-adafruit-fruit-jam",
+    feature = "board-cytron-motion-2350-pro"
+))]
+async fn clear_hub_port_changes<P>(
+    pipe: &mut P,
+    port: u8,
+    mut changes: u16,
+) -> Result<(), HostError>
+where
+    P: UsbPipe<pipe::Control, pipe::InOut>,
+{
+    // Hub class feature selectors C_PORT_CONNECTION through C_PORT_RESET
+    // map directly to change bits 0 through 4.
+    for bit in 0_u16..=4 {
+        if changes & 1 != 0 {
+            set_hub_port_feature(pipe, port, false, 16 + bit).await?;
+        }
+        changes >>= 1;
+    }
+    Ok(())
+}
+
+#[cfg(any(
+    feature = "board-adafruit-fruit-jam",
+    feature = "board-cytron-motion-2350-pro"
+))]
+async fn set_hub_port_feature<P>(
+    pipe: &mut P,
+    port: u8,
+    set: bool,
+    feature: u16,
+) -> Result<(), HostError>
+where
+    P: UsbPipe<pipe::Control, pipe::InOut>,
+{
+    let setup = SetupPacket {
+        request_type: RequestType {
+            direction: Direction::Out,
+            control_type: ControlType::Class,
+            recipient: Recipient::Other,
+        },
+        request: if set {
+            embassy_usb::control::Request::SET_FEATURE
+        } else {
+            embassy_usb::control::Request::CLEAR_FEATURE
+        },
+        value: feature,
+        index: u16::from(port + 1),
+        length: 0,
+    };
+    pipe.control_out(&setup.to_bytes(), &[]).await?;
+    Ok(())
+}
+
+#[cfg(feature = "board-cytron-motion-2350-pro")]
+async fn power_cycle_external_hub_ports<P>(pipe: &mut P) -> Result<(), HostError>
+where
+    P: UsbPipe<pipe::Control, pipe::InOut>,
+{
+    // The Cytron diagnostic setup can remain powered while firmware is
+    // reflashed through the debug probe. Remove downstream port power long
+    // enough to force attached devices back to USB address zero, then honour
+    // the Plexgear hub's 100 ms bPwrOn2PwrGood interval with ample margin.
+    for port in 0_u8..4 {
+        // PORT_POWER
+        set_hub_port_feature(pipe, port, false, 8).await?;
+    }
+    Timer::after_millis(250).await;
+
+    for port in 0_u8..4 {
+        // PORT_POWER
+        set_hub_port_feature(pipe, port, true, 8).await?;
+    }
+    Timer::after_millis(250).await;
+    Ok(())
+}
+
+#[cfg(any(
+    feature = "board-adafruit-fruit-jam",
+    feature = "board-cytron-motion-2350-pro"
+))]
+async fn reset_hub_port<P>(pipe: &mut P, port: u8) -> Result<HubPortState, HostError>
+where
+    P: UsbPipe<pipe::Control, pipe::InOut>,
+{
+    // Follow the USB hub sequence used by both TinyUSB and Embassy:
+    // C_PORT_CONNECTION is acknowledged by the event handler before reset,
+    // then the port is held in reset for the standard 50 ms interval before
+    // address-zero traffic is attempted.
+    set_hub_port_feature(pipe, port, true, 4).await?;
+    Timer::after_millis(50).await;
+    let mut state = read_hub_port_state(pipe, port).await?;
+    for _ in 0..25 {
+        if !state.resetting && state.reset_changed {
+            break;
+        }
+        Timer::after_millis(2).await;
+        state = read_hub_port_state(pipe, port).await?;
+    }
+
+    if state.reset_changed {
+        // C_PORT_RESET
+        set_hub_port_feature(pipe, port, false, 20).await?;
+    }
+
+    Timer::after_millis(10).await;
+    state = read_hub_port_state(pipe, port).await?;
+    Ok(state)
+}
 const TRANSFER_TIMEOUT: Duration = Duration::from_secs(2);
 const EXCHANGE_FIRST_RESPONSE_TIMEOUT: Duration = Duration::from_secs(10);
 const EXCHANGE_IDLE_TIMEOUT: Duration = Duration::from_millis(50);
@@ -95,6 +298,24 @@ bind_interrupts!(struct PioUsbHostIrqs {
     PIO1_IRQ_0 => PioInterruptHandler<PIO1>;
     DMA_IRQ_0 => DmaInterruptHandler<DMA_CH0>;
 });
+
+fn configure_host_interrupt_priorities() {
+    // Interrupt priorities are local to each Cortex-M core. This function is
+    // deliberately called by the USB host task on core 1, before the PIO and
+    // DMA drivers enable their interrupts, so the dedicated host core's NVIC
+    // is configured rather than core 0's NVIC.
+    interrupt::PIO0_IRQ_0.set_priority(Priority::P0);
+    interrupt::PIO1_IRQ_0.set_priority(Priority::P0);
+    interrupt::DMA_IRQ_0.set_priority(Priority::P0);
+
+    let pio0_priority: u8 = interrupt::PIO0_IRQ_0.get_priority().into();
+    let pio1_priority: u8 = interrupt::PIO1_IRQ_0.get_priority().into();
+    let dma_priority: u8 = interrupt::DMA_IRQ_0.get_priority().into();
+    info!(
+        "PIO USB host IRQ priorities: PIO0={=u8} PIO1={=u8} DMA={=u8}",
+        pio0_priority, pio1_priority, dma_priority
+    );
+}
 
 #[cfg(feature = "board-adafruit-rp2040-usb-host")]
 pub(crate) struct Hardware {
@@ -127,6 +348,34 @@ impl Hardware {
     }
 }
 
+#[cfg(feature = "board-cytron-motion-2350-pro")]
+pub(crate) struct Hardware {
+    pio0: Peri<'static, PIO0>,
+    pio1: Peri<'static, PIO1>,
+    dma_ch0: Peri<'static, DMA_CH0>,
+    dp: Peri<'static, PIN_24>,
+    dm: Peri<'static, PIN_25>,
+}
+
+#[cfg(feature = "board-cytron-motion-2350-pro")]
+impl Hardware {
+    pub(crate) fn new(
+        pio0: Peri<'static, PIO0>,
+        pio1: Peri<'static, PIO1>,
+        dma_ch0: Peri<'static, DMA_CH0>,
+        dp: Peri<'static, PIN_24>,
+        dm: Peri<'static, PIN_25>,
+    ) -> Self {
+        Self {
+            pio0,
+            pio1,
+            dma_ch0,
+            dp,
+            dm,
+        }
+    }
+}
+
 #[cfg(feature = "board-waveshare-rp2350-usb-a")]
 pub(crate) struct Hardware {
     pio0: Peri<'static, PIO0>,
@@ -151,6 +400,42 @@ impl Hardware {
             dma_ch0,
             dp,
             dm,
+        }
+    }
+}
+
+#[cfg(feature = "board-adafruit-fruit-jam")]
+pub(crate) struct Hardware {
+    pio0: Peri<'static, PIO0>,
+    pio1: Peri<'static, PIO1>,
+    dma_ch0: Peri<'static, DMA_CH0>,
+    dp: Peri<'static, PIN_1>,
+    dm: Peri<'static, PIN_2>,
+    #[cfg(feature = "fruit-jam-pio-trace")]
+    edge_trace: Peri<'static, PIN_6>,
+    vbus_enable: Peri<'static, PIN_11>,
+}
+
+#[cfg(feature = "board-adafruit-fruit-jam")]
+impl Hardware {
+    pub(crate) fn new(
+        pio0: Peri<'static, PIO0>,
+        pio1: Peri<'static, PIO1>,
+        dma_ch0: Peri<'static, DMA_CH0>,
+        dp: Peri<'static, PIN_1>,
+        dm: Peri<'static, PIN_2>,
+        #[cfg(feature = "fruit-jam-pio-trace")] edge_trace: Peri<'static, PIN_6>,
+        vbus_enable: Peri<'static, PIN_11>,
+    ) -> Self {
+        Self {
+            pio0,
+            pio1,
+            dma_ch0,
+            dp,
+            dm,
+            #[cfg(feature = "fruit-jam-pio-trace")]
+            edge_trace,
+            vbus_enable,
         }
     }
 }
@@ -1870,13 +2155,67 @@ where
     O: UsbPipe<pipe::Bulk, pipe::Out>,
 {
     let mut response = [0_u8; CDC_MAX_TRANSFER];
-    for command in [
+    for (step, command) in [
         b"ATE0\r\n".as_slice(),
         b"ATV1\r\n".as_slice(),
         b"AT+FINDSCANDATA=FF5B07\r\n".as_slice(),
-    ] {
-        cdc.write(command).await?;
-        cdc.read(&mut response).await?;
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        if let Err(error) = cdc.write(command).await {
+            match error {
+                CdcAcmError::Transfer(pipe_error) => warn!(
+                    "BleuIO initialization bulk-OUT failed at step {}: {:?}",
+                    step, pipe_error
+                ),
+                CdcAcmError::LineRequestsUnsupported => warn!(
+                    "BleuIO initialization bulk-OUT failed at step {}: line requests unsupported",
+                    step
+                ),
+                CdcAcmError::SendBreakUnsupported => warn!(
+                    "BleuIO initialization bulk-OUT failed at step {}: SEND_BREAK unsupported",
+                    step
+                ),
+                CdcAcmError::InvalidLineCoding(_) => warn!(
+                    "BleuIO initialization bulk-OUT failed at step {}: invalid line coding",
+                    step
+                ),
+            }
+            return Err(error);
+        }
+        info!(
+            "BleuIO initialization bulk-OUT step {} sent {} bytes",
+            step,
+            command.len()
+        );
+        match cdc.read(&mut response).await {
+            Ok(received) => info!(
+                "BleuIO initialization bulk-IN step {} received {} bytes",
+                step, received
+            ),
+            Err(error) => {
+                match error {
+                    CdcAcmError::Transfer(pipe_error) => warn!(
+                        "BleuIO initialization bulk-IN failed at step {}: {:?}",
+                        step, pipe_error
+                    ),
+                    CdcAcmError::LineRequestsUnsupported => warn!(
+                        "BleuIO initialization bulk-IN failed at step {}: line requests unsupported",
+                        step
+                    ),
+                    CdcAcmError::SendBreakUnsupported => warn!(
+                        "BleuIO initialization bulk-IN failed at step {}: SEND_BREAK unsupported",
+                        step
+                    ),
+                    CdcAcmError::InvalidLineCoding(_) => warn!(
+                        "BleuIO initialization bulk-IN failed at step {}: invalid line coding",
+                        step
+                    ),
+                }
+                return Err(error);
+            }
+        }
         Timer::after(Duration::from_millis(20)).await;
     }
     Ok(())
@@ -1924,10 +2263,13 @@ where
     let mut packet = [0_u8; CDC_MAX_TRANSFER];
     let mut seen_parser_epoch = parser_epoch.load(Ordering::Acquire);
     loop {
-        let count = bulk_in
-            .request_in(&mut packet[..packet_size])
-            .await
-            .map_err(|_| ())?;
+        let count = match bulk_in.request_in(&mut packet[..packet_size]).await {
+            Ok(count) => count,
+            Err(error) => {
+                warn!("BleuIO managed bulk-IN failed: {:?}", error);
+                return Err(());
+            }
+        };
         if !record_rx_if_current(generation, Phase::BleuioReady, count).await {
             return Err(());
         }
@@ -2079,7 +2421,7 @@ where
 
 async fn manage_bleuio<'d, H, C, I, O>(
     controller: &mut BusController<'d, H>,
-    mut cdc: CdcAcmHost<C, I, O>,
+    cdc: CdcAcmHost<C, I, O>,
     generation: u32,
     next_bridge_session: &mut u32,
 ) where
@@ -2088,16 +2430,44 @@ async fn manage_bleuio<'d, H, C, I, O>(
     I: UsbPipe<pipe::Bulk, pipe::In>,
     O: UsbPipe<pipe::Bulk, pipe::Out>,
 {
-    let initialized = matches!(
-        with_timeout(CLASS_CONTROL_TIMEOUT, initialize_bleuio(&mut cdc),).await,
-        Ok(Ok(()))
-    );
+    let _ = manage_bleuio_with_disconnect(
+        bridge_wait_for_disconnect(controller),
+        cdc,
+        generation,
+        next_bridge_session,
+    )
+    .await;
+}
+
+async fn manage_bleuio_with_disconnect<D, C, I, O>(
+    disconnect: D,
+    mut cdc: CdcAcmHost<C, I, O>,
+    generation: u32,
+    next_bridge_session: &mut u32,
+) -> Option<D::Output>
+where
+    D: Future,
+    C: UsbPipe<pipe::Control, pipe::InOut>,
+    I: UsbPipe<pipe::Bulk, pipe::In>,
+    O: UsbPipe<pipe::Bulk, pipe::Out>,
+{
+    let initialized = match with_timeout(CLASS_CONTROL_TIMEOUT, initialize_bleuio(&mut cdc)).await {
+        Ok(Ok(())) => true,
+        Ok(Err(_)) => {
+            warn!("BleuIO initialization ended with a CDC transfer error");
+            false
+        }
+        Err(_) => {
+            warn!("BleuIO initialization timed out");
+            false
+        }
+    };
     if !initialized
         || !set_phase_if_current(generation, Phase::Enumerating, Phase::BleuioReady).await
     {
         let _ =
             set_error_phase_if_current(generation, Phase::Enumerating, Phase::BleuioError).await;
-        return;
+        return None;
     }
 
     info!("BleuIO managed HibouAir scan ready");
@@ -2107,7 +2477,7 @@ async fn manage_bleuio<'d, H, C, I, O>(
     let active_session = AtomicU32::new(0);
     let parser_epoch = AtomicU32::new(0);
     let result = select3(
-        bridge_wait_for_disconnect(controller),
+        disconnect,
         bleuio_usb_in(
             &mut bulk_in,
             &mut parser,
@@ -2125,7 +2495,11 @@ async fn manage_bleuio<'d, H, C, I, O>(
         ),
     )
     .await;
-    let failed = matches!(result, Either3::Second(Err(())) | Either3::Third(Err(())));
+    let (disconnect_result, failed) = match result {
+        Either3::First(result) => (Some(result), false),
+        Either3::Second(Err(())) | Either3::Third(Err(())) => (None, true),
+        Either3::Second(Ok(())) | Either3::Third(Ok(())) => (None, false),
+    };
     let session = active_session.load(Ordering::Acquire);
     if session != 0 {
         active_session.store(0, Ordering::Release);
@@ -2141,6 +2515,7 @@ async fn manage_bleuio<'d, H, C, I, O>(
         .await;
     }
     drop((function, control, bulk_in, bulk_out));
+    disconnect_result
 }
 
 async fn run_ftdi_bridge<'d, H, C, I, O>(
@@ -2266,13 +2641,22 @@ async fn root_port_monitor<'d>(host_state: &PioHostState<BoardPioEngine<'d>>) {
                         }
                         Err(error) => {
                             connected = false;
+                            let line = root_line_diagnostic();
                             set_enumeration_error(EnumerationDiagnostic::new(
                                 EnumerationOrigin::Reset,
                                 pipe_enumeration_error(error),
                                 None,
                             ))
                             .await;
-                            warn!("PIO USB root reset failed");
+                            warn!(
+                                "PIO USB root reset failed: error={=?} pad={=u8:#04x} sio={=u8:#04x} inover={=u8:#04x} pio_out={=u8:#04x} pio_oe={=u8:#04x}",
+                                error,
+                                line.in_from_pad,
+                                line.sio_input,
+                                line.input_override,
+                                line.pio_output,
+                                line.pio_output_enable
+                            );
                         }
                     }
                 }
@@ -2338,7 +2722,11 @@ async fn root_port_monitor<'d>(host_state: &PioHostState<BoardPioEngine<'d>>) {
 }
 
 async fn run(hardware: Hardware) {
-    #[cfg(feature = "board-adafruit-rp2040-usb-host")]
+    configure_host_interrupt_priorities();
+    #[cfg(any(
+        feature = "board-adafruit-rp2040-usb-host",
+        feature = "board-adafruit-fruit-jam"
+    ))]
     let mut vbus_enable = Output::new(hardware.vbus_enable, Level::Low);
     let engine = BoardPioEngine::new(
         hardware.pio0,
@@ -2346,6 +2734,8 @@ async fn run(hardware: Hardware) {
         hardware.dma_ch0,
         hardware.dp,
         hardware.dm,
+        #[cfg(feature = "fruit-jam-pio-trace")]
+        hardware.edge_trace,
         PioUsbHostIrqs,
         PioUsbHostIrqs,
         PioUsbHostIrqs,
@@ -2358,17 +2748,33 @@ async fn run(hardware: Hardware) {
     let (mut controller, bus_handle) = embassy_usb_host::bus(controller, &bus_state);
 
     Timer::after_millis(100).await;
-    #[cfg(feature = "board-adafruit-rp2040-usb-host")]
+    #[cfg(any(
+        feature = "board-adafruit-rp2040-usb-host",
+        feature = "board-adafruit-fruit-jam"
+    ))]
     vbus_enable.set_high();
+    // The Fruit Jam's CH334F hub is part of the root-port hardware rather
+    // than a user-pluggable device. Give its oscillator, internal regulator,
+    // and upstream pull-up time to settle before the line monitor starts.
+    #[cfg(feature = "board-adafruit-fruit-jam")]
+    Timer::after_millis(500).await;
     set_waiting().await;
-    #[cfg(feature = "board-adafruit-rp2040-usb-host")]
+    #[cfg(any(
+        feature = "board-adafruit-rp2040-usb-host",
+        feature = "board-adafruit-fruit-jam"
+    ))]
     info!("PIO USB host VBUS enabled");
     #[cfg(feature = "board-waveshare-rp2350-usb-a")]
     info!("PIO USB host ready; VBUS is permanently powered from VSYS");
+    #[cfg(feature = "board-cytron-motion-2350-pro")]
+    info!("PIO USB host ready; VBUS is powered by the board");
 
     let application_host_state = &host_state;
     let application = async move {
-        #[cfg(feature = "board-adafruit-rp2040-usb-host")]
+        #[cfg(any(
+            feature = "board-adafruit-rp2040-usb-host",
+            feature = "board-adafruit-fruit-jam"
+        ))]
         let _vbus_enable = vbus_enable;
         let mut next_bridge_session = 0_u32;
 
@@ -2402,11 +2808,19 @@ async fn run(hardware: Hardware) {
                     continue;
                 }
             };
+            // Some hubs need more than USB's minimum reset-recovery interval
+            // before accepting the first request on endpoint zero. Direct
+            // devices used by the other board profiles do not need this
+            // board-specific guard time.
+            #[cfg(feature = "board-adafruit-fruit-jam")]
+            Timer::after_millis(100).await;
             let Some(mut session_generation) = begin_enumeration(host_speed).await else {
                 continue;
             };
             let mut configuration = [0_u8; CONFIG_DESCRIPTOR_CAPACITY];
             let mut reset_retries_remaining = ENUMERATION_RESET_RETRIES;
+            #[cfg(feature = "board-adafruit-fruit-jam")]
+            let mut first_ep0_failure_logged = false;
             let (enumeration, configuration_len) = 'enumeration: loop {
                 application_host_state.clear_bad_response_diagnostic().await;
                 match bus_handle
@@ -2417,6 +2831,179 @@ async fn run(hardware: Hardware) {
                     Err(error) => {
                         let bad_response =
                             application_host_state.take_bad_response_diagnostic().await;
+                        #[cfg(feature = "board-adafruit-fruit-jam")]
+                        if !first_ep0_failure_logged {
+                            first_ep0_failure_logged = true;
+                            let rx_exec = pac::PIO1.sm(0).execctrl().read();
+                            let edge_exec = pac::PIO1.sm(1).execctrl().read();
+                            let edge_div = pac::PIO1.sm(1).clkdiv().read();
+                            let sm_addresses = [
+                                pac::PIO1.sm(0).addr().read().addr(),
+                                pac::PIO1.sm(1).addr().read().addr(),
+                                pac::PIO1.sm(2).addr().read().addr(),
+                                pac::PIO1.sm(3).addr().read().addr(),
+                            ];
+                            let mut instruction_memory = [0_u16; 32];
+                            for (address, instruction) in instruction_memory.iter_mut().enumerate()
+                            {
+                                *instruction = pac::PIO1.instr_mem(address).read().instr_mem();
+                            }
+                            warn!(
+                                "Fruit Jam PIO1 config: rx_wrap={}:{} rx_jmp={} edge_wrap={}:{} edge_jmp={} edge_div={}.{} sm_enable={=u8:02x} sm_addr={=[u8]}",
+                                rx_exec.wrap_bottom(),
+                                rx_exec.wrap_top(),
+                                rx_exec.jmp_pin(),
+                                edge_exec.wrap_bottom(),
+                                edge_exec.wrap_top(),
+                                edge_exec.jmp_pin(),
+                                edge_div.int(),
+                                edge_div.frac(),
+                                pac::PIO1.ctrl().read().sm_enable(),
+                                sm_addresses
+                            );
+                            warn!(
+                                "Fruit Jam PIO1 instructions 00-07: {=u16:04x} {=u16:04x} {=u16:04x} {=u16:04x} {=u16:04x} {=u16:04x} {=u16:04x} {=u16:04x}",
+                                instruction_memory[0],
+                                instruction_memory[1],
+                                instruction_memory[2],
+                                instruction_memory[3],
+                                instruction_memory[4],
+                                instruction_memory[5],
+                                instruction_memory[6],
+                                instruction_memory[7]
+                            );
+                            warn!(
+                                "Fruit Jam PIO1 instructions 08-15: {=u16:04x} {=u16:04x} {=u16:04x} {=u16:04x} {=u16:04x} {=u16:04x} {=u16:04x} {=u16:04x}",
+                                instruction_memory[8],
+                                instruction_memory[9],
+                                instruction_memory[10],
+                                instruction_memory[11],
+                                instruction_memory[12],
+                                instruction_memory[13],
+                                instruction_memory[14],
+                                instruction_memory[15]
+                            );
+                            warn!(
+                                "Fruit Jam PIO1 instructions 16-23: {=u16:04x} {=u16:04x} {=u16:04x} {=u16:04x} {=u16:04x} {=u16:04x} {=u16:04x} {=u16:04x}",
+                                instruction_memory[16],
+                                instruction_memory[17],
+                                instruction_memory[18],
+                                instruction_memory[19],
+                                instruction_memory[20],
+                                instruction_memory[21],
+                                instruction_memory[22],
+                                instruction_memory[23]
+                            );
+                            warn!(
+                                "Fruit Jam PIO1 instructions 24-31: {=u16:04x} {=u16:04x} {=u16:04x} {=u16:04x} {=u16:04x} {=u16:04x} {=u16:04x} {=u16:04x}",
+                                instruction_memory[24],
+                                instruction_memory[25],
+                                instruction_memory[26],
+                                instruction_memory[27],
+                                instruction_memory[28],
+                                instruction_memory[29],
+                                instruction_memory[30],
+                                instruction_memory[31]
+                            );
+                            if let Some(diagnostic) = bad_response {
+                                warn!(
+                                    "Fruit Jam first EP0 failure: error={} site={} handshake={} setup_attempts={} setup={=[u8]:02x}",
+                                    enumeration_error(&error).as_str(),
+                                    diagnostic.site.diagnostic_code(),
+                                    diagnostic
+                                        .handshake_failure
+                                        .map(HandshakeFailure::diagnostic_code)
+                                        .unwrap_or(0),
+                                    diagnostic.setup_attempts,
+                                    diagnostic.setup
+                                );
+                                if let Some(observation) = diagnostic.handshake_observation {
+                                    warn!(
+                                        "Fruit Jam EP0 RX: len={} irq={=u8:02x} bytes={=[u8]:02x} eop_len={} eop_pc={} eop_irq={=u8:02x} eop_fifo={} quiet_spins={} quiet_pc={} quiet_irq={=u8:02x} quiet_fifo={} late_len={} late={=[u8]:02x} rx_pc={} edge_pc={} input={=u8:02x} inover={=u8:02x} sm_enable={=u8:02x} gpio_edges={=u8:02x} sio_trace={=u64:016x} partial={=u32:08x} bits={} x={=u32:08x} y={=u32:08x} edge_isr={=u32:08x} edge_x={=u32:08x} edge_y={=u32:08x} rx_exec={=u32:08x} rx_shift={=u32:08x} rx_div={=u32:08x} edge_exec={=u32:08x} edge_shift={=u32:08x} edge_div={=u32:08x}",
+                                        observation.len,
+                                        observation.irq_flags,
+                                        observation.bytes,
+                                        observation.eop_len,
+                                        observation.eop_rx_pc,
+                                        observation.eop_irq,
+                                        observation.eop_fifo_level,
+                                        observation.quiesce_spins,
+                                        observation.quiesce_rx_pc,
+                                        observation.quiesce_irq,
+                                        observation.quiesce_fifo_level,
+                                        observation.late_fifo_len,
+                                        observation.late_fifo_bytes,
+                                        observation.rx_program_counter,
+                                        observation.edge_program_counter,
+                                        observation.input_snapshot,
+                                        observation.input_override_snapshot,
+                                        observation.sm_enable_snapshot,
+                                        observation.gpio_edge_snapshot,
+                                        observation.sio_trace,
+                                        observation.rx_partial_isr,
+                                        observation.rx_isr_bit_count,
+                                        observation.rx_x,
+                                        observation.rx_y,
+                                        observation.edge_isr,
+                                        observation.edge_x,
+                                        observation.edge_y,
+                                        observation.rx_execctrl_snapshot,
+                                        observation.rx_shiftctrl_snapshot,
+                                        observation.rx_clkdiv_snapshot,
+                                        observation.edge_execctrl_snapshot,
+                                        observation.edge_shiftctrl_snapshot,
+                                        observation.edge_clkdiv_snapshot
+                                    );
+                                }
+                                if let Some(observation) = diagnostic.tx_observation {
+                                    warn!(
+                                        "Fruit Jam TX self-capture: len={} irq={=u8:02x} bytes={=[u8]:02x} rx_pc={} edge_pc={} input={=u8:02x} inover={=u8:02x} sm_enable={=u8:02x} sio_trace={=u64:016x}",
+                                        observation.len,
+                                        observation.irq_flags,
+                                        observation.bytes,
+                                        observation.rx_program_counter,
+                                        observation.edge_program_counter,
+                                        observation.input_snapshot,
+                                        observation.input_override_snapshot,
+                                        observation.sm_enable_snapshot,
+                                        observation.sio_trace
+                                    );
+                                }
+                                if let Some(observation) = diagnostic.tx_token_observation {
+                                    warn!(
+                                        "Fruit Jam SETUP token self-capture: len={} irq={=u8:02x} bytes={=[u8]:02x} rx_pc={} edge_pc={} input={=u8:02x} inover={=u8:02x} sm_enable={=u8:02x} sio_trace={=u64:016x}",
+                                        observation.len,
+                                        observation.irq_flags,
+                                        observation.bytes,
+                                        observation.rx_program_counter,
+                                        observation.edge_program_counter,
+                                        observation.input_snapshot,
+                                        observation.input_override_snapshot,
+                                        observation.sm_enable_snapshot,
+                                        observation.sio_trace
+                                    );
+                                }
+                                if let Some(observation) = diagnostic.tx_data_observation {
+                                    warn!(
+                                        "Fruit Jam SETUP DATA0 self-capture: len={} irq={=u8:02x} bytes={=[u8]:02x} rx_pc={} edge_pc={} input={=u8:02x} inover={=u8:02x} sm_enable={=u8:02x} sio_trace={=u64:016x}",
+                                        observation.len,
+                                        observation.irq_flags,
+                                        observation.bytes,
+                                        observation.rx_program_counter,
+                                        observation.edge_program_counter,
+                                        observation.input_snapshot,
+                                        observation.input_override_snapshot,
+                                        observation.sm_enable_snapshot,
+                                        observation.sio_trace
+                                    );
+                                }
+                            } else {
+                                warn!(
+                                    "Fruit Jam first EP0 failure has no wire diagnostic: error={}",
+                                    enumeration_error(&error).as_str()
+                                );
+                            }
+                        }
                         if !set_enumeration_error_if_current(
                             session_generation,
                             EnumerationDiagnostic::new(
@@ -2451,6 +3038,8 @@ async fn run(hardware: Hardware) {
                         warn!("retrying PIO USB enumeration after root-port reset");
                         set_resetting(host_speed).await;
                         controller.controller_mut().bus_reset().await;
+                        #[cfg(feature = "board-adafruit-fruit-jam")]
+                        Timer::after_millis(100).await;
                         let Some(next_generation) = begin_enumeration(host_speed).await else {
                             continue 'device;
                         };
@@ -2470,6 +3059,540 @@ async fn run(hardware: Hardware) {
             {
                 bus_handle.free_address(address);
                 continue;
+            }
+
+            #[cfg(any(
+                feature = "board-adafruit-fruit-jam",
+                feature = "board-cytron-motion-2350-pro"
+            ))]
+            let hub_registration = async {
+                for attempt in 1_u8..=3 {
+                    match HubHandler::<_, 4>::try_register(&bus_handle, &enumeration).await {
+                        Ok(hub) => return Ok(hub),
+                        Err(error) => {
+                            let error_code = match error {
+                                RegisterError::NoSupportedInterface => 1_u8,
+                                RegisterError::InvalidDescriptor => 2,
+                                RegisterError::HostError(_) => 3,
+                            };
+                            warn!(
+                                "PIO USB hub registration attempt {} failed: code={}",
+                                attempt, error_code
+                            );
+                            if attempt == 3 || !matches!(error, RegisterError::HostError(_)) {
+                                return Err(error);
+                            }
+                            Timer::after_millis(20).await;
+                        }
+                    }
+                }
+                unreachable!()
+            }
+            .await;
+            if let Ok(mut hub) = hub_registration {
+                let root_hub_address = address;
+                let mut active_port = None;
+                let mut child_address = None;
+                let mut hub_status_pipe = match bus_handle.alloc_pipe::<pipe::Control, pipe::InOut>(
+                    root_hub_address,
+                    &EndpointInfo {
+                        addr: 0.into(),
+                        ep_type: EndpointType::Control,
+                        max_packet_size: u16::from(
+                            enumeration.device_desc.max_packet_size0.min(64),
+                        ),
+                        interval_ms: 0,
+                    },
+                    enumeration.split(),
+                ) {
+                    Ok(pipe) => pipe,
+                    Err(_) => {
+                        bus_handle.free_address(root_hub_address);
+                        set_waiting().await;
+                        warn!("PIO USB hub status pipe allocation failed");
+                        continue 'device;
+                    }
+                };
+                let mut pending_device = None;
+                set_waiting_if_current(session_generation).await;
+                info!("PIO USB hub ready at address {}", root_hub_address);
+
+                #[cfg(feature = "board-cytron-motion-2350-pro")]
+                match power_cycle_external_hub_ports(&mut hub_status_pipe).await {
+                    Ok(()) => info!("PIO USB hub downstream ports power-cycled"),
+                    Err(error) => warn!("PIO USB hub port power-cycle failed: {:?}", error),
+                }
+
+                // A device that was already plugged in while the hub ports
+                // were powered does not necessarily produce a fresh
+                // interrupt notification. Read every port once so booting
+                // with an attached device is deterministic.
+                for port in 0_u8..4 {
+                    match with_timeout(
+                        CLASS_CONTROL_TIMEOUT,
+                        read_hub_port_state(&mut hub_status_pipe, port),
+                    )
+                    .await
+                    {
+                        Ok(Ok(state)) => {
+                            info!(
+                                "PIO USB hub port {}: connected={} speed={:?} change={}",
+                                port, state.connected, state.speed, state.connection_changed
+                            );
+                            // Acknowledge every latched port-change bit before
+                            // reset. Power cycling a hub can set enable and
+                            // reset changes in addition to connection.
+                            if state.raw_change != 0 {
+                                if let Err(error) = clear_hub_port_changes(
+                                    &mut hub_status_pipe,
+                                    port,
+                                    state.raw_change,
+                                )
+                                .await
+                                {
+                                    warn!(
+                                        "PIO USB hub port {} initial change clear failed: {:?}",
+                                        port, error
+                                    );
+                                }
+                            }
+                            if state.connected && pending_device.is_none() {
+                                pending_device = Some((port, state.speed));
+                            }
+                        }
+                        Ok(Err(_)) | Err(_) => {
+                            warn!("PIO USB hub port {} initial status read failed", port);
+                        }
+                    }
+                }
+
+                'hub: loop {
+                    let event = match pending_device.take() {
+                        Some((port, speed)) => Either::First(Ok(HandlerEvent::HandlerEvent(
+                            HubEvent::DeviceDetected { port, speed },
+                        ))),
+                        None => select(hub.wait_for_event(), HOST_COMMANDS.receive()).await,
+                    };
+                    match event {
+                        Either::First(Ok(HandlerEvent::HandlerEvent(
+                            HubEvent::DeviceDetected { port, speed },
+                        ))) => {
+                            if active_port.is_some() {
+                                warn!("PIO USB hub currently supports one downstream device");
+                                continue;
+                            }
+                            active_port = Some(port);
+
+                            if speed != Speed::Full {
+                                set_error_phase(Phase::UnsupportedSpeed).await;
+                                warn!(
+                                    "PIO USB hub downstream low/high-speed device is unsupported"
+                                );
+                                continue;
+                            }
+
+                            // The root hub itself was moved to Waiting after
+                            // enumeration. Start a fresh downstream
+                            // enumeration generation before accepting the
+                            // synthetic or interrupt-driven port event.
+                            set_resetting(HostSpeed::Full).await;
+                            let Some(child_generation) = begin_enumeration(HostSpeed::Full).await
+                            else {
+                                warn!("PIO USB hub could not begin downstream enumeration");
+                                continue;
+                            };
+                            let mut child_configuration = [0_u8; CONFIG_DESCRIPTOR_CAPACITY];
+                            info!("PIO USB hub enumerating downstream port {}", port);
+                            application_host_state.clear_bad_response_diagnostic().await;
+                            #[cfg(feature = "board-cytron-motion-2350-pro")]
+                            let port_ready = match with_timeout(
+                                Duration::from_secs(2),
+                                reset_hub_port(&mut hub_status_pipe, port),
+                            )
+                            .await
+                            {
+                                Ok(Ok(state)) => {
+                                    info!(
+                                        "PIO USB hub reset complete on port {}: status={=u16:#06x} change={=u16:#06x} connected={} enabled={}",
+                                        port,
+                                        state.raw_status,
+                                        state.raw_change,
+                                        state.connected,
+                                        state.enabled
+                                    );
+                                    state.connected && state.enabled && !state.resetting
+                                }
+                                Ok(Err(_)) => {
+                                    warn!("PIO USB hub downstream port reset failed");
+                                    false
+                                }
+                                Err(_) => {
+                                    warn!("PIO USB hub downstream port reset timed out");
+                                    false
+                                }
+                            };
+                            #[cfg(feature = "board-cytron-motion-2350-pro")]
+                            if !port_ready {
+                                active_port = None;
+                                continue;
+                            }
+
+                            #[cfg(feature = "board-cytron-motion-2350-pro")]
+                            if let Some(frames) =
+                                application_host_state.try_snapshot_frame_service_diagnostics()
+                            {
+                                info!(
+                                    "PIO USB frames before child EP0: service={} attempts={} ok={} errors={} next={}",
+                                    frames.service_calls,
+                                    frames.marker_attempts,
+                                    frames.marker_successes,
+                                    frames.marker_failures,
+                                    frames.frame_number
+                                );
+                            }
+
+                            #[cfg(feature = "board-cytron-motion-2350-pro")]
+                            let downstream_enumeration = bus_handle
+                                .enumerate(BusRoute::Direct(speed), &mut child_configuration);
+                            #[cfg(not(feature = "board-cytron-motion-2350-pro"))]
+                            let downstream_enumeration =
+                                hub.enumerate_port(&mut child_configuration, port, speed);
+                            let downstream_result =
+                                with_timeout(Duration::from_secs(8), downstream_enumeration).await;
+                            #[cfg(feature = "board-cytron-motion-2350-pro")]
+                            if let Some(frames) =
+                                application_host_state.try_snapshot_frame_service_diagnostics()
+                            {
+                                info!(
+                                    "PIO USB frames after child EP0: service={} attempts={} ok={} errors={} next={}",
+                                    frames.service_calls,
+                                    frames.marker_attempts,
+                                    frames.marker_successes,
+                                    frames.marker_failures,
+                                    frames.frame_number
+                                );
+                            }
+                            let downstream_bad_response =
+                                application_host_state.take_bad_response_diagnostic().await;
+                            let downstream_failed = match downstream_result {
+                                Ok(Ok((child, child_configuration_len))) => {
+                                    child_address = Some(child.device_address);
+                                    if set_identity_if_current(
+                                        child_generation,
+                                        child.device_address,
+                                        child.device_desc.vendor_id,
+                                        child.device_desc.product_id,
+                                    )
+                                    .await
+                                    {
+                                        info!(
+                                            "PIO USB hub enumerated full-speed device on port {} at address {}",
+                                            port, child.device_address
+                                        );
+
+                                        if bleuio::is_bleuio(
+                                            child.device_desc.vendor_id,
+                                            child.device_desc.product_id,
+                                        ) {
+                                            match allocate_cdc_from_enumeration(
+                                                &bus_handle,
+                                                &child_configuration[..child_configuration_len],
+                                                &child,
+                                            ) {
+                                                Ok(mut cdc) => {
+                                                    let controls_ready = if cdc
+                                                        .function()
+                                                        .supports_line_requests()
+                                                    {
+                                                        matches!(
+                                                            with_timeout(
+                                                                CLASS_CONTROL_TIMEOUT,
+                                                                async {
+                                                                    cdc.set_control_line_state(
+                                                                        true, true,
+                                                                    )
+                                                                    .await?;
+                                                                    cdc.set_line_coding(
+                                                                        CdcLineCoding::eight_n_one(
+                                                                            115_200,
+                                                                        ),
+                                                                    )
+                                                                    .await?;
+                                                                    Ok::<(), CdcAcmError>(())
+                                                                },
+                                                            )
+                                                            .await,
+                                                            Ok(Ok(()))
+                                                        )
+                                                    } else {
+                                                        true
+                                                    };
+
+                                                    if controls_ready {
+                                                        cdc.reset_data_toggles();
+                                                        // Do not issue hub EP0 control transfers
+                                                        // concurrently with the continuously active
+                                                        // CDC bulk pipes.  A class-pipe failure ends
+                                                        // the manager; recovery then reads the hub
+                                                        // port status serially below.
+                                                        let hub_disconnected =
+                                                            core::future::pending::<bool>();
+                                                        let management_result =
+                                                            manage_bleuio_with_disconnect(
+                                                                hub_disconnected,
+                                                                cdc,
+                                                                child_generation,
+                                                                &mut next_bridge_session,
+                                                            )
+                                                            .await;
+
+                                                        // The class manager can end either because
+                                                        // the disconnect monitor won the race or
+                                                        // because a bulk pipe failed.  In both cases
+                                                        // its address and pipes are no longer usable.
+                                                        if let Some(address) = child_address.take()
+                                                        {
+                                                            bus_handle.free_address(address);
+                                                        }
+                                                        active_port = None;
+
+                                                        if matches!(management_result, Some(true)) {
+                                                            break 'hub;
+                                                        }
+
+                                                        match read_hub_port_state(
+                                                            &mut hub_status_pipe,
+                                                            port,
+                                                        )
+                                                        .await
+                                                        {
+                                                            Ok(state) if state.connected => {
+                                                                if state.raw_change != 0 {
+                                                                    let _ = clear_hub_port_changes(
+                                                                        &mut hub_status_pipe,
+                                                                        port,
+                                                                        state.raw_change,
+                                                                    )
+                                                                    .await;
+                                                                }
+                                                                warn!(
+                                                                    "PIO USB hub restarting connected child on port {} after class/port failure",
+                                                                    port
+                                                                );
+                                                                Timer::after_millis(100).await;
+                                                                pending_device =
+                                                                    Some((port, state.speed));
+                                                            }
+                                                            Ok(_) => {
+                                                                set_waiting().await;
+                                                                info!(
+                                                                    "PIO USB hub downstream BleuIO removed from port {}",
+                                                                    port
+                                                                );
+                                                            }
+                                                            Err(error) => {
+                                                                set_waiting().await;
+                                                                warn!(
+                                                                    "PIO USB hub port {} recovery status failed after class exit: {:?}",
+                                                                    port, error
+                                                                );
+                                                            }
+                                                        }
+                                                    } else if set_error_phase_if_current(
+                                                        child_generation,
+                                                        Phase::Enumerating,
+                                                        Phase::CdcError,
+                                                    )
+                                                    .await
+                                                    {
+                                                        warn!(
+                                                            "PIO USB hub downstream BleuIO standard controls failed"
+                                                        );
+                                                    }
+                                                }
+                                                Err(_) => {
+                                                    if set_error_phase_if_current(
+                                                        child_generation,
+                                                        Phase::Enumerating,
+                                                        Phase::CdcError,
+                                                    )
+                                                    .await
+                                                    {
+                                                        warn!(
+                                                            "PIO USB hub downstream BleuIO pipe allocation failed"
+                                                        );
+                                                    }
+                                                }
+                                            }
+                                        } else {
+                                            set_phase_if_current(
+                                                child_generation,
+                                                Phase::Enumerating,
+                                                Phase::UnsupportedDevice,
+                                            )
+                                            .await;
+                                        }
+                                    }
+                                    false
+                                }
+                                Ok(Err(error)) => {
+                                    set_enumeration_error_if_current(
+                                        child_generation,
+                                        EnumerationDiagnostic::new(
+                                            EnumerationOrigin::Enumerate,
+                                            enumeration_error(&error),
+                                            downstream_bad_response,
+                                        ),
+                                    )
+                                    .await;
+                                    warn!(
+                                        "PIO USB hub downstream enumeration failed: {}",
+                                        enumeration_error(&error).as_str()
+                                    );
+                                    if let Some(diagnostic) = downstream_bad_response {
+                                        warn!(
+                                            "PIO USB hub child EP0 failure: site={} handshake={} setup_attempts={} setup={=[u8]:02x}",
+                                            diagnostic.site.diagnostic_code(),
+                                            diagnostic
+                                                .handshake_failure
+                                                .map(HandshakeFailure::diagnostic_code)
+                                                .unwrap_or(0),
+                                            diagnostic.setup_attempts,
+                                            diagnostic.setup
+                                        );
+                                        if let Some(observation) = diagnostic.handshake_observation
+                                        {
+                                            warn!(
+                                                "PIO USB hub child EP0 RX: len={} irq={=u8:02x} bytes={=[u8]:02x} rx_pc={} edge_pc={} input={=u8:02x} inover={=u8:02x} sm_enable={=u8:02x}",
+                                                observation.len,
+                                                observation.irq_flags,
+                                                observation.bytes,
+                                                observation.rx_program_counter,
+                                                observation.edge_program_counter,
+                                                observation.input_snapshot,
+                                                observation.input_override_snapshot,
+                                                observation.sm_enable_snapshot
+                                            );
+                                        }
+                                    }
+                                    true
+                                }
+                                Err(_) => {
+                                    set_enumeration_error_if_current(
+                                        child_generation,
+                                        EnumerationDiagnostic::new(
+                                            EnumerationOrigin::Enumerate,
+                                            EnumerationErrorKind::Timeout,
+                                            downstream_bad_response,
+                                        ),
+                                    )
+                                    .await;
+                                    warn!("PIO USB hub downstream EP0 enumeration timed out");
+                                    true
+                                }
+                            };
+
+                            if downstream_failed {
+                                match with_timeout(
+                                    CLASS_CONTROL_TIMEOUT,
+                                    read_hub_port_state(&mut hub_status_pipe, port),
+                                )
+                                .await
+                                {
+                                    Ok(Ok(state)) => warn!(
+                                        "PIO USB hub port {} after child failure: status={=u16:#06x} change={=u16:#06x} connected={} enabled={} speed={:?}",
+                                        port,
+                                        state.raw_status,
+                                        state.raw_change,
+                                        state.connected,
+                                        state.enabled,
+                                        state.speed
+                                    ),
+                                    Ok(Err(_)) => warn!(
+                                        "PIO USB hub port {} status request failed after child failure",
+                                        port
+                                    ),
+                                    Err(_) => warn!(
+                                        "PIO USB hub port {} status request timed out after child failure",
+                                        port
+                                    ),
+                                }
+                            }
+                        }
+                        Either::First(Ok(HandlerEvent::HandlerEvent(
+                            HubEvent::DeviceRemoved {
+                                address: removed_address,
+                                port,
+                            },
+                        ))) => {
+                            if active_port == Some(port) {
+                                if let Some(address) = removed_address
+                                    .map(|address| address.get())
+                                    .or(child_address.take())
+                                {
+                                    bus_handle.free_address(address);
+                                }
+                                active_port = None;
+                                set_waiting().await;
+                                info!("PIO USB hub downstream device removed from port {}", port);
+                            }
+                        }
+                        Either::First(Ok(HandlerEvent::NoChange)) => {}
+                        Either::First(Ok(HandlerEvent::HandlerDisconnected))
+                        | Either::First(Err(HostError::PipeError(PipeError::Disconnected)))
+                        | Either::First(Err(HostError::NoSuchDevice)) => {
+                            break 'hub;
+                        }
+                        Either::First(Err(error)) => {
+                            warn!("PIO USB hub event poll transient error: {:?}", error);
+
+                            // embassy-usb-host 0.1 handles connection and
+                            // reset changes itself, but returns an error for
+                            // enable/suspend/over-current changes. A powered
+                            // hub can latch one of those bits while its ports
+                            // settle; if it is left uncleared, the interrupt
+                            // endpoint reports the same event forever. Sweep
+                            // every downstream port and acknowledge all USB
+                            // 2.0 port-change bits before polling again.
+                            for port in 0_u8..4 {
+                                match read_hub_port_state(&mut hub_status_pipe, port).await {
+                                    Ok(state) if state.raw_change != 0 => {
+                                        warn!(
+                                            "PIO USB hub port {} recovery: status={=u16:#06x} change={=u16:#06x}",
+                                            port, state.raw_status, state.raw_change
+                                        );
+                                        if let Err(clear_error) = clear_hub_port_changes(
+                                            &mut hub_status_pipe,
+                                            port,
+                                            state.raw_change,
+                                        )
+                                        .await
+                                        {
+                                            warn!(
+                                                "PIO USB hub port {} recovery clear failed: {:?}",
+                                                port, clear_error
+                                            );
+                                        }
+                                    }
+                                    Ok(_) => {}
+                                    Err(status_error) => warn!(
+                                        "PIO USB hub port {} recovery status failed: {:?}",
+                                        port, status_error
+                                    ),
+                                }
+                            }
+                        }
+                        Either::Second(command) => reject_command(command, Error::NotReady),
+                    }
+                }
+
+                if let Some(address) = child_address {
+                    bus_handle.free_address(address);
+                }
+                bus_handle.free_address(root_hub_address);
+                set_waiting().await;
+                info!("PIO USB hub disconnected");
+                continue 'device;
             }
 
             if speed == Speed::Low

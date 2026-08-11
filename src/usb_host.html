@@ -187,6 +187,8 @@ let audioActive=false;
 let audioMeta=null;
 let audioSpectrumData=null;
 let waveshareHost=false;
+let fruitJamHost=false;
+let cytronHost=false;
 const audioWorkerSource=`
 const N=4096,SAMPLE_RATE=48000,FIRST_BIN=16,LAST_BIN=1536;
 const ring=new Int16Array(N),real=new Float64Array(N),imag=new Float64Array(N),smoothed=new Float32Array(LAST_BIN-FIRST_BIN+1);
@@ -381,7 +383,7 @@ function updateHost(info){
  classEl.textContent=deviceClass(info);
  driverEl.textContent=driverName(info);
  baudRateEl.textContent=isFtdi(info)&&Number(info.ftdiBaudRate)>0?Number(info.ftdiBaudRate).toLocaleString()+" baud":"-";
- vbusEl.textContent=waveshareHost?"Powered from VSYS":info.phase==="POWER_OFF"?"Off":"Enabled (firmware output)";
+ vbusEl.textContent=waveshareHost?"Powered from VSYS":cytronHost?"Powered by board":info.phase==="POWER_OFF"?"Off":"Enabled (firmware output)";
  resetCauseEl.textContent=resetCauseLabel(info.resetCause);
  resetCauseEl.className=info.resetCause==="POWER_ON_OR_BROWNOUT"?"stateWait":"";
  const bridge=info.serialBridge||(info.usbHost&&info.usbHost.serialBridge)||{};
@@ -416,9 +418,11 @@ showTechnical.onchange=()=>{technicalPreference=showTechnical.checked;try{localS
 fetch("/api/status",{cache:"no-store"}).then(response=>response.json()).then(info=>{
  if(info.board){const title="Pico I/O Bridge - "+info.board;pageTitle.textContent=title;document.title=title+" - USB Host"}
  waveshareHost=info.board==="Waveshare RP2350-USB-A";
- hostControllerEl.textContent=waveshareHost?"RP2350 PIO USB host":"RP2040 PIO USB host";
- hostDataPinsEl.textContent=waveshareHost?"D+ GP12 / D− GP13":"D+ GP16 / D− GP17";
- hostVbusEl.textContent=waveshareHost?"Permanent (VSYS)":"GP18";
+ fruitJamHost=info.board==="Adafruit Fruit Jam";
+ cytronHost=info.board==="Cytron MOTION 2350 Pro";
+ hostControllerEl.textContent=(waveshareHost||fruitJamHost||cytronHost)?"RP2350 PIO USB host":"RP2040 PIO USB host";
+ hostDataPinsEl.textContent=waveshareHost?"D+ GP12 / D− GP13":fruitJamHost?"D+ GP1 / D− GP2":cytronHost?"D+ GP24 / D− GP25":"D+ GP16 / D− GP17";
+ hostVbusEl.textContent=waveshareHost?"Permanent (VSYS)":fruitJamHost?"GP11":cytronHost?"Board powered":"GP18";
  nav.textContent="";
  for(const [name,path] of Object.entries(info.pages||{})){const link=document.createElement("a");link.href=path;link.textContent=name.toUpperCase();if(name==="usb")link.className="active";nav.appendChild(link)}
 }).catch(()=>{});

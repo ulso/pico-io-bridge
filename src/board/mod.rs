@@ -16,10 +16,11 @@ use embassy_rp::gpio::{Level, Pin};
     feature = "board-adafruit-rp2040-usb-host",
     feature = "board-adafruit-kb2040",
     feature = "board-waveshare-rp2350-usb-a",
+    feature = "board-cytron-motion-2350-pro",
     feature = "board-adafruit-fruit-jam"
 )))]
 compile_error!(
-    "select one board feature: board-adafruit-rp2040-can, board-adafruit-feather-rp2040, board-adafruit-rp2040-usb-host, board-adafruit-kb2040, board-waveshare-rp2350-usb-a, or board-adafruit-fruit-jam"
+    "select one board feature: board-adafruit-rp2040-can, board-adafruit-feather-rp2040, board-adafruit-rp2040-usb-host, board-adafruit-kb2040, board-waveshare-rp2350-usb-a, board-cytron-motion-2350-pro, or board-adafruit-fruit-jam"
 );
 
 #[cfg(any(
@@ -30,6 +31,7 @@ compile_error!(
             feature = "board-adafruit-rp2040-usb-host",
             feature = "board-adafruit-kb2040",
             feature = "board-waveshare-rp2350-usb-a",
+            feature = "board-cytron-motion-2350-pro",
             feature = "board-adafruit-fruit-jam"
         )
     ),
@@ -39,6 +41,7 @@ compile_error!(
             feature = "board-adafruit-rp2040-usb-host",
             feature = "board-adafruit-kb2040",
             feature = "board-waveshare-rp2350-usb-a",
+            feature = "board-cytron-motion-2350-pro",
             feature = "board-adafruit-fruit-jam"
         )
     ),
@@ -47,6 +50,7 @@ compile_error!(
         any(
             feature = "board-adafruit-kb2040",
             feature = "board-waveshare-rp2350-usb-a",
+            feature = "board-cytron-motion-2350-pro",
             feature = "board-adafruit-fruit-jam"
         )
     ),
@@ -54,15 +58,29 @@ compile_error!(
         feature = "board-adafruit-kb2040",
         any(
             feature = "board-waveshare-rp2350-usb-a",
+            feature = "board-cytron-motion-2350-pro",
             feature = "board-adafruit-fruit-jam"
         )
     ),
     all(
         feature = "board-waveshare-rp2350-usb-a",
+        any(
+            feature = "board-cytron-motion-2350-pro",
+            feature = "board-adafruit-fruit-jam"
+        )
+    ),
+    all(
+        feature = "board-cytron-motion-2350-pro",
         feature = "board-adafruit-fruit-jam"
     )
 ))]
 compile_error!("board features are mutually exclusive; select exactly one board");
+
+#[cfg(all(
+    feature = "fruit-jam-pio-trace",
+    not(feature = "board-adafruit-fruit-jam")
+))]
+compile_error!("fruit-jam-pio-trace requires board-adafruit-fruit-jam");
 
 #[cfg(all(
     not(feature = "board-adafruit-rp2040-can"),
@@ -71,6 +89,7 @@ compile_error!("board features are mutually exclusive; select exactly one board"
         feature = "board-adafruit-rp2040-usb-host",
         feature = "board-adafruit-kb2040",
         feature = "board-waveshare-rp2350-usb-a",
+        feature = "board-cytron-motion-2350-pro",
         feature = "board-adafruit-fruit-jam"
     ),
     feature = "can"
@@ -101,6 +120,11 @@ pub(crate) use adafruit_kb2040::*;
 mod waveshare_rp2350_usb_a;
 #[cfg(feature = "board-waveshare-rp2350-usb-a")]
 pub(crate) use waveshare_rp2350_usb_a::*;
+
+#[cfg(feature = "board-cytron-motion-2350-pro")]
+mod cytron_motion_2350_pro;
+#[cfg(feature = "board-cytron-motion-2350-pro")]
+pub(crate) use cytron_motion_2350_pro::*;
 
 #[cfg(feature = "board-adafruit-fruit-jam")]
 mod adafruit_fruit_jam;

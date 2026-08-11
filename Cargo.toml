@@ -31,13 +31,25 @@ board-waveshare-rp2350-usb-a = [
     "rp2350-board",
     "embassy-rp/rp235xa",
 ]
+board-cytron-motion-2350-pro = [
+    "mdns",
+    "dhcp-server",
+    "i2c",
+    "pio-usb-host",
+    "embassy-rp-pio-usb-host/rp235xa",
+    "rp2350-board",
+    "embassy-rp/rp235xa",
+]
 board-adafruit-fruit-jam = [
     "mdns",
     "dhcp-server",
     "i2c",
+    "pio-usb-host",
+    "embassy-rp-pio-usb-host/rp235xb",
     "rp2350-board",
     "embassy-rp/rp235xb",
 ]
+fruit-jam-pio-trace = ["embassy-rp-pio-usb-host?/pio1-edge-trace"]
 rp2350-board = []
 pio-usb-host = [
     "dep:embassy-rp-pio-usb-host",
@@ -62,8 +74,7 @@ embassy-futures = { version = "0.1.2"}
 embassy-usb = { version = "0.6.0", default-features = false, features = ["defmt", "max-interface-count-4"] }
 embassy-usb-host = { version = "=0.1.0", default-features = false, optional = true }
 embassy-rp-pio-usb-host = {
-    git = "https://github.com/ulso/embassy-rp-pio-usb-host",
-    rev = "af97b63d971474fc8a7d3cc121262eb319e5a7e0",
+    path = "../embassy-rp-pio-usb-host",
     default-features = false,
     optional = true,
 }
