@@ -74,7 +74,8 @@ embassy-futures = { version = "0.1.2"}
 embassy-usb = { version = "0.6.0", default-features = false, features = ["defmt", "max-interface-count-4"] }
 embassy-usb-host = { version = "=0.1.0", default-features = false, optional = true }
 embassy-rp-pio-usb-host = {
-    path = "../embassy-rp-pio-usb-host",
+    git = "https://github.com/ulso/embassy-rp-pio-usb-host",
+    rev = "5dc18494353b3c511b54f299b679aef0951bb3b8",
     default-features = false,
     optional = true,
 }
