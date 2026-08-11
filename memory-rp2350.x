@@ -26,6 +26,26 @@ SECTIONS {
     } > FLASH
 } INSERT AFTER .text;
 
+/*
+ * Keep the optional WASM allocator backing store out of ordinary .bss.
+ *
+ * A failing combined build moved the Fruit Jam core-1 stack and PIO USB task
+ * state into a different SRAM bank group. Inserting this section after .bss
+ * preserves their hardware-tested addresses while keeping the larger WASM
+ * allocation contiguous. cortex-m-rt deliberately places __ebss after user
+ * sections inserted here, so startup still zeroes the backing store before
+ * StaticCell claims it.
+ */
+SECTIONS {
+    .wasm_heap (NOLOAD) : ALIGN(4)
+    {
+        __swasm_heap = .;
+        KEEP(*(.wasm_heap .wasm_heap.*));
+        . = ALIGN(4);
+        __ewasm_heap = .;
+    } > RAM
+} INSERT AFTER .bss;
+
 SECTIONS {
     .end_block : ALIGN(4)
     {

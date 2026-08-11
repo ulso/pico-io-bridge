@@ -37,35 +37,72 @@ The WASM runtime is not enabled by `board-adafruit-fruit-jam` itself. Omitting
 `fruit-jam-wasm-runtime` therefore continues to build the checkpoint behavior
 without wasmi.
 
-The first linked experiment ELF has these section sizes:
+This experimental branch remains Fruit Jam-only. It inherits the checkpoint's
+hub integration unchanged; that code still needs a separate `cfg` cleanup and
+RP2040 regression pass before anything is considered for `main`. The Wasmi
+feature itself is compile-time restricted to `board-adafruit-fruit-jam`.
 
-| Section | Known-good pinned rebuild | WASM experiment |
+The hardware-tested layout-preserving ELF has these section sizes:
+
+| Section | Known-good pinned rebuild | WASM layout fix |
 |---|---:|---:|
-| `.text` | 423,668 B | 923,460 B |
+| `.text` | 423,668 B | 923,260 B |
 | `.rodata` | 144,584 B | 211,796 B |
 | `.data` | 30,804 B | 30,804 B |
-| `.bss` | 205,568 B | 336,652 B |
+| `.bss` | 205,568 B | 205,580 B |
+| `.wasm_heap` | 0 B | 163,844 B |
 | `.uninit` | 1,024 B | 1,024 B |
 
-The experiment reserves a 160 KiB heap instead of the normal 32 KiB heap. The
-linked image leaves 155,796 bytes between the end of static RAM and the top of
-the 512 KiB main RAM region; that remainder still includes the core 0 stack and
-is a constraint, not free app memory. PSRAM is intentionally deferred.
+The experiment reserves a 160 KiB heap instead of the normal 32 KiB heap. A
+32 KiB compatibility cell retains the known-good addresses of the core 1 stack,
+executor and PIO USB task state. The real heap is placed in a dedicated
+zero-initialized section after ordinary `.bss`. The failing combined image had
+moved those objects by 128 KiB, from the striped SRAM0-3 region into the
+separate SRAM4-7 region. Restoring the hardware-tested addresses eliminated
+the observed enumeration regression; the precise cycle/cache mechanism has
+not been isolated further.
 
-The corresponding debug-info ELF is 21,157,868 bytes with SHA-256:
+The linked image leaves 123,024 bytes between the end of static RAM and the top
+of the 512 KiB main RAM region. The async main frame is 14,816 bytes, so this
+remainder is adequate for the smoke milestone but remains a stack constraint,
+not free app memory. PSRAM is intentionally deferred.
+
+The corresponding debug-info ELF is 21,139,876 bytes with SHA-256:
 
 ```text
-d526506c497685a9b27e3291302d5661a355bff640ef80b0e43b899be2e12509
+db54a0c0df1c95138c5f7a83a8e714340462c4abaad4dfd23544c960858d1d56
 ```
 
-The derived 2,333,696-byte RP2350 ARM Secure UF2 has SHA-256
-`7806f5322762ef195dfb03842ffe9e5190430a18efd0e01c6ff099ae7c712b7d`
+The derived 2,333,184-byte RP2350 ARM Secure UF2 has SHA-256
+`4c49fb372361eabec07ae010cebf382a0fca1533173bd85fd9ea01cd3bcfa3c4`
 and was generated with:
 
 ```console
 picotool uf2 convert pico-io-bridge.elf -t elf pico-io-bridge.uf2 -t uf2 \
   --family rp2350-arm-s --abs-block
 ```
+
+## Hardware validation
+
+The first 160 KiB build used `StaticCell::init([0; HEAP_SIZE])`. That created a
+166,400-byte async-main stack frame, exceeded the linked stack gap and cleared
+live `.bss`, including Embassy's cached system clock. `init_with` reduced the
+frame to 14,816 bytes and the embedded guest then logged `init`, `tick` and
+`WASM smoke passed` on Fruit Jam hardware.
+
+A second A/B exposed an independent layout sensitivity. The enlarged ordinary
+`.bss` moved the core 1 USB state by exactly `0x20000`; that image reached the
+root CH334F hub but never detected the connected BleuIO. Reflashing the exact
+17-hour known-good image immediately restored enumeration. Restoring the
+known-good SRAM addresses with `.wasm_heap` then produced:
+
+- `BLEUIO_READY`, full speed, address 2 and VID:PID `2DCF:6002`;
+- four active HibouAir sensors and zero errors; and
+- an increase of 12,154 received bytes and 74 sensor updates during a
+  15-second observation.
+
+The test deliberately used BOOTSEL flashing and HTTP status polling after the
+initial RTT smoke. No debugger was attached during the final USB validation.
 
 ## Guest ABI v1 smoke contract
 

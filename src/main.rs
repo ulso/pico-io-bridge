@@ -183,8 +183,24 @@ async fn main(spawner: Spawner) {
 
     #[cfg(feature = "mdns")]
     {
+        // Preserve the known-good Fruit Jam placement of all later .bss
+        // statics. The WASM heap itself lives in a dedicated section after
+        // ordinary .bss so growing it cannot move the core-1 USB state to a
+        // different SRAM bank.
+        #[cfg(feature = "fruit-jam-wasm-runtime")]
+        #[used]
+        static HEAP_LAYOUT_COMPAT: StaticCell<[u8; 32 * 1024]> = StaticCell::new();
+        #[cfg(not(feature = "fruit-jam-wasm-runtime"))]
         static HEAP_MEM: StaticCell<[u8; HEAP_SIZE]> = StaticCell::new();
-        let heap_mem = HEAP_MEM.init([0; HEAP_SIZE]);
+        #[cfg(feature = "fruit-jam-wasm-runtime")]
+        #[unsafe(link_section = ".wasm_heap")]
+        static HEAP_MEM: StaticCell<[u8; HEAP_SIZE]> = StaticCell::new();
+        #[cfg(feature = "fruit-jam-wasm-runtime")]
+        HEAP_LAYOUT_COMPAT.init_with(|| [0; 32 * 1024]);
+        // Avoid constructing the large heap backing array as a temporary on
+        // the async main task's stack. `init_with` initializes it directly in
+        // the static cell, which is essential for the 160 KiB WASM heap.
+        let heap_mem = HEAP_MEM.init_with(|| [0; HEAP_SIZE]);
         unsafe {
             HEAP.init(heap_mem.as_ptr() as usize, HEAP_SIZE);
         }
