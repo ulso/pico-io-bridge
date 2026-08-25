@@ -24,6 +24,7 @@ mod bno08x;
 mod board;
 #[cfg(feature = "can")]
 mod can;
+mod cdc_ncm;
 #[cfg(feature = "i2c")]
 mod devices;
 #[cfg(feature = "dhcp-server")]
@@ -67,8 +68,7 @@ use embassy_rp::flash::Flash;
 use embassy_rp::peripherals::USB;
 use embassy_rp::usb::{Driver, InterruptHandler};
 use embassy_time::{Duration, Timer};
-use embassy_usb::class::cdc_ncm;
-use embassy_usb::class::cdc_ncm::embassy_net::State as NcmNetState;
+use crate::cdc_ncm::embassy_net::State as NcmNetState;
 use embassy_usb::{Builder, Config as UsbConfig};
 #[cfg(feature = "mdns")]
 use embedded_alloc::LlffHeap as Heap;

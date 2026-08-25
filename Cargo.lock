@@ -596,6 +596,7 @@ version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a07d2eb9f05a6fc876500949856ea1be40773d866d8cb99384f72d0ae4568c16"
 dependencies = [
+ "defmt 1.1.0",
  "embassy-futures",
  "embassy-net-driver",
  "embassy-sync",
@@ -1620,11 +1621,13 @@ dependencies = [
  "embassy-executor",
  "embassy-futures",
  "embassy-net",
+ "embassy-net-driver-channel",
  "embassy-rp",
  "embassy-rp-pio-usb-host",
  "embassy-sync",
  "embassy-time",
  "embassy-usb",
+ "embassy-usb-driver",
  "embassy-usb-host",
  "embedded-alloc",
  "embedded-hal 1.0.0",
