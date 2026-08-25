@@ -122,6 +122,12 @@ pub(crate) fn rp_config() -> embassy_rp::config::Config {
     }
 }
 
+/// What the status indicator is showing, readable from the host. The red LED
+/// already says whether the board finished starting up, but only to someone
+/// looking at it; a boot series needs to know before it resets the board again.
+#[cfg(feature = "link-measure")]
+pub(crate) static READY: portable_atomic::AtomicBool = portable_atomic::AtomicBool::new(false);
+
 pub(crate) struct StatusIndicator {
     output: Option<Output<'static>>,
     #[cfg(feature = "board-waveshare-rp2350-usb-a")]
@@ -153,6 +159,8 @@ impl StatusIndicator {
     }
 
     pub(crate) fn set_busy(&mut self) {
+        #[cfg(feature = "link-measure")]
+        READY.store(false, portable_atomic::Ordering::Relaxed);
         if let Some(output) = self.output.as_mut() {
             output.set_high();
         }
@@ -163,6 +171,8 @@ impl StatusIndicator {
     }
 
     pub(crate) fn set_ready(&mut self) {
+        #[cfg(feature = "link-measure")]
+        READY.store(true, portable_atomic::Ordering::Relaxed);
         if let Some(output) = self.output.as_mut() {
             output.set_low();
         }

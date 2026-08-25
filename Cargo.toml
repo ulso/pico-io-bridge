@@ -39,6 +39,9 @@ board-adafruit-fruit-jam = [
     "embassy-rp/rp235xb",
 ]
 rp2350-board = []
+# Measurement harness: exposes GET /api/link-measure/reset so a boot series
+# can be driven from the host. Never part of a board profile.
+link-measure = []
 pio-usb-host = [
     "dep:embassy-rp-pio-usb-host",
     "embassy-rp-pio-usb-host/embassy-usb-host",
