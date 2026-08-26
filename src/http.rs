@@ -824,6 +824,62 @@ async fn serve_http_connection(
         }
     } else if request.starts_with("GET /api/status ") {
         write_api_status_response(socket, serial).await?;
+    } else if request.starts_with("GET /api/link-measure/reset ") {
+        // Measurement only, and behind a feature so it cannot ship by accident.
+        // Drops the USB pullup and resets, which is the same path the link
+        // watchdog takes -- a real re-attachment as far as the host is
+        // concerned, so a boot series can run without touching the cable.
+        //
+        // Use it sparingly. Driving this in a loop on the Feather RP2040 USB
+        // Host stopped the board dead twice, both times on the ninth cycle:
+        // once with the status LED lit and once dark, and in both cases gone
+        // from the USB tree entirely, recoverable only by pulling the cable.
+        // A power cycle brought it back reporting POWER_ON_OR_BROWNOUT, so
+        // nothing was damaged, but the mechanism was never identified. That
+        // board drives a powered downstream port, which a profile without the
+        // USB host layer does not; whether that is the cause is a guess.
+        // Leave generous settling time between resets, and prefer a simpler
+        // board profile for any long series.
+        #[cfg(feature = "link-measure")]
+        {
+            write_http_response(socket, "text/plain", b"resetting\n").await?;
+            let _ = socket.flush().await;
+            embassy_time::Timer::after(embassy_time::Duration::from_millis(50)).await;
+            crate::network::usb_reenumeration_reset(embassy_time::Duration::from_millis(350)).await;
+        }
+        #[cfg(not(feature = "link-measure"))]
+        {
+            write_not_found(socket).await?;
+        }
+    } else if request.starts_with("GET /api/link-measure/ready ") {
+        // Whether the board finished starting up -- mDNS, DHCP and the host
+        // silence probe included. Resetting before this is true measures the
+        // harness rather than the link.
+        #[cfg(feature = "link-measure")]
+        {
+            let ready = crate::board::READY.load(portable_atomic::Ordering::Relaxed);
+            let body: &[u8] = if ready { b"1\n" } else { b"0\n" };
+            write_http_response(socket, "text/plain", body).await?;
+        }
+        #[cfg(not(feature = "link-measure"))]
+        {
+            write_not_found(socket).await?;
+        }
+    } else if request.starts_with("GET /api/link-measure/bootsel ") {
+        // Also measurement only: drops the board into the ROM bootloader so a
+        // before-and-after series can swap firmware without a finger on the
+        // BOOTSEL button.
+        #[cfg(feature = "link-measure")]
+        {
+            write_http_response(socket, "text/plain", b"bootsel\n").await?;
+            let _ = socket.flush().await;
+            embassy_time::Timer::after(embassy_time::Duration::from_millis(50)).await;
+            embassy_rp::rom_data::reset_to_usb_boot(0, 0);
+        }
+        #[cfg(not(feature = "link-measure"))]
+        {
+            write_not_found(socket).await?;
+        }
     } else if request.starts_with("GET /api/usb-host/status ") {
         #[cfg(feature = "pio-usb-host")]
         {

@@ -6,8 +6,8 @@ use embassy_rp::peripherals::USB;
 use embassy_rp::usb::Driver;
 use embassy_time::{Duration, Timer};
 use embassy_usb::UsbDevice;
-use embassy_usb::class::cdc_ncm;
-use embassy_usb::class::cdc_ncm::embassy_net::Device as NcmDevice;
+use crate::cdc_ncm;
+use crate::cdc_ncm::embassy_net::Device as NcmDevice;
 use portable_atomic::{AtomicU32, Ordering};
 
 pub(crate) static NET_RX_PACKETS: AtomicU32 = AtomicU32::new(0);

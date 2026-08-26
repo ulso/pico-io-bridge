@@ -39,6 +39,9 @@ board-adafruit-fruit-jam = [
     "embassy-rp/rp235xb",
 ]
 rp2350-board = []
+# Measurement harness: exposes GET /api/link-measure/reset so a boot series
+# can be driven from the host. Never part of a board profile.
+link-measure = []
 pio-usb-host = [
     "dep:embassy-rp-pio-usb-host",
     "embassy-rp-pio-usb-host/embassy-usb-host",
@@ -60,6 +63,9 @@ embassy-time = { version = "0.5.1", features = ["defmt", "defmt-timestamp-uptime
 embassy-rp = { version = "0.10.0", features = ["defmt", "unstable-pac", "time-driver", "critical-section-impl"] }
 embassy-futures = { version = "0.1.2"}
 embassy-usb = { version = "0.6.0", default-features = false, features = ["defmt", "max-interface-count-4"] }
+# Named directly because src/cdc_ncm vendors embassy-usb's NCM class.
+embassy-usb-driver = { version = "0.2.2", features = ["defmt"] }
+embassy-net-driver-channel = { version = "0.4.0", features = ["defmt"] }
 embassy-usb-host = { version = "=0.1.0", default-features = false, optional = true }
 embassy-rp-pio-usb-host = {
     git = "https://github.com/ulso/embassy-rp-pio-usb-host",
